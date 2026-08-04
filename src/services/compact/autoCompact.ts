@@ -5,7 +5,10 @@ import type { QuerySource } from '../../constants/querySource.js'
 import type { ToolUseContext } from '../../Tool.js'
 import type { Message } from '../../types/message.js'
 import { getGlobalConfig } from '../../utils/config.js'
-import { getContextWindowForModel } from '../../utils/context.js'
+import {
+  COMPACT_MAX_OUTPUT_TOKENS,
+  getContextWindowForModel,
+} from '../../utils/context.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
 import { hasExactErrorMessage } from '../../utils/errors.js'
@@ -26,25 +29,23 @@ import { runPostCompactCleanup } from './postCompactCleanup.js'
 import { trySessionMemoryCompaction } from './sessionMemoryCompact.js'
 import {
   calculateAutoCompactThreshold,
+  calculateHardLimitThreshold,
+  calculateWarningThreshold,
   DEFAULT_AUTO_COMPACT_PERCENTAGE,
 } from './autoCompactPolicy.js'
-
-// Reserve this many tokens for output during compaction
-// Based on p99.99 of compact summary output being 17,387 tokens.
-const MAX_OUTPUT_TOKENS_FOR_SUMMARY = 20_000
 
 // Returns the context window size minus the max output tokens for the model
 export function getEffectiveContextWindowSize(model: string): number {
   const reservedTokensForSummary = Math.min(
     getMaxOutputTokensForModel(model),
-    MAX_OUTPUT_TOKENS_FOR_SUMMARY,
+    COMPACT_MAX_OUTPUT_TOKENS,
   )
   let contextWindow = getContextWindowForModel(model, getSdkBetas())
 
   const autoCompactWindow = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
   if (autoCompactWindow) {
-    const parsed = parseInt(autoCompactWindow, 10)
-    if (!isNaN(parsed) && parsed > 0) {
+    const parsed = Number.parseInt(autoCompactWindow, 10)
+    if (!Number.isNaN(parsed) && parsed > 0) {
       contextWindow = Math.min(contextWindow, parsed)
     }
   }
@@ -63,13 +64,14 @@ export type AutoCompactTrackingState = {
   consecutiveFailures?: number
 }
 
-// Compact before the context becomes critical. This is intentionally expressed
-// as a percentage of the effective input window rather than as a fixed token
-// buffer so the behavior is consistent across 200K and 1M contexts.
+// Compact before the context becomes critical. The warning and hard limit are
+// percentages of the effective input window so they scale with the model.
 export const AUTO_COMPACT_PERCENTAGE = DEFAULT_AUTO_COMPACT_PERCENTAGE
 // Kept for compatibility with context diagnostics; the actual trigger uses
 // AUTO_COMPACT_PERCENTAGE via getAutoCompactThreshold above.
 export const AUTOCOMPACT_BUFFER_TOKENS = 13_000
+// Retained for consumers of the context diagnostics API. Threshold decisions
+// below use percentage-based policy; these are no longer decision inputs.
 export const WARNING_THRESHOLD_BUFFER_TOKENS = 20_000
 export const ERROR_THRESHOLD_BUFFER_TOKENS = 20_000
 export const MANUAL_COMPACT_BUFFER_TOKENS = 3_000
@@ -99,17 +101,16 @@ export function calculateTokenWarningState(
   isAtBlockingLimit: boolean
 } {
   const autoCompactThreshold = getAutoCompactThreshold(model)
-  const threshold = isAutoCompactEnabled()
-    ? autoCompactThreshold
-    : getEffectiveContextWindowSize(model)
+  const effectiveContextWindow = getEffectiveContextWindowSize(model)
+  const threshold = effectiveContextWindow
 
   const percentLeft = Math.max(
     0,
     Math.round(((threshold - tokenUsage) / threshold) * 100),
   )
 
-  const warningThreshold = threshold - WARNING_THRESHOLD_BUFFER_TOKENS
-  const errorThreshold = threshold - ERROR_THRESHOLD_BUFFER_TOKENS
+  const warningThreshold = calculateWarningThreshold(effectiveContextWindow)
+  const errorThreshold = calculateHardLimitThreshold(effectiveContextWindow)
 
   const isAboveWarningThreshold = tokenUsage >= warningThreshold
   const isAboveErrorThreshold = tokenUsage >= errorThreshold
@@ -117,17 +118,15 @@ export function calculateTokenWarningState(
   const isAboveAutoCompactThreshold =
     isAutoCompactEnabled() && tokenUsage >= autoCompactThreshold
 
-  const actualContextWindow = getEffectiveContextWindowSize(model)
-  const defaultBlockingLimit =
-    actualContextWindow - MANUAL_COMPACT_BUFFER_TOKENS
+  const defaultBlockingLimit = calculateHardLimitThreshold(effectiveContextWindow)
 
   // Allow override for testing
   const blockingLimitOverride = process.env.CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE
   const parsedOverride = blockingLimitOverride
-    ? parseInt(blockingLimitOverride, 10)
-    : NaN
+    ? Number.parseInt(blockingLimitOverride, 10)
+    : Number.NaN
   const blockingLimit =
-    !isNaN(parsedOverride) && parsedOverride > 0
+    !Number.isNaN(parsedOverride) && parsedOverride > 0
       ? parsedOverride
       : defaultBlockingLimit
 

@@ -1,4 +1,3 @@
-// biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered
 import { CONTEXT_1M_BETA_HEADER } from '../constants/betas.js'
 import { getGlobalConfig } from './config.js'
 import { isEnvTruthy } from './envUtils.js'
@@ -7,6 +6,7 @@ import { getModelCapability } from './model/modelCapabilities.js'
 
 // Baseline model context window size for models without an explicit override.
 export const MODEL_CONTEXT_WINDOW_DEFAULT = 200_000
+export const VEXZY_LUNA_CONTEXT_WINDOW = 1_050_000
 
 // Maximum output tokens for compact operations
 export const COMPACT_MAX_OUTPUT_TOKENS = 20_000
@@ -33,32 +33,46 @@ export function is1mContextDisabled(): boolean {
 }
 
 export function has1mContext(model: string): boolean {
-  if (is1mContextDisabled()) {
-    return false
-  }
-  return /\[1m\]/i.test(model)
+  if (!/\[1m\]/i.test(model)) return false
+  return !is1mContextDisabled() || !isLegacyClaudeModel(model)
 }
 
-function hasDefault1mContext(model: string): boolean {
+function isLegacyClaudeModel(model: string): boolean {
+  return getCanonicalName(model).includes('claude-')
+}
+
+function getNativeVexzyContextWindow(model: string): number | undefined {
   const canonical = getCanonicalName(model)
-  return (
-    canonical.includes('gpt-5.6-luna') ||
+  if (canonical.includes('gpt-5.6-luna')) {
+    return VEXZY_LUNA_CONTEXT_WINDOW
+  }
+  return undefined
+}
+
+function getLegacyClaude1mContextWindow(model: string): number | undefined {
+  const canonical = getCanonicalName(model)
+  if (
     canonical.includes('claude-sonnet-4-6') ||
     canonical.includes('claude-opus-4-6') ||
     canonical.includes('claude-opus-4-7') ||
     canonical.includes('claude-opus-4-8') ||
     canonical.includes('claude-opus-5')
-  )
+  ) {
+    return 1_000_000
+  }
+  return undefined
 }
 
 // @[MODEL LAUNCH]: Update this pattern if the new model supports 1M context
 export function modelSupports1M(model: string): boolean {
+  const canonical = getCanonicalName(model)
+  if (canonical.includes('gpt-5.6-luna')) {
+    return true
+  }
   if (is1mContextDisabled()) {
     return false
   }
-  const canonical = getCanonicalName(model)
   return (
-    canonical.includes('gpt-5.6-luna') ||
     canonical.includes('claude-sonnet-4') ||
     canonical.includes('claude-opus-4-6') ||
     canonical.includes('claude-opus-4-7') ||
@@ -79,10 +93,25 @@ export function getContextWindowForModel(
     process.env.USER_TYPE === 'ant' &&
     process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
   ) {
-    const override = parseInt(process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, 10)
-    if (!isNaN(override) && override > 0) {
+    const override = Number.parseInt(process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, 10)
+    if (!Number.isNaN(override) && override > 0) {
       return override
     }
+  }
+
+  // Vexzy Luna has a provider-native context size. The legacy Claude 1M
+  // disable switch controls beta/legacy Claude windows only and must not
+  // downgrade this model.
+  const nativeVexzyContextWindow = getNativeVexzyContextWindow(model)
+  if (nativeVexzyContextWindow !== undefined) {
+    return nativeVexzyContextWindow
+  }
+
+  const legacyClaude1mContextWindow = is1mContextDisabled()
+    ? undefined
+    : getLegacyClaude1mContextWindow(model)
+  if (legacyClaude1mContextWindow !== undefined) {
+    return legacyClaude1mContextWindow
   }
 
   // [1m] suffix — explicit client-side opt-in, respected over all detection
@@ -90,17 +119,12 @@ export function getContextWindowForModel(
     return 1_000_000
   }
 
-  // Native 1M models in this fork default to the large context window even
-  // without an explicit [1m] suffix.
-  if (!is1mContextDisabled() && hasDefault1mContext(model)) {
-    return 1_000_000
-  }
-
   const cap = getModelCapability(model)
   if (cap?.max_input_tokens && cap.max_input_tokens >= 100_000) {
     if (
       cap.max_input_tokens > MODEL_CONTEXT_WINDOW_DEFAULT &&
-      is1mContextDisabled()
+      is1mContextDisabled() &&
+      isLegacyClaudeModel(model)
     ) {
       return MODEL_CONTEXT_WINDOW_DEFAULT
     }
@@ -133,7 +157,7 @@ export function getSonnet1mExpTreatmentEnabled(model: string): boolean {
   if (!getCanonicalName(model).includes('sonnet-4-6')) {
     return false
   }
-  return getGlobalConfig().clientDataCache?.['coral_reef_sonnet'] === 'true'
+  return getGlobalConfig().clientDataCache?.coral_reef_sonnet === 'true'
 }
 
 /**

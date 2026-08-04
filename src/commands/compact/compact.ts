@@ -125,14 +125,15 @@ export const call: LocalCommandCall = async (args, context) => {
   } catch (error) {
     if (abortController.signal.aborted) {
       throw new Error('Compaction canceled.')
-    } else if (hasExactErrorMessage(error, ERROR_MESSAGE_NOT_ENOUGH_MESSAGES)) {
-      throw new Error(ERROR_MESSAGE_NOT_ENOUGH_MESSAGES)
-    } else if (hasExactErrorMessage(error, ERROR_MESSAGE_INCOMPLETE_RESPONSE)) {
-      throw new Error(ERROR_MESSAGE_INCOMPLETE_RESPONSE)
-    } else {
-      logError(error)
-      throw new Error(`Error during compaction: ${error}`)
     }
+    if (hasExactErrorMessage(error, ERROR_MESSAGE_NOT_ENOUGH_MESSAGES)) {
+      throw new Error(ERROR_MESSAGE_NOT_ENOUGH_MESSAGES)
+    }
+    if (hasExactErrorMessage(error, ERROR_MESSAGE_INCOMPLETE_RESPONSE)) {
+      throw new Error(ERROR_MESSAGE_INCOMPLETE_RESPONSE)
+    }
+    logError(error)
+    throw new Error(`Error during compaction: ${error}`)
   }
 }
 
@@ -244,7 +245,7 @@ function buildDisplayText(
     ...(userDisplayMessage ? [userDisplayMessage] : []),
     ...(upgradeMessage ? [upgradeMessage] : []),
   ]
-  return chalk.dim('Compacted ' + dimmed.join('\n'))
+  return chalk.dim(`Compacted ${dimmed.join('\n')}`)
 }
 
 async function getCacheSharingParams(
