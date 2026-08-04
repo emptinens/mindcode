@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "typecheck": {
+    "command": "tsc --noEmit",
+    "version": "Version 5.9.3",
+    "hash": "7f65fd697d4442a921f558638cfcf899d42ce35cd43f9b7d5e695f0c0ddaccb9",
+    "count": 4909
+  },
+  "lint": {
+    "command": "biome lint src/ --max-diagnostics=none --reporter=github",
+    "version": "Version: 1.9.4",
+    "hash": "981b38c863cf5cd187c9db82e62fc04478149ff78178971520bcec7538034c7f",
+    "count": 9343
+  }
+}
