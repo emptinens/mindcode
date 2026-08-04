@@ -97,6 +97,7 @@ const TEAMMATE_ENV_VARS = [
   // VEXZY credentials/model selection and subagent behavior. tmux may start
   // a fresh login shell, so these must be forwarded explicitly.
   'ANTHROPIC_API_KEY',
+  'VEXZY_API_KEY',
   'ANTHROPIC_MODEL',
   'CLAUDE_CODE_SUBAGENT_MODEL',
   'CLAUDE_CODE_COMPACT_MODEL',
@@ -133,6 +134,10 @@ const TEAMMATE_ENV_VARS = [
   'REQUESTS_CA_BUNDLE',
   'CURL_CA_BUNDLE',
 ] as const
+
+export function isTeammateEnvVarForwarded(name: string): boolean {
+  return (TEAMMATE_ENV_VARS as readonly string[]).includes(name)
+}
 
 /**
  * Builds the `env KEY=VALUE ...` string for teammate spawn commands.

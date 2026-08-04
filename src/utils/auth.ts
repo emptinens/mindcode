@@ -63,6 +63,7 @@ import * as lockfile from './lockfile.js'
 import { logError } from './log.js'
 import { memoizeWithTTLAsync } from './memoize.js'
 import { getActiveApiOverride } from './multiAccount.js'
+import { getVexzyRuntimeApiKey, isVexzyMode } from './model/providers.js'
 import { getSecureStorage } from './secureStorage/index.js'
 import {
   clearLegacyApiKeyPrefetch,
@@ -102,6 +103,8 @@ function isManagedOAuthContext(): boolean {
 /** Whether we are supporting direct 1P auth. */
 // this code is closely related to getAuthTokenSource
 export function isAnthropicAuthEnabled(): boolean {
+  if (isVexzyMode()) return false
+
   // --bare: API-key-only, never OAuth.
   if (isBareMode()) return false
 
@@ -155,6 +158,10 @@ export function isAnthropicAuthEnabled(): boolean {
 /** Where the auth token is being sourced from, if any. */
 // this code is closely related to isAnthropicAuthEnabled
 export function getAuthTokenSource() {
+  if (isVexzyMode()) {
+    return { source: 'VEXZY_API_KEY' as const, hasToken: true }
+  }
+
   // --bare: API-key-only. apiKeyHelper (from --settings) is the only
   // bearer-token-shaped source allowed. OAuth env vars, FD tokens, and
   // keychain are ignored.
@@ -211,6 +218,7 @@ export function getAuthTokenSource() {
 
 export type ApiKeySource =
   | 'ANTHROPIC_API_KEY'
+  | 'VEXZY_API_KEY'
   | 'apiKeyHelper'
   | '/login managed key'
   | 'none'
@@ -233,6 +241,11 @@ export function getAnthropicApiKeyWithSource(
   key: null | string
   source: ApiKeySource
 } {
+  const vexzyApiKey = getVexzyRuntimeApiKey()
+  if (vexzyApiKey) {
+    return { key: vexzyApiKey, source: 'VEXZY_API_KEY' }
+  }
+
   // --bare: hermetic auth. Only ANTHROPIC_API_KEY env or apiKeyHelper from
   // the --settings flag. Never touches keychain, config file, or approval
   // lists. 3P (Bedrock/Vertex/Foundry) uses provider creds, not this path.
@@ -1276,6 +1289,8 @@ export function saveOAuthTokensIfNeeded(tokens: OAuthTokens): {
 }
 
 export const getClaudeAIOAuthTokens = memoize((): OAuthTokens | null => {
+  if (isVexzyMode()) return null
+
   // --bare: API-key-only. No OAuth env tokens, no keychain, no credentials file.
   if (isBareMode()) return null
 
@@ -1420,7 +1435,7 @@ async function handleOAuth401ErrorImpl(
  * (which don't hit the keychain), and only uses async for storage reads.
  */
 export async function getClaudeAIOAuthTokensAsync(): Promise<OAuthTokens | null> {
-  if (isBareMode()) return null
+  if (isVexzyMode() || isBareMode()) return null
 
   // Env var and FD tokens are sync and don't hit the keychain
   if (
@@ -1451,6 +1466,8 @@ export function checkAndRefreshOAuthTokenIfNeeded(
   retryCount = 0,
   force = false,
 ): Promise<boolean> {
+  if (isVexzyMode()) return Promise.resolve(false)
+
   // Deduplicate concurrent non-retry, non-force calls
   if (retryCount === 0 && !force) {
     if (pendingRefreshCheck) {
@@ -1585,7 +1602,7 @@ async function checkAndRefreshOAuthTokenIfNeededImpl(
 }
 
 export function isClaudeAISubscriber(): boolean {
-  if (!isAnthropicAuthEnabled()) {
+  if (isVexzyMode() || !isAnthropicAuthEnabled()) {
     return false
   }
 

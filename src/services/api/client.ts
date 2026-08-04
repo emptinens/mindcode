@@ -13,8 +13,11 @@ import {
 import { getUserAgent } from 'src/utils/http.js'
 import { getSmallFastModel } from 'src/utils/model/model.js'
 import {
+  VEXZY_BASE_URL,
   getAPIProvider,
+  getVexzyRuntimeApiKey,
   isFirstPartyAnthropicBaseUrl,
+  isVexzyMode,
 } from 'src/utils/model/providers.js'
 import { getProxyFetchOptions } from 'src/utils/proxy.js'
 import {
@@ -106,7 +109,9 @@ export async function getAnthropicClient({
   const containerId = process.env.CLAUDE_CODE_CONTAINER_ID
   const remoteSessionId = process.env.CLAUDE_CODE_REMOTE_SESSION_ID
   const clientApp = process.env.CLAUDE_AGENT_SDK_CLIENT_APP
-  const customHeaders = getCustomHeaders()
+  const vexzyApiKey = getVexzyRuntimeApiKey()
+  const vexzyMode = vexzyApiKey !== undefined
+  const customHeaders = getCustomHeaders(vexzyMode)
   const defaultHeaders: { [key: string]: string } = {
     'x-app': 'cli',
     'User-Agent': getUserAgent(),
@@ -118,6 +123,7 @@ export async function getAnthropicClient({
       : {}),
     // SDK consumers can identify their app/library for backend analytics
     ...(clientApp ? { 'x-client-app': clientApp } : {}),
+    ...(vexzyApiKey ? { Authorization: `Bearer ${vexzyApiKey}` } : {}),
   }
 
   // Log API client configuration for HFI debugging
@@ -133,12 +139,14 @@ export async function getAnthropicClient({
     defaultHeaders['x-anthropic-additional-protection'] = 'true'
   }
 
-  logForDebugging('[API:auth] OAuth token check starting')
-  await checkAndRefreshOAuthTokenIfNeeded()
-  logForDebugging('[API:auth] OAuth token check complete')
+  if (!vexzyMode) {
+    logForDebugging('[API:auth] OAuth token check starting')
+    await checkAndRefreshOAuthTokenIfNeeded()
+    logForDebugging('[API:auth] OAuth token check complete')
 
-  if (!isClaudeAISubscriber()) {
-    await configureApiKeyHeaders(defaultHeaders, getIsNonInteractiveSession())
+    if (!isClaudeAISubscriber()) {
+      await configureApiKeyHeaders(defaultHeaders, getIsNonInteractiveSession())
+    }
   }
 
   const resolvedFetch = buildFetch(fetchOverride, source)
@@ -154,6 +162,17 @@ export async function getAnthropicClient({
     ...(resolvedFetch && {
       fetch: resolvedFetch,
     }),
+  }
+  if (vexzyMode) {
+    // Keep Vexzy ahead of every legacy provider branch. The runtime credential
+    // is authoritative even when a parent process carried old provider flags.
+    return new Anthropic({
+      apiKey: null,
+      authToken: vexzyApiKey,
+      baseURL: VEXZY_BASE_URL,
+      ...ARGS,
+      ...(isDebugToStdErr() && { logger: createStderrLogger() }),
+    })
   }
   if (isEnvTruthy(process.env.CLAUDE_CODE_USE_BEDROCK)) {
     const { AnthropicBedrock } = await import('@anthropic-ai/bedrock-sdk')
@@ -302,7 +321,10 @@ export async function getAnthropicClient({
     return new AnthropicVertex(vertexArgs) as unknown as Anthropic
   }
 
-  // Determine authentication method based on available tokens
+  // Determine authentication method based on available tokens.
+  // Vexzy is deliberately isolated from the legacy API-key/OAuth paths:
+  // authToken produces Authorization: Bearer and apiKey=null prevents the
+  // Anthropic SDK from generating x-api-key.
   const activeApiCfg = getActiveApiOverride()
   const clientConfig: ConstructorParameters<typeof Anthropic>[0] = {
     apiKey: activeApiCfg
@@ -333,6 +355,8 @@ async function configureApiKeyHeaders(
   headers: Record<string, string>,
   isNonInteractiveSession: boolean,
 ): Promise<void> {
+  if (isVexzyMode()) return
+
   const token =
     getActiveAuthToken() ||
     (await getApiKeyFromApiKeyHelper(isNonInteractiveSession))
@@ -341,7 +365,7 @@ async function configureApiKeyHeaders(
   }
 }
 
-function getCustomHeaders(): Record<string, string> {
+function getCustomHeaders(excludeXApiKey = false): Record<string, string> {
   const customHeaders: Record<string, string> = {}
   const customHeadersEnv = process.env.ANTHROPIC_CUSTOM_HEADERS
 
@@ -359,6 +383,7 @@ function getCustomHeaders(): Record<string, string> {
     if (colonIdx === -1) continue
     const name = headerString.slice(0, colonIdx).trim()
     const value = headerString.slice(colonIdx + 1).trim()
+    if (excludeXApiKey && name.toLowerCase() === 'x-api-key') continue
     if (name) {
       customHeaders[name] = value
     }
@@ -387,6 +412,13 @@ function buildFetch(
     // Callers that want to track the ID themselves can pre-set the header.
     if (injectClientRequestId && !headers.has(CLIENT_REQUEST_ID_HEADER)) {
       headers.set(CLIENT_REQUEST_ID_HEADER, randomUUID())
+    }
+    if (isVexzyMode()) {
+      headers.delete('x-api-key')
+      const vexzyApiKey = getVexzyRuntimeApiKey()
+      if (vexzyApiKey) {
+        headers.set('Authorization', `Bearer ${vexzyApiKey}`)
+      }
     }
     try {
       // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins

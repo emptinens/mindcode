@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto'
 import { getOauthConfig } from '../constants/oauth.js'
 import type { AccountInfo, ActiveEntry, ApiConfig } from './config.js'
 import { getGlobalConfig, saveGlobalConfig } from './config.js'
+import { VEXZY_BASE_URL, getVexzyRuntimeApiKey, isVexzyMode } from './model/providers.js'
 import { getSecureStorage } from './secureStorage/index.js'
 import type { OAuthTokenData } from './secureStorage/types.js'
 
@@ -12,6 +13,8 @@ export function getActiveApiOverride(): ApiConfig | null {
 }
 
 export function getActiveBaseUrl(): string {
+  if (isVexzyMode()) return VEXZY_BASE_URL
+
   return (
     activeApiOverride?.baseUrl ??
     process.env.ANTHROPIC_BASE_URL ??
@@ -20,6 +23,8 @@ export function getActiveBaseUrl(): string {
 }
 
 export function getActiveAuthToken(): string | undefined {
+  if (isVexzyMode()) return getVexzyRuntimeApiKey()
+
   return activeApiOverride?.authToken ?? process.env.ANTHROPIC_AUTH_TOKEN
 }
 

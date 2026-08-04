@@ -95,5 +95,10 @@ export function subprocessEnv(): NodeJS.ProcessEnv {
     // secrets like INPUT_ANTHROPIC_API_KEY. No-op for vars that aren't action inputs.
     delete env[`INPUT_${k}`]
   }
+  // Vexzy workers require the runtime credential to reach the fixed base URL.
+  // Preserve the value explicitly without ever formatting or logging it.
+  if (process.env.VEXZY_API_KEY !== undefined) {
+    env.VEXZY_API_KEY = process.env.VEXZY_API_KEY
+  }
   return env
 }

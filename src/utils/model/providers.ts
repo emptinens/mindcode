@@ -1,9 +1,31 @@
 import type { AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS } from '../../services/analytics/index.js'
+import {
+  VEXZY_API_KEY_ENV,
+  VEXZY_MESSAGES_BASE_URL,
+  requireVexzyApiKey,
+} from '../../services/api/vexzy/config.js'
 import { isEnvTruthy } from '../envUtils.js'
+
+export const VEXZY_BASE_URL = VEXZY_MESSAGES_BASE_URL
+
+export function getVexzyRuntimeApiKey(
+  env: Record<string, string | undefined> = process.env,
+): string | undefined {
+  if (env[VEXZY_API_KEY_ENV] === undefined) return undefined
+  return requireVexzyApiKey(env)
+}
+
+export function isVexzyMode(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return getVexzyRuntimeApiKey(env) !== undefined
+}
 
 export type APIProvider = 'firstParty' | 'bedrock' | 'vertex' | 'foundry'
 
 export function getAPIProvider(): APIProvider {
+  if (isVexzyMode()) return 'firstParty'
+
   return isEnvTruthy(process.env.CLAUDE_CODE_USE_BEDROCK)
     ? 'bedrock'
     : isEnvTruthy(process.env.CLAUDE_CODE_USE_VERTEX)
