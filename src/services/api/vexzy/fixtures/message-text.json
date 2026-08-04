@@ -1,0 +1,18 @@
+{
+  "type": "message",
+  "id": "message_fixture",
+  "role": "assistant",
+  "model": "model_fixture",
+  "content": [
+    {
+      "type": "text",
+      "text": "sanitized_text"
+    }
+  ],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 3,
+    "output_tokens": 2
+  }
+}
