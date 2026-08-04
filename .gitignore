@@ -1,0 +1,12 @@
+.DS_Store
+node_modules/
+.npm-cache/
+dist/
+build/
+scripts/.tmp/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+*.bun-build
