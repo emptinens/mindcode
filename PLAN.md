@@ -57,8 +57,9 @@
 - Автоматический выбор другой модели Worker по сложности запрещён.
 - Fallback Worker на Sonnet, Haiku, Claude или любую другую модель запрещён.
 - В UI, логах, отчётах и runtime должна показываться фактическая модель, а не устаревшая подпись.
-- Полный список основных моделей и их возможностей будет добавлен после получения спецификации Vexzy.
-- Ожидаемое окно контекста Luna — 1 000 000 токенов; окончательное значение должно приходить из подтверждённого Vexzy capability registry и проверяться тестом.
+- Контракт Vexzy уже предоставлен; `GET https://api.echogate.one/v1/models` проверен: HTTP `200`, `33` модели.
+- Окно контекста Worker `gpt-5.6-luna` — ровно `1 050 000` токенов из API; UI может округлять отображение до `1.1M`.
+- Worker resolver обязан проверять capability registry и всегда выбирать `gpt-5.6-luna`; fallback запрещён.
 
 ### 2.3 Обязательное использование Luna-субагентов
 
@@ -463,27 +464,92 @@ type ModelCapabilities = {
 
 `/model` показывает эти возможности и меняет только Leader. Worker resolver игнорирует выбор Leader и всегда возвращает `gpt-5.6-luna`.
 
-### 8.3 Данные Vexzy, которые ещё требуются
+### 8.3 Предоставленный Vexzy contract
 
-До реализации production transport пользователь должен предоставить:
+Контракт и model list предоставлены пользователем. Проверка без сохранения credentials: `GET https://api.echogate.one/v1/models` → HTTP `200`, `33` модели.
 
-- base URL;
-- endpoint моделей;
-- endpoint генерации;
-- auth header и формат ключа;
-- streaming protocol;
-- tool-call request/response schema;
-- structured-output schema;
-- usage fields;
-- error schema;
-- retryable status/error codes;
-- rate-limit headers;
-- request cancellation;
-- список моделей;
-- thinking/effort параметры каждой модели;
-- context/output limits.
+#### Endpoints и auth
 
-До этого разрешены provider interfaces, mock transport и fixtures, но не предположения о wire-format.
+| API | Base URL | Method/path | Auth/headers |
+|---|---|---|---|
+| OpenAI-compatible | `https://api.echogate.one/v1` | `POST /chat/completions` | `Authorization: Bearer $VEXZY_API_KEY`, `Content-Type: application/json` |
+| OpenAI-compatible | `https://api.echogate.one/v1` | `POST /responses` | `Authorization: Bearer $VEXZY_API_KEY`, `Content-Type: application/json` |
+| OpenAI-compatible | `https://api.echogate.one/v1` | `GET /models` | `Authorization: Bearer $VEXZY_API_KEY` |
+| Messages-compatible | `https://api.echogate.one` | `POST /v1/messages` | `Authorization: Bearer $VEXZY_API_KEY`, `Content-Type: application/json` |
+
+OpenAI-compatible requests use `stream: true` for streaming and `reasoning_effort` with the model-supported value. A live validation on 2026-08-04 confirmed that `/v1/messages` accepts both Bearer auth and the compatibility `x-api-key` form; MindCode standardizes its own direct transport on Bearer auth so runtime does not depend on third-party SDK headers. API key is not stored in `PLAN.md`, fixtures, logs or reports; runtime reads only the secret reference and applies secret redaction.
+
+#### Documented HTTP status mapping
+
+Only these mappings are documented by the supplied contract:
+
+- `401`: auth failure → terminal; do not retry.
+- `402`: insufficient credit → terminal; do not retry.
+- `429`: rate limit → retry with bounded backoff; honor `Retry-After` when present.
+- `503`: temporary provider unavailability → retry with bounded backoff.
+- All other statuses remain generic/unknown until observed; do not assign retry, terminal, or schema semantics in advance.
+
+#### Dynamic model registry policy
+
+- `GET https://api.echogate.one/v1/models` is the authoritative runtime registry whenever it exposes a capability field; no hard-coded model allowlist or stale fallback aliases.
+- Refresh at startup and on explicit refresh, persist only sanitized capability data, and retain the last successful snapshot during transient failures.
+- Validate selected model ID, status, context window, effort/reasoning levels, input modalities and max-output metadata against the current snapshot.
+- Preserve the API-provided status exactly; do not infer additional status semantics. Unknown fields are preserved for forward compatibility.
+- Registry data is never used to alter fixed Worker resolution: Worker remains `gpt-5.6-luna`.
+
+#### Context and max-output policy
+
+- Worker `gpt-5.6-luna` context is exactly `1 050 000` from the API; UI display may round it to `1.1M`.
+- Dynamic `GET /models` max-output data is authoritative when the field is exposed.
+- Supplied exact fallback max-output overrides apply only when that field is absent:
+  - `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol`: `128000`;
+  - `claude-sonnet-5`, `claude-opus-4-8`, `claude-opus-5`: `128000`;
+  - `kimi-k3`: `131100`;
+  - `deepseek-v4-flash`: `384000`;
+  - `glm-5.2`: `131100`.
+- Overrides are keyed by exact model ID, never inferred from context size, and never silently applied to other models. No API key is included here.
+
+#### Exact model registry supplied by the user
+
+Format: `model_id | status | context_window | efforts | input modalities`.
+
+```text
+claude-fable-5 | available | 1000000 | low,medium,high,xhigh,max | text,image,file
+claude-opus-4-6 | available | 1000000 | low,medium,high,xhigh,max | text,image,file
+claude-opus-4-7 | available | 1000000 | low,medium,high,xhigh,max | text,image,file
+claude-opus-4-8 | available | 1000000 | low,medium,high,xhigh,max | text,image,file
+claude-opus-5 | maintenance | 1000000 | low,medium,high,xhigh,max | text,image,file
+claude-sonnet-4-6 | available | 1000000 | low,medium,high,xhigh,max | text,image,file
+claude-sonnet-5 | available | 1000000 | low,medium,high,xhigh,max | text,image,file
+deepseek-v3.1 | available | 1000000 | none,auto | text
+deepseek-v4-flash | available | 1000000 | none,auto | text
+deepseek-v4-pro | available | 1000000 | none,auto | text
+gemini-2.5-flash | maintenance | 1050000 | none,minimal,low,medium,high,xhigh,max | text,image,file,audio,video
+gemini-2.5-pro | maintenance | 1050000 | none,minimal,low,medium,high,xhigh,max | text,image,file,audio,video
+gemini-3.1-pro-preview | available | 1048576 | none,minimal,low,medium,high,xhigh,max | text,image,file,video
+gemini-3.5-flash | available | 1048576 | none,minimal,low,medium,high,xhigh,max | text,image,file,audio,video
+gemini-3.5-flash-lite | available | 1048576 | none,minimal,low,medium,high,xhigh,max | text,image,file,audio,video
+gemini-3.6-flash | available | 1048576 | none,minimal,low,medium,high,xhigh,max | text,image,file,audio,video
+glm-5.1 | available | 204800 | none,auto | text
+glm-5.2 | available | 1000000 | none,auto | text
+gpt-5.5 | available | 1050000 | none,low,medium,high,xhigh,max | text,image,file
+gpt-5.5-pro | available | 1050000 | medium,high,xhigh,max | text,file
+gpt-5.6-luna | available | 1050000 | none,low,medium,high,xhigh,max | text,image,file
+gpt-5.6-sol | available | 1050000 | none,low,medium,high,xhigh,max | text,image,file
+gpt-5.6-terra | available | 1050000 | none,low,medium,high,xhigh,max | text,image,file
+grok-4.5 | available | 500000 | low,medium,high,xhigh | text,image
+grok-build-0.1 | available | 256000 | auto | text
+kimi-k2.6 | available | 262144 | none,auto | text,image
+kimi-k2.7-code | available | 262144 | none,auto | text,image
+kimi-k3 | maintenance | 1048576 | auto | text,image
+minimax-m2.5 | available | 204800 | none,auto | text
+minimax-m2.7 | available | 204800 | none,auto | text
+minimax-m3 | available | 512000 | none,auto | text
+qwen-3.6-plus | available | 262144 | auto | text,image
+qwen-3.7-plus | maintenance | 991000 | auto | text,image
+```
+
+Production implementation must preserve the exact IDs above and reconcile them with the live registry; it must not substitute aliases. Stream, tool-call, usage-wire details and production fixture validation remain the only unresolved contract work.
 
 ### 8.4 Надёжность transport
 
@@ -1376,7 +1442,7 @@ Task/Teammate completion hooks не разрешают Worker завершить
 ### Фаза A — подготовка
 
 1. Утвердить `PLAN.md`.
-2. Получить Vexzy API contract и список моделей.
+2. Зафиксировать предоставленный Vexzy API contract, live model registry и production fixture validation.
 3. Выполнить полный inventory без Git-history.
 4. Зафиксировать baseline и rollback snapshot.
 5. Создать новый локальный Git и документированный импортный baseline-коммит после запуска всех доступных проверок.
@@ -1485,24 +1551,7 @@ MindCode `0.1.0` считается готовым, когда одноврем�
 
 ## 27. Данные и решения, необходимые перед production-реализацией
 
-От пользователя требуется Vexzy contract:
-
-1. Base URL.
-2. Auth header/format.
-3. Models endpoint.
-4. Completion endpoint.
-5. Streaming protocol.
-6. Tool-call schema.
-7. Structured-output schema.
-8. Usage schema.
-9. Error/retry schema.
-10. Rate-limit fields.
-11. Список моделей.
-12. Thinking/effort capabilities.
-13. Context/output limits.
-14. Cancellation semantics.
-
-Без этих данных не фиксируются сетевые предположения. Остальные provider-neutral фазы можно проектировать и тестировать на mock transport.
+Vexzy contract, endpoints, auth, status mapping, model IDs, capabilities and context limits предоставлены и зафиксированы в разделе 8.3. Перед production остаются только: streaming wire details, tool-call/structured-output wire details, usage wire details и production fixture validation. Эти детали не угадываются; provider-neutral фазы можно проектировать и тестировать на mock transport.
 
 ---
 
