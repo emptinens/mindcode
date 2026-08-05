@@ -4,6 +4,10 @@ import { getSdkBetas } from '../../bootstrap/state.js'
 import { useMainLoopModel } from '../../hooks/useMainLoopModel.js'
 import { useTerminalSize } from '../../hooks/useTerminalSize.js'
 import { Box, Text } from '../../ink.js'
+import {
+  formatVexzyCredits,
+  getSessionCreditTotals,
+} from '../../services/credits/accounting.js'
 import { getRawUtilization } from '../../services/claudeAiLimits.js'
 import { useAppState } from '../../state/AppState.js'
 import type { Message } from '../../types/message.js'
@@ -84,6 +88,7 @@ function PromptInputUsageBarsInner({
   const contextRemainingPercentage = contextPercentages.remaining ?? 100
   const contextSummary = `${formatTokens(contextUsedTokens)} / ${formatTokens(contextWindowSize)}`
   const contextDetail = `${contextUsedPercentage}% used · ${contextRemainingPercentage}% left`
+  const sessionCredits = getSessionCreditTotals()
 
   const fiveHourUsedPercentage = fiveHourLimit
     ? Math.max(0, Math.min(100, Math.round(fiveHourLimit.utilization * 100)))
@@ -109,6 +114,15 @@ function PromptInputUsageBarsInner({
         detail={contextDetail}
         barWidth={barWidth}
       />
+      <Box flexDirection="row" gap={1}>
+        <Text bold>Credits</Text>
+        <Text dimColor wrap="truncate">
+          {formatVexzyCredits(sessionCredits.totalCredits)}
+          {sessionCredits.modelsWithoutPrice > 0
+            ? ' · catalog price unavailable'
+            : ''}
+        </Text>
+      </Box>
       {shouldShowFiveHourLimit ? (
         <UsageRow
           label="5h limit"

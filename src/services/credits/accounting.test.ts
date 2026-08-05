@@ -100,4 +100,21 @@ describe("VEXZY credit accounting", () => {
     expect(totals.modelsWithoutPrice).toBe(1);
     expect(totals.totalCredits).toBeNull();
   });
+
+  test("renders session credits directly below the context usage bar", async () => {
+    const usageBars = await Bun.file(
+      new URL("../../components/PromptInput/PromptInputUsageBars.tsx", import.meta.url),
+    ).text();
+    const notifications = await Bun.file(
+      new URL("../../components/PromptInput/Notifications.tsx", import.meta.url),
+    ).text();
+
+    expect(usageBars.indexOf('<Text bold>Credits</Text>')).toBeGreaterThan(
+      usageBars.indexOf('label="Context"'),
+    );
+    expect(usageBars.indexOf('<Text bold>Credits</Text>')).toBeLessThan(
+      usageBars.indexOf('label="5h limit"'),
+    );
+    expect(notifications).not.toContain('Credits:');
+  });
 });
