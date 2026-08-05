@@ -52,7 +52,7 @@
 - `package.json` уже содержит `name: "mindcode"`, `version: "0.1.0"`, bin `mindcode` и Bun scripts.
 - `tsconfig.json` существует, содержит `strict: true`, `noEmit: true` и включает `src/**/*` и `scripts/**/*.ts`.
 - `bun run sources:check` проверяет `1929` исходных файлов; полный test-run
-  выполняет `430` тестов в `96` файлах.
+  выполняет `431` тестов в `96` файлах.
 - Команда `/copycon` существует и зарегистрирована в `src/commands.ts`.
 - `git remote -v` не выводит remote.
 - Исходный большой diff сохранён до разбиения на коммиты в локальной резервной
@@ -64,7 +64,7 @@
 
 | Проверка | Результат |
 |---|---|
-| Полный test-run | `430 pass`, `0 fail`, `96 files` |
+| Полный test-run | `431 pass`, `0 fail`, `96 files` |
 | Architectural coverage | `91.43%` (`6394/6993`), required `>=85%` |
 | `bun run lint` | PASS; baseline `8167` diagnostics |
 | `bun run typecheck` | PASS; baseline `4184` diagnostics |

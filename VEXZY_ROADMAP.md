@@ -88,7 +88,7 @@ API: VEXZY-only
 
 ### DONE — Coverage и CI baseline
 
-- `430` tests, `0` failures.
+- `431` tests, `0` failures.
 - Architectural coverage `91.43%` при gate `≥85%`.
 - Race-тесты atomic claim, dependency blocking и overlap isolation добавлены.
 - CI запускает source check, lint/typecheck baseline, tests, coverage, build и smoke.

@@ -9,7 +9,7 @@
   "lint": {
     "command": "biome lint src/ --max-diagnostics=none --reporter=github",
     "version": "Version: 1.9.4",
-    "hash": "c765651ef26cf2c74e486b529fba14b14629848552ccd3a1df596ca6eef5b363",
+    "hash": "e742c3dfa1568575bb16aac7a64d52c35b5517510cf673d0cd89850cc21aafbf",
     "count": 8167
   }
 }
