@@ -2,8 +2,6 @@ import type { EffortValue } from '../effort.js'
 
 export const DEFAULT_WORKER_COST_BUDGET = 32
 export const AGENT_COST_BUDGET_ENV = 'MINDCODE_AGENT_COST_BUDGET'
-export const DEPRECATED_WORKER_COST_BUDGET_ENV =
-  'MINDCODE_WORKER_COST_BUDGET'
 
 /** Cost units consumed by a worker lease. */
 export const SWARM_EFFORT_WEIGHTS = Object.freeze({
@@ -95,9 +93,6 @@ export type SwarmConcurrencyPolicyOptions = {
   configuredBudget?: number
   /** Environment source used when no explicit configured budget is supplied. */
   env?: Record<string, string | undefined>
-  /** Optional warning sink for the deprecated environment alias. */
-  onWarning?: (message: string) => void
-
   /** Initial known resource ceilings. Unknown components use configuredBudget. */
   budgetComponents?: SwarmBudgetComponents
   components?: SwarmBudgetComponents
@@ -123,14 +118,6 @@ export const DEFAULT_AGING_WINDOW_MS = 1_000
 
 const ABORTED_MESSAGE = 'Swarm worker acquisition aborted'
 const RESET_MESSAGE = 'Swarm concurrency policy reset'
-let deprecatedBudgetWarningIssued = false
-
-type WarningSink = (message: string) => void
-
-function defaultWarningSink(message: string): void {
-  console.warn(message)
-}
-
 function isAbortSignal(value: unknown): value is AbortSignal {
   return (
     typeof value === 'object' &&
@@ -162,38 +149,16 @@ function parseEnvironmentBudget(raw: string | undefined): number {
 }
 
 /**
- * Read the canonical budget environment variable. The old worker alias is
- * read only when the canonical variable is absent and emits one process-wide
- * migration warning when it is used.
+ * Read only the canonical budget environment variable.
  */
 export function getConfiguredSwarmWorkerBudget(
   env: Record<string, string | undefined> = process.env,
-  warningSink: WarningSink = defaultWarningSink,
 ): number {
-  const canonical = env[AGENT_COST_BUDGET_ENV]
-  if (canonical !== undefined) return parseEnvironmentBudget(canonical)
-
-  const deprecated = env[DEPRECATED_WORKER_COST_BUDGET_ENV]
-  if (deprecated !== undefined) {
-    if (!deprecatedBudgetWarningIssued) {
-      deprecatedBudgetWarningIssued = true
-      warningSink(
-        `${DEPRECATED_WORKER_COST_BUDGET_ENV} is deprecated; use ${AGENT_COST_BUDGET_ENV}`,
-      )
-    }
-    return parseEnvironmentBudget(deprecated)
-  }
-
-  return DEFAULT_WORKER_COST_BUDGET
+  return parseEnvironmentBudget(env[AGENT_COST_BUDGET_ENV])
 }
 
 /** Compatibility name for callers that used the old internal helper. */
 export const readConfiguredBudget = getConfiguredSwarmWorkerBudget
-
-/** Test-only reset for the process-wide deprecation warning latch. */
-export function resetBudgetEnvironmentWarningForTests(): void {
-  deprecatedBudgetWarningIssued = false
-}
 
 function validateWeight(value: number): number {
   if (!Number.isFinite(value) || value <= 0) {
@@ -347,7 +312,7 @@ export class AdaptiveSwarmConcurrencyPolicy {
         : options?.configuredBudget ??
           options?.costBudget ??
           options?.budget ??
-          getConfiguredSwarmWorkerBudget(options?.env, options?.onWarning)
+          getConfiguredSwarmWorkerBudget(options?.env)
 
     this.configuredBudget = validateBudget(configuredBudget)
     this.budgetComponents = initialBudgetComponents(options ?? {})

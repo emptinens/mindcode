@@ -3,10 +3,8 @@ import {
   AdaptiveSwarmConcurrencyPolicy,
   AGENT_COST_BUDGET_ENV,
   DEFAULT_WORKER_COST_BUDGET,
-  DEPRECATED_WORKER_COST_BUDGET_ENV,
   getSwarmWorkerWeight,
   MAX_FIT_BYPASSES,
-  resetBudgetEnvironmentWarningForTests,
 } from './concurrencyPolicy.js'
 
 test('maps all six VEXZY worker effort values to fixed cost weights', () => {
@@ -19,41 +17,27 @@ test('maps all six VEXZY worker effort values to fixed cost weights', () => {
   expect(getSwarmWorkerWeight(undefined)).toBe(2)
 })
 
-test('reads canonical budget env and warns once for the deprecated alias', () => {
-  resetBudgetEnvironmentWarningForTests()
-  const warnings: string[] = []
-
+test('reads only the canonical budget environment variable', () => {
   expect(
     new AdaptiveSwarmConcurrencyPolicy({
       env: { [AGENT_COST_BUDGET_ENV]: '11' },
-      onWarning: message => warnings.push(message),
     }).snapshot().configuredBudget,
   ).toBe(11)
-  expect(warnings).toEqual([])
-
-  const aliasOptions = {
-    env: { [DEPRECATED_WORKER_COST_BUDGET_ENV]: '9' },
-    onWarning: (message: string) => warnings.push(message),
-  }
-  expect(new AdaptiveSwarmConcurrencyPolicy(aliasOptions).snapshot().budget).toBe(
-    9,
-  )
-  expect(new AdaptiveSwarmConcurrencyPolicy(aliasOptions).snapshot().budget).toBe(
-    9,
-  )
-  expect(warnings).toHaveLength(1)
-  expect(warnings[0]).toContain(DEPRECATED_WORKER_COST_BUDGET_ENV)
 
   expect(
     new AdaptiveSwarmConcurrencyPolicy({
       env: {
         [AGENT_COST_BUDGET_ENV]: '13',
-        [DEPRECATED_WORKER_COST_BUDGET_ENV]: '4',
+        MINDCODE_WORKER_COST_BUDGET: '4',
       },
-      onWarning: message => warnings.push(message),
     }).snapshot().budget,
   ).toBe(13)
-  expect(warnings).toHaveLength(1)
+
+  expect(
+    new AdaptiveSwarmConcurrencyPolicy({
+      env: { MINDCODE_WORKER_COST_BUDGET: '9' },
+    }).snapshot().budget,
+  ).toBe(DEFAULT_WORKER_COST_BUDGET)
 })
 
 test('uses default budget and supports explicit constructor configuration', () => {
