@@ -174,6 +174,41 @@ describe('WorkerReport v1', () => {
     expect(absolutePath.status).toBe('partial')
   })
 
+  test('normalizes unknown fields from real Luna report responses', () => {
+    const report = buildWorkerReport({
+      taskId: 'luna-artifact',
+      status: 'completed',
+      finalText: JSON.stringify({
+        ...candidate({
+          evidence: [
+            {
+              id: 'check-1',
+              type: 'artifact',
+              calculation: '2+2=4',
+              result: 4,
+            } as WorkerReport['evidence'][number],
+          ],
+        }),
+        calculation: '2+2=4',
+        result: 4,
+        conclusion: 'Verified',
+        validation: { verdict: 'pass', details: '2+2=4' },
+      }),
+      tokensUsed: 24,
+      effortUsed: 'medium',
+    })
+
+    expect(report.status).toBe('completed')
+    expect(report.validation.verdict).toBe('pass')
+    expect(report.evidence).toEqual([{ id: 'check-1', type: 'artifact' }])
+    expect(report.evidence[0]).not.toHaveProperty('calculation')
+    expect(report.evidence[0]).not.toHaveProperty('result')
+    expect(report).not.toHaveProperty('calculation')
+    expect(report).not.toHaveProperty('result')
+    expect(report).not.toHaveProperty('conclusion')
+    expect(report.validation).toEqual({ verdict: 'pass' })
+  })
+
   test('serializes only schema fields and appends structured runtime evidence', () => {
     const report = buildWorkerReport({
       taskId: 'task-append',
@@ -189,9 +224,11 @@ describe('WorkerReport v1', () => {
     expect(buildWorkerReportInstruction('task-4', 'max')).toContain(
       'worker-report/1',
     )
-    expect(buildWorkerReportInstruction('task-4', 'max')).toContain(
-      'validation',
-    )
+    const instruction = buildWorkerReportInstruction('task-4', 'max')
+    expect(instruction).toContain('validation')
+    for (const key of ['id', 'type', 'path', 'command', 'exit_code', 'digest']) {
+      expect(instruction).toContain(key)
+    }
   })
 
   test('requires validation pass and no blockers before completion', () => {

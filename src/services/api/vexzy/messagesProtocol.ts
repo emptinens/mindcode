@@ -252,7 +252,7 @@ export interface VexzySseTextParser {
 }
 
 export function parseVexzyMessage(input: unknown): VexzyMessage {
-  return vexzyMessageSchema.parse(input)
+  return vexzyMessageSchema.parse(normalizeLunaThinkingSignatures(input))
 }
 
 export function parseVexzyStreamEvent(input: unknown): VexzyStreamEvent {
@@ -410,4 +410,31 @@ function parseJsonData(data: string): unknown {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
+}
+
+function normalizeLunaThinkingSignatures(input: unknown): unknown {
+  if (
+    !isRecord(input) ||
+    input.model !== 'gpt-5.6-luna' ||
+    !Array.isArray(input.content)
+  ) {
+    return input
+  }
+
+  let changed = false
+  const content = input.content.map(block => {
+    if (
+      !isRecord(block) ||
+      block.type !== 'thinking' ||
+      'signature' in block
+    ) {
+      return block
+    }
+    changed = true
+    return { ...block, signature: '' }
+  })
+
+  // VEXZY's non-streaming Luna response may omit the Anthropic-only signature.
+  // Keep every other model and the streaming protocol strict.
+  return changed ? { ...input, content } : input
 }

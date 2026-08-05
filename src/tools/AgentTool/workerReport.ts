@@ -201,11 +201,75 @@ function stripJsonFence(value: string): string {
   return fenced?.[1]?.trim() ?? trimmed
 }
 
+const WORKER_EVIDENCE_KEYS = [
+  'id',
+  'type',
+  'path',
+  'command',
+  'exit_code',
+  'digest',
+] as const
+
+const WORKER_REPORT_KEYS = [
+  'schema_version',
+  'task_id',
+  'run_id',
+  'worker_id',
+  'model',
+  'effort_used',
+  'policy_epoch',
+  'status',
+  'summary',
+  'changed_files',
+  'evidence',
+  'tokens_used',
+  'validation',
+  'blockers',
+] as const
+
+function pickKnownKeys(
+  source: Record<string, unknown>,
+  keys: readonly string[],
+): Record<string, unknown> {
+  return Object.fromEntries(
+    keys.flatMap(key => (key in source ? [[key, source[key]]] : [])),
+  )
+}
+
+function sanitizeCandidateEvidence(value: unknown): unknown {
+  if (!Array.isArray(value)) return value
+  return value.map(item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return item
+    const source = item as Record<string, unknown>
+    return pickKnownKeys(source, WORKER_EVIDENCE_KEYS)
+  })
+}
+
+function sanitizeCandidate(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value
+  const source = value as Record<string, unknown>
+  const sanitized = pickKnownKeys(source, WORKER_REPORT_KEYS)
+  if ('evidence' in source) {
+    sanitized.evidence = sanitizeCandidateEvidence(source.evidence)
+  }
+  if (
+    source.validation &&
+    typeof source.validation === 'object' &&
+    !Array.isArray(source.validation)
+  ) {
+    sanitized.validation = pickKnownKeys(
+      source.validation as Record<string, unknown>,
+      ['verdict'],
+    )
+  }
+  return sanitized
+}
+
 function parseCandidate(value: string | undefined): WorkerReport | null {
   if (!value?.trim()) return null
   const source = stripJsonFence(value)
   try {
-    const parsed: unknown = JSON.parse(source)
+    const parsed = sanitizeCandidate(JSON.parse(source))
     const candidate = workerReportCandidateSchema.safeParse(parsed)
     return candidate.success ? normalizeCandidate(candidate.data) : null
   } catch {
@@ -416,6 +480,6 @@ export function buildWorkerReportInstruction(
   return `<worker-report-contract>
 Return exactly one JSON object as your final answer and no prose outside it:
 ${JSON.stringify(sample)}
-Use effort_used exactly as provided. List only workspace-relative files actually changed. Evidence entries must be structured objects with type file, diff, command, test, or artifact. Set validation.verdict to pass only after the declared checks pass. Use partial, blocked, or failed when completion is not justified. Never include prompts, tool calls, or the worker transcript.
+Use exactly the top-level keys shown in the sample; put task-specific details only in summary and never add custom top-level fields. Use effort_used exactly as provided. List only workspace-relative files actually changed. Each evidence object may contain only id, type, path, command, exit_code, and digest; type must be file, diff, command, test, or artifact. Do not invent additional evidence keys; use an empty evidence array when none of those fields applies. Set validation.verdict to pass only after the declared checks pass. Use partial, blocked, or failed when completion is not justified. Never include prompts, tool calls, or the worker transcript.
 </worker-report-contract>`
 }

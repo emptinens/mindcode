@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import malformedEvent from './fixtures/malformed-event.json'
+import messageLunaThinkingToolUse from './fixtures/message-luna-thinking-tool-use.json'
 import messageText from './fixtures/message-text.json'
 import messageToolUse from './fixtures/message-tool-use.json'
 import reasoningEffortLowObservation from './fixtures/reasoning-effort-low-observation.json'
@@ -330,6 +331,12 @@ describe('Vexzy Messages-compatible protocol', () => {
     expect(() =>
       parseVexzyMessage({
         ...messageText,
+        content: [{ type: 'thinking', signature: 'missing thinking' }],
+      }),
+    ).toThrow()
+    expect(() =>
+      parseVexzyMessage({
+        ...messageText,
         content: [{ type: 'thinking', thinking: 'missing signature' }],
       }),
     ).toThrow()
@@ -403,6 +410,36 @@ describe('Vexzy Messages-compatible protocol', () => {
       parser.push('event: ping\ndata: {"type":"ping"}\n'),
     ).toEqual([])
     expect(() => parser.finish()).toThrow('blank line')
+  })
+
+  test('accepts Luna reasoning blocks without an Anthropic signature', () => {
+    const message = parseVexzyMessage(messageLunaThinkingToolUse)
+
+    expect(message.content).toMatchObject([
+      {
+        type: 'thinking',
+        thinking: 'sanitized reasoning',
+        signature: '',
+      },
+      { type: 'tool_use', name: 'Inspect', input: { path: '.' } },
+    ])
+  })
+
+  test('keeps missing Luna signatures limited to non-streaming messages', () => {
+    expect(() =>
+      parseVexzyMessage({
+        ...messageLunaThinkingToolUse,
+        content: [
+          { type: 'thinking', thinking: 'invalid null signature', signature: null },
+        ],
+      }),
+    ).toThrow()
+    expect(() =>
+      parseVexzyStreamEvent({
+        type: 'message_start',
+        message: messageLunaThinkingToolUse,
+      }),
+    ).toThrow()
   })
 
   test('records the accepted low-reasoning probe without new wire types', () => {
