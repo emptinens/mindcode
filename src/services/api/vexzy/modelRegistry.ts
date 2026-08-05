@@ -126,6 +126,58 @@ function readOutputCreditsPerMillion(model: VexzyProviderModel): number | null {
   return null
 }
 
+/**
+ * VEXZY public price snapshot supplied for this MindCode release. The live
+ * `/v1/models` payload is authoritative when it starts exposing a price; this
+ * table is the exact-ID fallback while the endpoint omits billing fields.
+ */
+export const VEXZY_OUTPUT_CREDITS_PER_MILLION = {
+  'qwen-3.6-plus': 152,
+  'kimi-k2.6': 196,
+  'minimax-m2.5': 152,
+  'minimax-m2.7': 152,
+  'glm-5.1': 239,
+  'deepseek-v3.1': 87,
+  'qwen-3.7-plus': 359,
+  'kimi-k2.7-code': 239,
+  'minimax-m3': 152,
+  'glm-5.2': 272,
+  'deepseek-v4-flash': 87,
+  'deepseek-v4-pro': 152,
+  'gemini-2.5-pro': 304,
+  'gemini-2.5-flash': 76,
+  'gpt-5.5': 587,
+  'gpt-5.5-pro': 869,
+  'gpt-5.6-luna': 37,
+  'gpt-5.6-terra': 365,
+  'gpt-5.6-sol': 631,
+  'gemini-3.5-flash': 272,
+  'gemini-3.6-flash': 228,
+  'gemini-3.1-pro-preview': 359,
+  'gemini-3.5-flash-lite': 54,
+  'claude-sonnet-4-6': 456,
+  'claude-sonnet-5': 304,
+  'claude-opus-4-6': 750,
+  'claude-opus-4-7': 750,
+  'claude-opus-4-8': 750,
+  'claude-opus-5': 684,
+  'claude-fable-5': 608,
+  'kimi-k3': 494,
+  'grok-4.5': 435,
+  'grok-build-0.1': 250,
+} as const satisfies Readonly<Record<string, number>>
+
+function getStaticOutputCreditsPerMillion(id: string): number | null {
+  return Object.prototype.hasOwnProperty.call(
+    VEXZY_OUTPUT_CREDITS_PER_MILLION,
+    id,
+  )
+    ? VEXZY_OUTPUT_CREDITS_PER_MILLION[
+        id as keyof typeof VEXZY_OUTPUT_CREDITS_PER_MILLION
+      ]
+    : null
+}
+
 export const VEXZY_OUTPUT_LIMIT_OVERRIDES = {
   'gpt-5.6-luna': 128_000,
   'gpt-5.6-terra': 128_000,
@@ -183,7 +235,9 @@ export function normalizeVexzyModel(model: VexzyProviderModel): VexzyModel {
     vision: model.capabilities.vision,
     capabilities: model.capabilities,
     outputLimit: dynamicOutputLimit ?? getStaticOutputLimit(model.id),
-    outputCreditsPerMillion: readOutputCreditsPerMillion(model),
+    outputCreditsPerMillion:
+      readOutputCreditsPerMillion(model) ??
+      getStaticOutputCreditsPerMillion(model.id),
     raw: model,
   }
 }

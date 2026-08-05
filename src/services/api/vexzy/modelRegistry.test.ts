@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import suppliedModels from './fixtures/models-supplied.json' with { type: 'json' }
 import {
   VEXZY_FIXED_WORKER_MODEL,
+  VEXZY_OUTPUT_CREDITS_PER_MILLION,
   VEXZY_OUTPUT_LIMIT_OVERRIDES,
   createVexzyModelRegistry,
   getVexzyModel,
@@ -95,7 +96,17 @@ describe('Vexzy model registry', () => {
       expect(normalized?.inputModalities).toEqual(model.input_modalities)
       expect(normalized?.outputModalities).toEqual(model.output_modalities)
       expect(normalized?.capabilities).toEqual(model.capabilities)
+      expect(normalized?.outputCreditsPerMillion).toBeGreaterThan(0)
     }
+  })
+
+  test('covers every supplied model with the public VEXZY price snapshot', () => {
+    expect(Object.keys(VEXZY_OUTPUT_CREDITS_PER_MILLION).sort()).toEqual(
+      [...suppliedModelIds].sort(),
+    )
+    expect(suppliedRegistry.get('gpt-5.6-luna')?.outputCreditsPerMillion).toBe(37)
+    expect(suppliedRegistry.get('gpt-5.6-sol')?.outputCreditsPerMillion).toBe(631)
+    expect(suppliedRegistry.get('claude-fable-5')?.outputCreditsPerMillion).toBe(608)
   })
 
   test('keeps fixed Luna resolution and output limits from the supplied contract', () => {
