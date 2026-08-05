@@ -78,7 +78,48 @@ export interface VexzyModel {
   readonly vision: boolean
   readonly capabilities: VexzyCapabilities
   readonly outputLimit: number | undefined
+  /** Output price in VEXZY credits per 1M response tokens. */
+  readonly outputCreditsPerMillion: number | null
   readonly raw: VexzyProviderModel
+}
+
+function readNonNegativeNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : null
+}
+
+function readOutputCreditsPerMillion(model: VexzyProviderModel): number | null {
+  const record = model as unknown as Record<string, unknown>
+  const sources: unknown[] = [
+    record,
+    record.pricing,
+    record.prices,
+    record.credits,
+    record.cost,
+    record.price,
+  ]
+  const keys = [
+    'output_credits_per_million',
+    'outputCreditsPerMillion',
+    'output_credits_per_1m_tokens',
+    'output_price_credits_per_million',
+    'output_credits',
+    'output_per_million',
+    'output_price',
+    'output',
+    'completion_credits_per_million',
+    'completionPriceCreditsPerMillion',
+  ]
+  for (const source of sources) {
+    if (source === null || typeof source !== 'object') continue
+    const sourceRecord = source as Record<string, unknown>
+    for (const key of keys) {
+      const price = readNonNegativeNumber(sourceRecord[key])
+      if (price !== null) return price
+    }
+  }
+  return null
 }
 
 export const VEXZY_OUTPUT_LIMIT_OVERRIDES = {
@@ -138,6 +179,7 @@ export function normalizeVexzyModel(model: VexzyProviderModel): VexzyModel {
     vision: model.capabilities.vision,
     capabilities: model.capabilities,
     outputLimit: dynamicOutputLimit ?? getStaticOutputLimit(model.id),
+    outputCreditsPerMillion: readOutputCreditsPerMillion(model),
     raw: model,
   }
 }

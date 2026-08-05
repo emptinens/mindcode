@@ -1,11 +1,12 @@
+import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { calculateVexzyCredits } from "../../services/credits/accounting.js";
 import {
+  type StatusReportData,
   generateStatusHtmlReport,
   renderStatusHtml,
-  type StatusReportData,
 } from "./report.js";
 
 const originalConfigDir = process.env.MINDCODE_CONFIG_DIR;
@@ -48,6 +49,17 @@ function fixture(): StatusReportData {
         cacheWriteTokens: 100,
         reasoningTokens: 400,
         webSearchRequests: 2,
+        priceCreditsPerMillion: 100,
+        credits: calculateVexzyCredits(
+          {
+            inputTokens: 1_000,
+            outputTokens: 2_000,
+            cacheReadTokens: 300,
+            cacheWriteTokens: 100,
+            reasoningTokens: 400,
+          },
+          100,
+        ),
       },
     ],
     scheduler: {
@@ -66,6 +78,20 @@ function fixture(): StatusReportData {
       compactTokens: 978_500,
     },
     taskGraph: "initialized",
+    credits: {
+      ...calculateVexzyCredits(
+        {
+          inputTokens: 1_000,
+          outputTokens: 2_000,
+          cacheReadTokens: 300,
+          cacheWriteTokens: 100,
+          reasoningTokens: 400,
+        },
+        100,
+      ),
+      requests: 7,
+      modelsWithoutPrice: 0,
+    },
   };
 }
 
@@ -80,6 +106,8 @@ describe("status HTML report", () => {
     expect(html).toContain("12 active / 32 total weight");
     expect(html).toContain("Retry overhead");
     expect(html).toContain("875,500 tokens");
+    expect(html).toContain("Session credits");
+    expect(html).toContain("Input credits");
   });
 
   test("contains compact self-contained Sakura report without legacy branding", () => {
@@ -87,7 +115,7 @@ describe("status HTML report", () => {
     const normalized = html.toLowerCase();
 
     expect(html).toContain("<svg");
-    expect(html).toContain("@media(prefers-reduced-motion:reduce)");
+    expect(html).toContain("color-scheme:light");
     expect(html).toContain("@keyframes fall");
     expect(html).not.toMatch(/<script\b/i);
     expect(html).not.toMatch(/https?:\/\//i);

@@ -31,6 +31,7 @@ import { IdeStatusIndicator } from '../IdeStatusIndicator.js';
 import { MemoryUsageIndicator } from '../MemoryUsageIndicator.js';
 import { SentryErrorBoundary } from '../SentryErrorBoundary.js';
 import { TokenWarning } from '../TokenWarning.js';
+import { formatVexzyCredits, getSessionCreditTotals } from '../../services/credits/accounting.js';
 import { SandboxPromptFooterHint } from './SandboxPromptFooterHint.js';
 
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -277,6 +278,7 @@ function NotificationContent({
   const isBriefOnly = feature('KAIROS') || feature('KAIROS_BRIEF') ?
   // biome-ignore lint/correctness/useHookAtTopLevel: feature() is a compile-time constant
   useAppState(s_1 => s_1.isBriefOnly) : false;
+  const sessionCredits = getSessionCreditTotals();
 
   // When voice is actively recording or processing, replace all
   // notifications with just the voice indicator.
@@ -319,6 +321,7 @@ function NotificationContent({
           </Text>
         </Box>}
       {!isBriefOnly && <TokenWarning tokenUsage={tokenUsage} model={mainLoopModel} />}
+      {!isBriefOnly && <Box><Text dimColor wrap="truncate">Credits: {formatVexzyCredits(sessionCredits.totalCredits)}{sessionCredits.modelsWithoutPrice > 0 ? ' · catalog price unavailable' : ''}</Text></Box>}
       {shouldShowAutoUpdater && <AutoUpdaterWrapper verbose={verbose} onAutoUpdaterResult={onAutoUpdaterResult} autoUpdaterResult={autoUpdaterResult} isUpdating={isAutoUpdating} onChangeIsUpdating={onChangeIsUpdating} showSuccessMessage={!isShowingCompactMessage} />}
       {feature('VOICE_MODE') ? voiceEnabled && voiceError && <Box>
               <Text color="error" wrap="truncate">

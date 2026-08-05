@@ -70,6 +70,15 @@ describe('Vexzy model catalog', () => {
     expect(toVexzyModelCatalogOption(firstModel)).toEqual(firstOption)
   })
 
+  test('normalizes VEXZY output credit pricing from the catalog', () => {
+    const registry = createVexzyModelRegistry({
+      object: 'list',
+      data: [{ ...model('priced-model'), pricing: { output_credits_per_million: 37 } }],
+    })
+
+    expect(registry.get('priced-model')?.outputCreditsPerMillion).toBe(37)
+  })
+
   test('deduplicates concurrent loads through the shared model client', async () => {
     let calls = 0
     let release: (() => void) | undefined

@@ -283,6 +283,27 @@ function addToTotalModelUsage(
   modelUsage.outputTokens += usage.output_tokens;
   modelUsage.cacheReadInputTokens += usage.cache_read_input_tokens ?? 0;
   modelUsage.cacheCreationInputTokens += usage.cache_creation_input_tokens ?? 0;
+  const usageRecord = usage as unknown as Record<string, unknown>;
+  const completionDetails =
+    usageRecord.completion_tokens_details ?? usageRecord.output_tokens_details;
+  const reasoningTokens =
+    typeof usageRecord.reasoning_tokens === "number"
+      ? usageRecord.reasoning_tokens
+      : typeof usageRecord.reasoningTokens === "number"
+        ? usageRecord.reasoningTokens
+        : completionDetails &&
+            typeof completionDetails === "object" &&
+            typeof (completionDetails as Record<string, unknown>)
+              .reasoning_tokens === "number"
+          ? ((completionDetails as Record<string, unknown>)
+              .reasoning_tokens as number)
+          : 0;
+  const usageWithReasoning = modelUsage as ModelUsage & {
+    reasoningTokens?: number;
+  };
+  usageWithReasoning.reasoningTokens =
+    (usageWithReasoning.reasoningTokens ?? 0) +
+    (Number.isFinite(reasoningTokens) ? Math.max(0, reasoningTokens) : 0);
   modelUsage.webSearchRequests +=
     usage.server_tool_use?.web_search_requests ?? 0;
   modelUsage.costUSD += cost;
