@@ -2,6 +2,7 @@
 node_modules/
 .npm-cache/
 .mindcode/
+.codex-backups/
 .claude/
 .mcp.json
 dist/
