@@ -14,11 +14,9 @@ const PETAL_COLOR = "rgb(255,153,204)";
 const PETAL_HIGHLIGHT = "rgb(255,190,224)";
 const TRUNK_COLOR = "rgb(177,105,79)";
 
-type Props = {
-  pose?: SakuraPose;
-};
+type Props = { pose?: SakuraPose };
 
-/** MindCode's compact Sakura tree mascot. */
+/** MindCode's compact, connected Sakura tree mascot. */
 export function Sakura({ pose = "default" }: Props): React.ReactNode {
   const frame = SAKURA_ART[pose];
   return (
@@ -30,13 +28,13 @@ export function Sakura({ pose = "default" }: Props): React.ReactNode {
     >
       {frame.map((row, index) => (
         <Text
-          key={row}
+          key={`${pose}-${row}`}
           color={
-            index === 0
-              ? PETAL_HIGHLIGHT
-              : index < 4
-                ? PETAL_COLOR
-                : TRUNK_COLOR
+            index < 4
+              ? index === 0
+                ? PETAL_HIGHLIGHT
+                : PETAL_COLOR
+              : TRUNK_COLOR
           }
         >
           {row}

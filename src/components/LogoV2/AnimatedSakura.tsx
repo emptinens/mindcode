@@ -14,9 +14,9 @@ const FRAME_MS = 90;
 const IDLE_FRAME = -1;
 const SEQUENCE: readonly SakuraPose[] = [
   "default",
-  "look-right",
+  "fall-right",
   "bloom",
-  "look-left",
+  "fall-left",
   "default",
 ];
 

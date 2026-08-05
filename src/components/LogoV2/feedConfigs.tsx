@@ -30,16 +30,19 @@ export function createWhatsNewFeed(releaseNotes: string[]): FeedConfig {
   }
 }
 
+const sanitizeWelcomeText = (text: string): string =>
+  text.replace(/\bClaude\b/gi, 'MindCode')
+
 export function createProjectOnboardingFeed(steps: Step[]): FeedConfig {
   const enabledSteps = steps
     .filter(({ isEnabled }) => isEnabled)
     .sort((a, b) => Number(a.isComplete) - Number(b.isComplete))
   const lines: FeedLine[] = enabledSteps.map(({ text, isComplete }) => ({
-    text: (isComplete ? figures.tick + ' ' : '') + text,
+    text: sanitizeWelcomeText((isComplete ? figures.tick + ' ' : '') + text),
   }))
   if (getCwd() === homedir()) {
     lines.push({
-      text: 'Note: You have launched MindCode in your home directory. For the best experience, launch it in a project directory instead.',
+      text: sanitizeWelcomeText('Note: You have launched MindCode in your home directory. For the best experience, launch it in a project directory instead.'),
     })
   }
   return { title: 'Tips for getting started', lines }
