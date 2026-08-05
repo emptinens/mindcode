@@ -24,8 +24,7 @@ function getReadyModels() {
 /** Select the first available exact ID from the provider catalog. */
 function getCatalogDefaultModel(): ModelName {
   const models = getReadyModels().filter(model => model.available)
-  const worker = models.find(model => model.id === VEXZY_FIXED_WORKER_MODEL)
-  return worker?.id ?? models[0]?.id ?? VEXZY_FIXED_WORKER_MODEL
+  return models[0]?.id ?? VEXZY_FIXED_WORKER_MODEL
 }
 
 export function getSmallFastModel(): ModelName {
