@@ -3,8 +3,7 @@ import type { Command } from '../../commands.js'
 const status = {
   type: 'local-jsx',
   name: 'status',
-  description:
-    'Show runtime status; use /status html for a detailed session report',
+  description: 'Generate a detailed local session report; use /status ui for the panel',
   immediate: true,
   load: () => import('./status.js'),
 } satisfies Command

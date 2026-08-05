@@ -97,6 +97,16 @@ function fixture(): StatusReportData {
 }
 
 describe("status HTML report", () => {
+  test("plain /status generates HTML while /status ui preserves the panel", async () => {
+    const source = await Bun.file(
+      new URL("./status.tsx", import.meta.url),
+    ).text();
+
+    expect(source).toContain("mode === '' || mode === 'html'");
+    expect(source).toContain("mode === 'ui' || mode === 'panel'");
+    expect(source).toContain("generateStatusHtmlReport()");
+  });
+
   test("escapes dynamic values and renders scheduler metrics", () => {
     const html = renderStatusHtml(fixture());
 
