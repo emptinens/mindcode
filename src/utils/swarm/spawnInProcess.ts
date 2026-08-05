@@ -29,7 +29,7 @@ import { registerCleanup } from '../cleanupRegistry.js'
 import { logForDebugging } from '../debug.js'
 import { emitTaskTerminatedSdk } from '../sdkEventQueue.js'
 import { evictTaskOutput } from '../task/diskOutput.js'
-import type { EffortValue } from '../effort.js'
+import { resolveWorkerEffort, type WorkerEffortInput } from './backends/types.js'
 import {
   evictTerminalTask,
   registerTask,
@@ -72,8 +72,8 @@ export type InProcessSpawnConfig = {
   planModeRequired: boolean
   /** Optional model override for this teammate */
   model?: string
-  /** Reasoning effort for this teammate; undefined inherits the leader. */
-  effort?: EffortValue
+  /** Reasoning effort for this teammate; omitted values resolve to medium. */
+  effort?: WorkerEffortInput
 }
 
 /**
@@ -114,10 +114,11 @@ export async function spawnInProcessTeammate(
 ): Promise<InProcessSpawnOutput> {
   const { name, teamName, prompt, color, planModeRequired, model } = config
   const { setAppState } = context
-  const workerLease = await acquireSwarmWorkerSlot(
-    config.teamName,
-    context.abortController?.signal,
-  )
+  const resolvedEffort = resolveWorkerEffort(config.effort)
+  const workerLease = await acquireSwarmWorkerSlot(config.teamName, {
+    effort: resolvedEffort,
+    signal: context.abortController?.signal,
+  })
 
   // Generate deterministic agent ID
   const agentId = formatAgentId(name, teamName)

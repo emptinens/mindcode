@@ -21,6 +21,7 @@ import type {
   TeammateSpawnConfig,
   TeammateSpawnResult,
 } from './types.js'
+import { resolveWorkerRuntime } from './types.js'
 
 /**
  * InProcessBackend implements TeammateExecutor for in-process teammates.
@@ -84,6 +85,9 @@ export class InProcessBackend implements TeammateExecutor {
 
     logForDebugging(`[InProcessBackend] spawn() called for ${config.name}`)
 
+    const { model: workerModel, effort: workerEffort } = resolveWorkerRuntime(
+      config.effort,
+    )
     const result = await spawnInProcessTeammate(
       {
         name: config.name,
@@ -91,7 +95,8 @@ export class InProcessBackend implements TeammateExecutor {
         prompt: config.prompt,
         color: config.color,
         planModeRequired: config.planModeRequired ?? false,
-        effort: config.effort,
+        model: workerModel,
+        effort: workerEffort,
       },
       this.context,
     )
@@ -123,8 +128,8 @@ export class InProcessBackend implements TeammateExecutor {
         toolUseContext: { ...this.context, messages: [] },
         abortController: result.abortController,
         concurrencyLeaseId: result.concurrencyLeaseId,
-        model: config.model,
-        effort: config.effort,
+        model: workerModel,
+        effort: workerEffort,
         systemPrompt: config.systemPrompt,
         systemPromptMode: config.systemPromptMode,
         allowedTools: config.permissions,

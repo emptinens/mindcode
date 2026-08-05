@@ -4,6 +4,7 @@ import { formatAgentId, parseAgentId } from '../../../utils/agentId.js'
 import { quote } from '../../../utils/bash/shellQuote.js'
 import { registerCleanup } from '../../../utils/cleanupRegistry.js'
 import { logForDebugging } from '../../../utils/debug.js'
+import { FIXED_SUBAGENT_MODEL } from '../../../utils/model/subagentModel.js'
 import { jsonStringify } from '../../../utils/slowOperations.js'
 import { writeToMailbox } from '../../../utils/teammateMailbox.js'
 import { readTeamFile } from '../teamHelpers.js'
@@ -22,6 +23,7 @@ import {
   type PaneTeammateTerminalStatus,
 } from '../lifecyclePolicy.js'
 import { isInsideTmux } from './detection.js'
+import { resolveWorkerEffort } from './types.js'
 import type {
   BackendType,
   PaneBackend,
@@ -122,10 +124,11 @@ export class PaneBackendExecutor implements TeammateExecutor {
       }
     }
 
-    const workerLease = await acquireSwarmWorkerSlot(
-      config.teamName,
-      config.abortSignal,
-    )
+    const resolvedEffort = resolveWorkerEffort(config.effort)
+    const workerLease = await acquireSwarmWorkerSlot(config.teamName, {
+      effort: resolvedEffort,
+      signal: config.abortSignal,
+    })
     let createdPaneId: string | undefined
     let createdPaneUsesExternalSession = false
 
@@ -173,22 +176,17 @@ export class PaneBackendExecutor implements TeammateExecutor {
         permissionMode: appState.toolPermissionContext.mode,
       })
 
-      // If teammate has a custom model, add --model flag (or replace inherited one)
-      if (config.model) {
-        inheritedFlags = inheritedFlags
-          .split(' ')
-          .filter(
-            (flag, i, arr) => flag !== '--model' && arr[i - 1] !== '--model',
-          )
-          .join(' ')
-        inheritedFlags = inheritedFlags
-          ? `${inheritedFlags} --model ${quote([config.model])}`
-          : `--model ${quote([config.model])}`
-      }
-
-      if (config.effort !== undefined) {
-        inheritedFlags = `${inheritedFlags} --effort ${quote([String(config.effort)])}`
-      }
+      // Every pane worker is pinned to Luna; never inherit another model.
+      inheritedFlags = inheritedFlags
+        .split(' ')
+        .filter(
+          (flag, i, arr) => flag !== '--model' && arr[i - 1] !== '--model',
+        )
+        .join(' ')
+      inheritedFlags = inheritedFlags
+        ? `${inheritedFlags} --model ${quote([FIXED_SUBAGENT_MODEL])}`
+        : `--model ${quote([FIXED_SUBAGENT_MODEL])}`
+      inheritedFlags = `${inheritedFlags} --effort ${quote([resolvedEffort])}`
 
       const flagsStr = inheritedFlags ? ` ${inheritedFlags}` : ''
       const workingDir = config.cwd
