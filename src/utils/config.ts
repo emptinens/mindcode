@@ -502,7 +502,7 @@ export type GlobalConfig = {
   // Teammate spawn mode: 'auto' | 'tmux' | 'in-process'
   teammateMode?: 'auto' | 'tmux' | 'in-process' // How to spawn teammates (default: 'auto')
   // Legacy persisted teammate-model preference. Runtime worker routing ignores
-  // this field and always uses the fixed Luna model.
+  // this field and uses the dedicated /submodel setting.
   teammateDefaultModel?: string | null
 
   // PR status footer configuration (feature-flagged via GrowthBook)

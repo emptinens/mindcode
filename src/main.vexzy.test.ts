@@ -35,6 +35,7 @@ describe('main.tsx VEXZY-only startup regression', () => {
       'process.env.MINDCODE_MODEL',
       "'--model <model>'",
       "'--agent-teams'",
+      'persistent /submodel selection',
       'runHeadless',
       'launchRepl',
       'getMindCodeMcpConfigs',
