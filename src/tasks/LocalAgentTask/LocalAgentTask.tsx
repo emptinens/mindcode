@@ -542,6 +542,7 @@ export function registerAgentForeground({
 }): {
   taskId: string;
   backgroundSignal: Promise<void>;
+  abortController: AbortController;
   cancelAutoBackground?: () => void;
 } {
   void initTaskOutputAsSymlink(agentId, getAgentTranscriptPath(asAgentId(agentId)));
@@ -609,6 +610,7 @@ export function registerAgentForeground({
   return {
     taskId: agentId,
     backgroundSignal,
+    abortController,
     cancelAutoBackground
   };
 }

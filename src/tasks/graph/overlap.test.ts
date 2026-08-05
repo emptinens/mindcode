@@ -96,6 +96,53 @@ describe("atomic overlap validation", () => {
     expect(result.decision.conflicts[0]?.kinds).toEqual(["write_read"]);
   });
 
+  test("blocks scoped targets against legacy targets in either route order", () => {
+    const legacyFirst = graph();
+    legacyFirst.route({ id: "legacy", write_set: ["src/shared.ts"] });
+    const scopedAfter = legacyFirst.route({
+      id: "scoped",
+      write_set: [".mindcode-target-scope/hash-a/src/shared.ts"],
+    });
+    expect(scopedAfter.decision.action).toBe("blocked");
+
+    const scopedFirst = graph();
+    scopedFirst.route({
+      id: "scoped",
+      write_set: [".mindcode-target-scope/hash-a/src/shared.ts"],
+    });
+    const legacyAfter = scopedFirst.route({
+      id: "legacy",
+      write_set: ["src/shared.ts"],
+    });
+    expect(legacyAfter.decision.action).toBe("blocked");
+  });
+
+  test("allows scoped targets with different hashes", () => {
+    const taskGraph = graph();
+    taskGraph.route({
+      id: "scoped-a",
+      write_set: [".mindcode-target-scope/hash-a/src/shared.ts"],
+    });
+    const result = taskGraph.route({
+      id: "scoped-b",
+      write_set: [".mindcode-target-scope/hash-b/src/shared.ts"],
+    });
+    expect(result.decision.action).toBe("allow");
+  });
+
+  test("blocks identical scoped targets", () => {
+    const taskGraph = graph();
+    taskGraph.route({
+      id: "scoped-a",
+      write_set: [".mindcode-target-scope/hash-a/src/shared.ts"],
+    });
+    const result = taskGraph.route({
+      id: "scoped-b",
+      write_set: [".mindcode-target-scope/hash-a/src/shared.ts"],
+    });
+    expect(result.decision.action).toBe("blocked");
+  });
+
   test("terminal tasks do not block a new route", () => {
     const taskGraph = graph();
     taskGraph.route({ id: "finished", write_set: ["src/a.ts"] });

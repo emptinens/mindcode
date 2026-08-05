@@ -44,4 +44,9 @@ describe('main.tsx VEXZY-only startup regression', () => {
       expect(runtimeSource).toContain(retained)
     }
   })
+
+  test('does not invalidate the ready catalog with a redundant startup refresh', () => {
+    expect(runtimeSource).toContain('await fetchBootstrapData()')
+    expect(runtimeSource).not.toContain('refreshModelCapabilities')
+  })
 })

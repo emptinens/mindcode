@@ -485,7 +485,7 @@ export function renderToolUseProgressMessage(progressMessages: ProgressMessage<P
     } = getProgressStats();
     return <MessageResponse height={1}>
         <Text dimColor>
-          In progress… · <Text bold>{toolUseCount}</Text> tool{' '}
+          {getAgentPreflightStatus(progressMessages)} · <Text bold>{toolUseCount}</Text> tool{' '}
           {toolUseCount === 1 ? 'use' : 'uses'}
           {tokens && ` · ${formatNumber(tokens)} tokens`} ·{' '}
           <ConfigurableShortcutHint action="app:toggleTranscript" context="Global" fallback="ctrl+o" description="expand" parens />
@@ -515,16 +515,16 @@ export function renderToolUseProgressMessage(progressMessages: ProgressMessage<P
     }
     return data.message.message.content.some(content => content.type === 'tool_use');
   });
-  const firstData = progressMessages[0]?.data;
-  const prompt = firstData && hasProgressMessage(firstData) ? firstData.prompt : undefined;
+  const firstAgentProgress = progressMessages.find(message => hasProgressMessage(message.data));
+  const prompt = firstAgentProgress && hasProgressMessage(firstAgentProgress.data) ? firstAgentProgress.data.prompt : undefined;
 
   // After grouping, displayedMessages can be empty when the only progress so
   // far is an assistant tool_use for a search/read op (grouped but not yet
-  // counted, since counts increment on tool_result). Fall back to the
-  // initializing text so MessageResponse doesn't render a bare ⎿.
+  // counted, since counts increment on tool_result). Show the latest lifecycle
+  // status so MessageResponse doesn't render a bare ⎿.
   if (displayedMessages.length === 0 && !(isTranscriptMode && prompt)) {
     return <MessageResponse height={1}>
-        <Text dimColor>{INITIALIZING_TEXT}</Text>
+        <Text dimColor>{getAgentPreflightStatus(progressMessages)}</Text>
       </MessageResponse>;
   }
   const {
@@ -665,7 +665,7 @@ export function renderGroupedAgentToolUse(toolUses: Array<{
     result
   }) => {
     const stats = calculateAgentStats(progressMessages);
-    const lastToolInfo = extractLastToolInfo(progressMessages, tools);
+    const lastToolInfo = extractLastToolInfo(progressMessages, tools) ?? getAgentPreflightStatus(progressMessages);
     const parsedInput = inputSchema().safeParse(param.input);
 
     // teammate_spawned is not part of the exported Output type (cast through unknown
@@ -859,4 +859,58 @@ export function extractLastToolInfo(progressMessages: ProgressMessage<Progress>[
 }
 function isCustomSubagentType(subagentType: string | undefined): subagentType is string {
   return !!subagentType && subagentType !== GENERAL_PURPOSE_AGENT.agentType && subagentType !== 'worker';
+}
+
+type AgentPreflightProgress = {
+  type: 'agent_preflight_progress';
+  phase: 'preparing' | 'worktree' | 'dependencies' | 'scheduler' | 'starting';
+  message: string;
+  taskId: string;
+};
+
+const PREFLIGHT_PHASE_TEXT: Record<AgentPreflightProgress['phase'], string> = {
+  preparing: 'Preparing agent…',
+  worktree: 'Preparing isolated worktree…',
+  dependencies: 'Validating task dependencies…',
+  scheduler: 'Waiting for worker budget…',
+  starting: 'Starting worker…'
+};
+
+function isAgentPreflightProgress(data: Progress): data is Progress & AgentPreflightProgress {
+  if (typeof data !== 'object' || data === null) return false;
+  const candidate = data as Partial<AgentPreflightProgress>;
+  return candidate.type === 'agent_preflight_progress' && typeof candidate.message === 'string' && typeof candidate.phase === 'string' && candidate.phase in PREFLIGHT_PHASE_TEXT;
+}
+
+/**
+ * Returns a concrete status for the preflight gap before the first tool
+ * progress message arrives. Newer payloads may provide phase/progress
+ * metadata; the existing message-only payload remains fully supported.
+ */
+export function getAgentPreflightStatus(progressMessages: ProgressMessage<Progress>[]): string {
+  for (let index = progressMessages.length - 1; index >= 0; index -= 1) {
+    const data = progressMessages[index]?.data;
+    if (data && isAgentPreflightProgress(data)) {
+      const phase = data.phase as AgentPreflightProgress['phase'];
+      return data.message.trim() || PREFLIGHT_PHASE_TEXT[phase];
+    }
+    // Once worker progress arrives it supersedes every earlier preflight
+    // stage. Scanning in event order prevents a stale "Starting worker…"
+    // label from masking live tool/response activity.
+    if (data && hasProgressMessage(data)) {
+      if (data.message.type === 'user') {
+        return data.message.message.content.some((content: { type: string }) => content.type === 'tool_result')
+          ? 'Processing tool result…'
+          : 'Starting worker…';
+      }
+      if (data.message.type === 'assistant') {
+        return data.message.message.content.some((content: { type: string }) => content.type === 'tool_use')
+          ? 'Executing tools…'
+          : 'Generating response…';
+      }
+      return 'Running agent…';
+    }
+  }
+
+  return progressMessages.length === 0 ? INITIALIZING_TEXT : 'Preparing agent…';
 }

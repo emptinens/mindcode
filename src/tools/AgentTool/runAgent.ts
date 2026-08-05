@@ -256,6 +256,7 @@ export async function* runAgent({
   toolUseContext,
   canUseTool,
   isAsync,
+  isBackgrounded,
   canShowPermissionPrompts,
   forkContextMessages,
   querySource,
@@ -279,6 +280,9 @@ export async function* runAgent({
   toolUseContext: ToolUseContext
   canUseTool: CanUseToolFn
   isAsync: boolean
+  /** Dynamic foreground-to-background handoff state. Unlike isAsync, this
+   * may change after the query iterator has started. */
+  isBackgrounded?: () => boolean
   /** Whether this agent can show permission prompts. Defaults to !isAsync.
    * Set to true for in-process teammates that run async but share the terminal. */
   canShowPermissionPrompts?: boolean
@@ -425,6 +429,7 @@ export async function* runAgent({
   const agentGetAppState = () => {
     const state = toolUseContext.getAppState()
     let toolPermissionContext = state.toolPermissionContext
+    const currentlyBackgrounded = isBackgrounded?.() === true
 
     // Override permission mode if agent defines one (unless parent is bypassPermissions, acceptEdits, or auto)
     if (
@@ -451,7 +456,7 @@ export async function* runAgent({
         ? !canShowPermissionPrompts
         : agentPermissionMode === 'bubble'
           ? false
-          : isAsync
+          : isAsync || currentlyBackgrounded
     if (shouldAvoidPrompts) {
       toolPermissionContext = {
         ...toolPermissionContext,
@@ -464,7 +469,7 @@ export async function* runAgent({
     // Since these are background agents, waiting is fine — the user should
     // only be interrupted when automated checks can't resolve the permission.
     // This applies to bubble mode (always) and explicit canShowPermissionPrompts.
-    if (isAsync && !shouldAvoidPrompts) {
+    if ((isAsync || currentlyBackgrounded) && !shouldAvoidPrompts) {
       toolPermissionContext = {
         ...toolPermissionContext,
         awaitAutomatedChecksBeforeDialog: true,
@@ -503,9 +508,14 @@ export async function* runAgent({
     }
   }
 
+  const canTransitionToBackground = isBackgrounded !== undefined
   const resolvedTools = useExactTools
     ? availableTools
-    : resolveAgentTools(agentDefinition, availableTools, isAsync).resolvedTools
+    : resolveAgentTools(
+        agentDefinition,
+        availableTools,
+        isAsync || canTransitionToBackground,
+      ).resolvedTools
 
   const additionalWorkingDirectories = Array.from(
     appState.toolPermissionContext.additionalWorkingDirectories.keys(),
@@ -671,11 +681,16 @@ export async function* runAgent({
 
   // Build agent-specific options
   const agentOptions: ToolUseContext['options'] = {
-    isNonInteractiveSession: useExactTools
-      ? toolUseContext.options.isNonInteractiveSession
-      : isAsync
-        ? true
-        : (toolUseContext.options.isNonInteractiveSession ?? false),
+    // Foreground agents can be handed off without restarting their iterator.
+    // Keep this property live so post-handoff tool execution cannot open an
+    // interactive prompt in a detached task.
+    get isNonInteractiveSession() {
+      return useExactTools
+        ? toolUseContext.options.isNonInteractiveSession
+        : isAsync || isBackgrounded?.() === true
+          ? true
+          : (toolUseContext.options.isNonInteractiveSession ?? false)
+    },
     appendSystemPrompt: toolUseContext.options.appendSystemPrompt,
     tools: allTools,
     commands: [],
@@ -709,8 +724,11 @@ export async function* runAgent({
     readFileState: agentReadFileState,
     abortController: agentAbortController,
     getAppState: agentGetAppState,
-    // Sync agents share these callbacks with parent
-    shareSetAppState: !isAsync,
+    // A foreground iterator that may detach starts with isolated mutable
+    // state and the async-safe tool set. That avoids retaining root UI state
+    // writers after the handoff while still allowing foreground permission
+    // decisions through the dynamic getAppState wrapper above.
+    shareSetAppState: !isAsync && !canTransitionToBackground,
     shareSetResponseLength: true, // Both sync and async contribute to response metrics
     criticalSystemReminder_EXPERIMENTAL:
       agentDefinition.criticalSystemReminder_EXPERIMENTAL,

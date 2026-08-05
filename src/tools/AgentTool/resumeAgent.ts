@@ -1,5 +1,9 @@
-import { promises as fsp } from 'fs'
-import { getSdkAgentProgressSummariesEnabled } from '../../bootstrap/state.js'
+import { promises as fsp } from 'node:fs'
+import { createHash } from 'node:crypto'
+import {
+  getSdkAgentProgressSummariesEnabled,
+  getSessionId,
+} from '../../bootstrap/state.js'
 import {
   getSystemPrompt,
   getWorkerPolicySnapshot,
@@ -7,11 +11,16 @@ import {
 import { isCoordinatorMode } from '../../coordinator/coordinatorMode.js'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 import type { ToolUseContext } from '../../Tool.js'
-import { registerAsyncAgent } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
+import type { TaskRecord } from '../../tasks/graph/index.js'
+import { openTaskGraph } from '../../tasks/graph/taskGraph.js'
+import {
+  killAsyncAgent,
+  registerAsyncAgent,
+} from '../../tasks/LocalAgentTask/LocalAgentTask.js'
 import { assembleToolPool } from '../../tools.js'
 import { asAgentId } from '../../types/ids.js'
 import { runWithAgentContext } from '../../utils/agentContext.js'
-import { runWithCwdOverride } from '../../utils/cwd.js'
+import { getCwd, runWithCwdOverride } from '../../utils/cwd.js'
 import { logForDebugging } from '../../utils/debug.js'
 import {
   createUserMessage,
@@ -32,6 +41,7 @@ import {
   asSystemPrompt,
 } from '../../utils/systemPromptType.js'
 import { getTaskOutputPath } from '../../utils/task/diskOutput.js'
+import { getTask, getTaskListId } from '../../utils/tasks.js'
 import { getParentSessionId } from '../../utils/teammate.js'
 import { reconstructForSubagentResume } from '../../utils/toolResultStorage.js'
 import { createAgentId } from '../../utils/uuid.js'
@@ -42,6 +52,76 @@ import type { AgentDefinition } from './loadAgentsDir.js'
 import { isBuiltInAgent } from './loadAgentsDir.js'
 import { runAgent } from './runAgent.js'
 import { filterWorkerTools } from './workerTools.js'
+import {
+  acquireWorkerExecution,
+  getWorkerRuntimeScope,
+} from './workerLifecycle.js'
+
+const RUNTIME_TASK_PREFIX = 'mindcode-agent-runtime:'
+const TARGET_SCOPE_PREFIX = '.mindcode-target-scope/'
+
+function runtimeTaskPrefix(runtimeScope: string): string {
+  return `${RUNTIME_TASK_PREFIX}${createHash('sha256')
+    .update(runtimeScope)
+    .digest('hex')
+    .slice(0, 24)}:`
+}
+
+function publicTaskId(taskId: string): string {
+  if (!taskId.startsWith(RUNTIME_TASK_PREFIX)) return taskId
+  const encoded = taskId.slice(taskId.lastIndexOf(':') + 1)
+  try {
+    return Buffer.from(encoded, 'base64url').toString('utf8')
+  } catch {
+    return taskId
+  }
+}
+
+function publicTarget(target: string): string {
+  if (!target.startsWith(TARGET_SCOPE_PREFIX)) return target
+  const separator = target.indexOf('/', TARGET_SCOPE_PREFIX.length)
+  return separator === -1 ? target : target.slice(separator + 1)
+}
+
+function findPriorWorkerTask(agentId: string, runtimeScope: string): TaskRecord | null {
+  const graph = openTaskGraph()
+  try {
+    const currentPrefix = runtimeTaskPrefix(runtimeScope)
+    const matches = graph
+      .list()
+      .filter(task => publicTaskId(task.id) === agentId)
+      .sort((left, right) => {
+        const leftTime = Date.parse(left.started_at ?? left.finished_at ?? '')
+        const rightTime = Date.parse(right.started_at ?? right.finished_at ?? '')
+        return rightTime - leftTime
+      })
+    // A pending task from this runtime is the released execution being
+    // resumed. Reusing its public ID preserves the graph's idempotency entry;
+    // terminal or stale-runtime rows need a fresh graph task for this run.
+    return (
+      matches.find(
+        task => task.status === 'pending' && task.id.startsWith(currentPrefix),
+      ) ?? matches[0] ?? null
+    )
+  } finally {
+    graph.close()
+  }
+}
+
+function resumeWorkerTaskId(
+  agentId: string,
+  runId: string,
+  priorTask: TaskRecord | null,
+  runtimeScope: string,
+): string {
+  if (
+    priorTask?.status === 'pending' &&
+    priorTask.id.startsWith(runtimeTaskPrefix(runtimeScope))
+  ) {
+    return agentId
+  }
+  return runId
+}
 
 export type ResumeAgentResult = {
   agentId: string
@@ -213,15 +293,49 @@ export async function resumeAgentBackground({
     contentReplacementState: resumedReplacementState,
   }
 
-  // Skip name-registry write — original entry persists from the initial spawn
-  const agentBackgroundTask = registerAsyncAgent({
+  const workerRunId = createAgentId('run')
+  const runtimeScope = getWorkerRuntimeScope(getSessionId(), getCwd())
+  const targetScope = resumedWorktreePath ?? getCwd()
+  const priorTask = findPriorWorkerTask(agentId, runtimeScope)
+  const executionTaskId = resumeWorkerTaskId(
     agentId,
-    description: uiDescription,
-    prompt,
-    selectedAgent,
-    setAppState: rootSetAppState,
-    toolUseId: toolUseContext.toolUseId,
-  })
+    workerRunId,
+    priorTask,
+    runtimeScope,
+  )
+  const effort = resolveWorkerEffort(meta?.effort)
+
+  // Resume must acquire a fresh scheduler and task-graph lifecycle before the
+  // replacement LocalAgentTask is registered. Reusing a pending row is safe;
+  // terminal rows receive a new run ID while retaining their target sets so
+  // overlap validation still gates the resumed work.
+  const workerExecution = await acquireWorkerExecution(
+    {
+      taskId: executionTaskId,
+      owner: workerRunId,
+      schedulerScope: `${getParentSessionId() ?? 'leader'}:${getCwd()}`,
+      effort,
+      filesTouched: priorTask?.files_touched.map(publicTarget),
+      readSet: priorTask?.read_set.map(publicTarget),
+      writeSet: priorTask?.write_set.map(publicTarget),
+      // A reused pending row keeps its existing dependencies atomically.
+      // A fresh resume run must not inherit already-satisfied or stale IDs
+      // from a terminal execution in another runtime namespace.
+      isolation: resumedWorktreePath ? 'worktree' : 'shared',
+      runtimeScope,
+      targetScope,
+      signal: toolUseContext.abortController.signal,
+    },
+    {
+      resolveExternalDependency: async dependencyId => {
+        const dependency = await getTask(getTaskListId(), dependencyId)
+        if (!dependency) return 'missing'
+        if (dependency.status === 'completed') return 'completed'
+        if (dependency.status === 'failed') return 'failed'
+        return 'incomplete'
+      },
+    },
+  )
 
   const metadata = {
     prompt,
@@ -231,10 +345,10 @@ export async function resumeAgentBackground({
     agentType: selectedAgent.agentType,
     isAsync: true,
     taskId: agentId,
-    runId: createAgentId('run'),
+    runId: workerRunId,
     workerId: agentId,
     policyEpoch: 0,
-    effort: resolveWorkerEffort(meta?.effort),
+    effort,
   }
 
   const asyncAgentContext = {
@@ -251,35 +365,74 @@ export async function resumeAgentBackground({
   const wrapWithCwd = <T>(fn: () => T): T =>
     resumedWorktreePath ? runWithCwdOverride(resumedWorktreePath, fn) : fn()
 
-  void runWithAgentContext(asyncAgentContext, () =>
-    wrapWithCwd(() =>
-      runAsyncAgentLifecycle({
-        taskId: agentBackgroundTask.agentId,
-        abortController: agentBackgroundTask.abortController!,
-        makeStream: onCacheSafeParams =>
-          runAgent({
-            ...runAgentParams,
-            override: {
-              ...runAgentParams.override,
-              agentId: asAgentId(agentBackgroundTask.agentId),
-              abortController: agentBackgroundTask.abortController!,
-            },
-            onCacheSafeParams,
-          }),
-        metadata,
-        description: uiDescription,
-        toolUseContext,
-        rootSetAppState,
-        agentIdForCleanup: agentId,
-        enableSummarization:
-          isCoordinatorMode() ||
-          isForkSubagentEnabled() ||
-          getSdkAgentProgressSummariesEnabled(),
-        getWorktreeResult: async () =>
-          resumedWorktreePath ? { worktreePath: resumedWorktreePath } : {},
-      }),
-    ),
-  )
+  const settleWorkerExecution = (action: 'complete' | 'fail' | 'release') => {
+    try {
+      workerExecution[action]()
+    } catch (error) {
+      logForDebugging(
+        `Failed to ${action} resumed task graph lifecycle for ${agentId}: ${String(error)}`,
+        { level: 'error' },
+      )
+    }
+  }
+
+  let executionHandedOff = false
+  let registeredAsyncAgent = false
+  try {
+    // Skip name-registry write — original entry persists from the initial spawn
+    const agentBackgroundTask = registerAsyncAgent({
+      agentId,
+      description: uiDescription,
+      prompt,
+      selectedAgent,
+      setAppState: rootSetAppState,
+      toolUseId: toolUseContext.toolUseId,
+    })
+    registeredAsyncAgent = true
+
+    const asyncLifecycle = runWithAgentContext(asyncAgentContext, () =>
+      wrapWithCwd(() =>
+        runAsyncAgentLifecycle({
+          taskId: agentBackgroundTask.agentId,
+          abortController: agentBackgroundTask.abortController!,
+          makeStream: onCacheSafeParams =>
+            runAgent({
+              ...runAgentParams,
+              override: {
+                ...runAgentParams.override,
+                agentId: asAgentId(agentBackgroundTask.agentId),
+                abortController: agentBackgroundTask.abortController!,
+              },
+              onCacheSafeParams,
+            }),
+          metadata,
+          description: uiDescription,
+          toolUseContext,
+          rootSetAppState,
+          agentIdForCleanup: agentId,
+          enableSummarization:
+            isCoordinatorMode() ||
+            isForkSubagentEnabled() ||
+            getSdkAgentProgressSummariesEnabled(),
+          getWorktreeResult: async () =>
+            resumedWorktreePath ? { worktreePath: resumedWorktreePath } : {},
+          onExecutionCompleted: () => settleWorkerExecution('complete'),
+          onExecutionFailed: () => settleWorkerExecution('fail'),
+          onExecutionReleased: () => settleWorkerExecution('release'),
+        }),
+      ),
+    )
+    executionHandedOff = true
+    void asyncLifecycle
+  } catch (error) {
+    if (!executionHandedOff) {
+      if (registeredAsyncAgent) {
+        killAsyncAgent(agentId, rootSetAppState)
+      }
+      settleWorkerExecution('release')
+    }
+    throw error
+  }
 
   return {
     agentId,

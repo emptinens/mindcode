@@ -141,7 +141,6 @@ import { errorMessage, getErrnoCode, isENOENT } from 'src/utils/errors.js';
 import { getFsImplementation, safeResolvePath } from 'src/utils/fsOperations.js';
 import { gracefulShutdown, gracefulShutdownSync } from 'src/utils/gracefulShutdown.js';
 import { setAllHookEventsEnabled } from 'src/utils/hooks/hookEvents.js';
-import { refreshModelCapabilities } from 'src/utils/model/modelCapabilities.js';
 import { peekForStdinData, writeToStderr } from 'src/utils/process.js';
 import { setCwd } from 'src/utils/Shell.js';
 import { type ProcessedResume, processResumedConversation } from 'src/utils/sessionRestore.js';
@@ -378,7 +377,9 @@ export function startDeferredPrefetches(): void {
   // Analytics and feature flag initialization
   void initializeAnalyticsGates();
   void prefetchOfficialMcpUrls();
-  void refreshModelCapabilities();
+  // The required startup catalog fetch already returned current capabilities.
+  // Starting a second refresh here temporarily hides the ready registry and
+  // races the first prompt/context lookup, especially in --print mode.
 
   // File change detectors deferred from init() to unblock first render
   void settingsChangeDetector.initialize();

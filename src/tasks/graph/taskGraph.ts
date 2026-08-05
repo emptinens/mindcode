@@ -1542,6 +1542,61 @@ export class TaskGraph {
     return row === null ? null : rowToLease(row);
   }
 
+  renewLease(
+    leaseId: string,
+    options: {
+      owner?: string;
+      ttl_ms?: number;
+      ttlMs?: number;
+      now?: string | Date;
+    } = {},
+  ): TaskLease | null {
+    this.assertOpen();
+    const id = this.normalizeLeaseId(leaseId);
+    if (id === undefined) {
+      return null;
+    }
+    const owner =
+      options.owner === undefined
+        ? undefined
+        : assertNonEmptyString(options.owner, "owner");
+    const ttl = normalizeTtl(options.ttl_ms ?? options.ttlMs, this.leaseTtlMs);
+    const now = normalizeNow(options.now, this.clock);
+    const expiresAt = new Date(new Date(now).getTime() + ttl).toISOString();
+
+    return this.withWriteTransaction(() => {
+      this.expireLeasesInTransaction(now);
+
+      const lease = this.readLeaseInTransaction(id);
+      if (lease === null) {
+        return null;
+      }
+      if (owner !== undefined && lease.owner !== owner) {
+        throw new LeaseOwnerMismatchError(id);
+      }
+      if (lease.released_at !== null) {
+        return rowToLease(lease);
+      }
+
+      const task = this.readTaskInTransaction(lease.task_id);
+      if (
+        task === null ||
+        task.lease_id !== id ||
+        (task.status !== "claimed" && task.status !== "running")
+      ) {
+        return rowToLease(lease);
+      }
+
+      this.db
+        .prepare(
+          "UPDATE task_leases SET expires_at = ? WHERE lease_id = ? AND released_at IS NULL",
+        )
+        .run(expiresAt, id);
+      this.bumpGraphVersionInTransaction();
+      return this.requireLeaseInTransaction(id);
+    });
+  }
+
   releaseLease(
     leaseId: string,
     options: LeaseReleaseOptions | string = {},

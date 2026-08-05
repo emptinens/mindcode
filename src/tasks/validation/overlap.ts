@@ -38,6 +38,65 @@ const TERMINAL_STATUSES = new Set<TaskStatus>([
   "cancelled",
 ]);
 
+const TARGET_SCOPE_PREFIX = ".mindcode-target-scope/";
+
+interface ScopedTarget {
+  hash: string;
+  logicalPath: string;
+}
+
+interface TargetLookup {
+  exact: Set<string>;
+  legacy: Set<string>;
+  scopedByLogicalPath: Map<string, Set<string>>;
+}
+
+function parseScopedTarget(target: string): ScopedTarget | null {
+  if (!target.startsWith(TARGET_SCOPE_PREFIX)) return null;
+  const scopedPath = target.slice(TARGET_SCOPE_PREFIX.length);
+  const separator = scopedPath.indexOf("/");
+  if (separator <= 0 || separator === scopedPath.length - 1) return null;
+  return {
+    hash: scopedPath.slice(0, separator),
+    logicalPath: scopedPath.slice(separator + 1),
+  };
+}
+
+function indexTargets(targets: Iterable<string>): TargetLookup {
+  const lookup: TargetLookup = {
+    exact: new Set<string>(),
+    legacy: new Set<string>(),
+    scopedByLogicalPath: new Map<string, Set<string>>(),
+  };
+  for (const target of targets) {
+    lookup.exact.add(target);
+    const scoped = parseScopedTarget(target);
+    if (!scoped) {
+      lookup.legacy.add(target);
+      continue;
+    }
+    const hashes = lookup.scopedByLogicalPath.get(scoped.logicalPath);
+    if (hashes) {
+      hashes.add(scoped.hash);
+    } else {
+      lookup.scopedByLogicalPath.set(
+        scoped.logicalPath,
+        new Set([scoped.hash]),
+      );
+    }
+  }
+  return lookup;
+}
+
+function targetsOverlap(target: string, existing: TargetLookup): boolean {
+  if (existing.exact.has(target)) return true;
+  const scoped = parseScopedTarget(target);
+  if (!scoped) {
+    return existing.scopedByLogicalPath.has(target);
+  }
+  return existing.legacy.has(scoped.logicalPath);
+}
+
 export function effectiveTargetSets(
   task: Pick<OverlapCandidate, "files_touched" | "read_set" | "write_set"> & {
     explicit_sets?: boolean;
@@ -71,23 +130,23 @@ export function findOverlaps(
     // Build each task's access lookup once. This keeps the public arrays
     // unchanged while replacing repeated Array.includes scans with O(1) Set
     // membership checks.
-    const existingWrites = new Set(existingSets.write_set);
-    const existingReads = new Set(existingSets.read_set);
+    const existingWrites = indexTargets(existingSets.write_set);
+    const existingReads = indexTargets(existingSets.read_set);
     const paths = new Set<string>();
     const kinds = new Set<OverlapKind>();
 
     for (const path of candidateWrites) {
-      if (existingWrites.has(path)) {
+      if (targetsOverlap(path, existingWrites)) {
         paths.add(path);
         kinds.add("write_write");
       }
-      if (existingReads.has(path)) {
+      if (targetsOverlap(path, existingReads)) {
         paths.add(path);
         kinds.add("write_read");
       }
     }
     for (const path of candidateReads) {
-      if (existingWrites.has(path)) {
+      if (targetsOverlap(path, existingWrites)) {
         paths.add(path);
         kinds.add("write_read");
       }

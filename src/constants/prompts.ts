@@ -872,7 +872,7 @@ export async function computeSimpleEnvInfo(
     knowledgeCutoffMessage,
     process.env.USER_TYPE === 'ant' && isUndercover()
       ? null
-      : `The Vexzy model registry is authoritative. Use exact model IDs returned by Vexzy. The active Leader model is '${model}', and every Worker uses 'gpt-5.6-luna'.`,
+      : `The Vexzy model registry is authoritative. Use exact model IDs returned by Vexzy. The active Leader model is '${modelId}', and every Worker uses 'gpt-5.6-luna'.`,
     process.env.USER_TYPE === 'ant' && isUndercover()
       ? null
       : `MindCode runs as a local terminal coding agent through the Vexzy API.`,

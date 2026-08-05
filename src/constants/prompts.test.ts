@@ -26,6 +26,11 @@ describe("MindCode canonical prompts", () => {
     expect(PROMPTS_SOURCE).not.toMatch(FORBIDDEN_BRANDING);
   });
 
+  test("uses the computeSimpleEnvInfo modelId parameter", () => {
+    expect(PROMPTS_SOURCE).toContain("active Leader model is '${modelId}'");
+    expect(PROMPTS_SOURCE).not.toContain("active Leader model is '${model}'");
+  });
+
   test("wires the bounded contract into Leader and Worker prompt entry points", () => {
     expect(PROMPTS_SOURCE).toContain("export function getAgentToolSection()");
     expect(PROMPTS_SOURCE).toContain("MINDCODE_LEADER_WORKER_ARCHITECTURE");
