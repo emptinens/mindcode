@@ -1,14 +1,23 @@
-import { afterEach, describe, expect, test } from 'bun:test'
-import {
-  configureVexzyModelCatalog,
-  resetVexzyModelCatalog,
-} from '../../services/api/vexzy/modelCatalog.js'
-import { createVexzyModelRegistry } from '../../services/api/vexzy/modelRegistry.js'
-import {
+import { afterEach, describe, expect, mock, test } from 'bun:test'
+
+const agentSdkTypesMock = () => ({ HOOK_EVENTS: ['PreToolUse'] as const })
+mock.module('src/entrypoints/agentSdkTypes.js', agentSdkTypesMock)
+mock.module(
+  new URL('../../entrypoints/agentSdkTypes.ts', import.meta.url).pathname,
+  agentSdkTypesMock,
+)
+
+const { configureVexzyModelCatalog, resetVexzyModelCatalog } = await import(
+  '../../services/api/vexzy/modelCatalog.js'
+)
+const { createVexzyModelRegistry } = await import(
+  '../../services/api/vexzy/modelRegistry.js'
+)
+const {
   FixedSubagentModelUnavailableError,
   getAgentModel,
   resolveFixedSubagentModel,
-} from './agent.js'
+} = await import('./agent.js')
 
 const model = (overrides: Record<string, unknown> = {}) => ({
   id: 'gpt-5.6-luna',

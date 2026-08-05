@@ -77,7 +77,13 @@ export const workerReportSchema = z
     task_id: boundedId,
     run_id: boundedId,
     worker_id: boundedId,
-    model: z.string().min(1),
+    model: z
+      .string()
+      .min(1)
+      .refine(
+        model => model === getConfiguredSubagentModel(),
+        'model must match the configured VEXZY Worker model',
+      ),
     effort_used: z.enum(WORKER_REPORT_EFFORTS),
     policy_epoch: z.number().int().nonnegative().finite(),
     status: z.enum(WORKER_REPORT_STATUSES),

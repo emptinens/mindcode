@@ -7,7 +7,6 @@ import {
   getConfiguredSubagentModel,
 } from './subagentModel.js'
 
-export const AGENT_MODEL_OPTIONS = [FIXED_SUBAGENT_MODEL] as const
 export type AgentModelAlias = ModelAlias | 'inherit'
 
 export type AgentModelOption = {
@@ -93,10 +92,16 @@ export function getAgentModelDisplay(_model: string | undefined): string {
  * Get available model options for agents
  */
 export function getAgentModelOptions(): AgentModelOption[] {
+  let model: string
+  try {
+    model = resolveFixedSubagentModel()
+  } catch {
+    return []
+  }
   return [
     {
-      value: getConfiguredSubagentModel(),
-      label: getAgentModelDisplay(undefined),
+      value: model,
+      label: getAgentModelDisplay(model),
       description: 'Configured exact VEXZY model for every Worker/subagent',
     },
   ]

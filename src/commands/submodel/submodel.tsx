@@ -2,24 +2,13 @@ import * as React from 'react'
 import { Box, Text } from '../../ink.js'
 import { Select } from '../../components/CustomSelect/index.js'
 import type { LocalJSXCommandCall } from '../../types/command.js'
-import { getDefaultVexzyModelCatalog, loadVexzyModelCatalog } from '../../services/api/vexzy/modelCatalog.js'
-import { getConfiguredSubagentModel, persistSubagentModel } from '../../utils/model/subagentModel.js'
-
-export async function setSubmodel(model: string): Promise<string> {
-  const entry = getDefaultVexzyModelCatalog().registry?.get(model)
-  if (!entry || !entry.available || !entry.tools || !entry.capabilities.tools) {
-    throw new Error(`Model '${model}' is not an available VEXZY tool model`)
-  }
-  const result = persistSubagentModel(model)
-  if (result.error) throw result.error
-  return `Worker/subagent model set to ${model}`
-}
+import { loadVexzyModelCatalog } from '../../services/api/vexzy/modelCatalog.js'
+import { getConfiguredSubagentModel } from '../../utils/model/subagentModel.js'
+import { getSubmodelOptions, setSubmodel } from './modelSelection.js'
 
 function SubmodelPicker({ onDone }: { onDone: (message: string) => void }) {
   const current = getConfiguredSubagentModel()
-  const options = getDefaultVexzyModelCatalog().getOptions()
-    .filter(option => option.available)
-    .map(option => ({ value: option.value, label: option.displayName, description: option.description }))
+  const options = getSubmodelOptions()
   return <Box flexDirection="column">
     <Text bold>Worker/subagent model</Text>
     <Text dimColor>Leader model is unchanged. Select an exact available VEXZY model.</Text>

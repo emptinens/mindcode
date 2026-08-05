@@ -1,9 +1,48 @@
-import { expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import {
-  getAgentModelDisplay,
-  getAgentModelOptions,
-} from '../../utils/model/agent.js'
+
+const agentSdkTypesMock = () => ({ HOOK_EVENTS: ['PreToolUse'] as const })
+mock.module('src/entrypoints/agentSdkTypes.js', agentSdkTypesMock)
+mock.module(
+  new URL('../../entrypoints/agentSdkTypes.ts', import.meta.url).pathname,
+  agentSdkTypesMock,
+)
+
+const { configureVexzyModelCatalog, resetVexzyModelCatalog } = await import(
+  '../../services/api/vexzy/modelCatalog.js'
+)
+const { createVexzyModelRegistry } = await import(
+  '../../services/api/vexzy/modelRegistry.js'
+)
+const { getAgentModelDisplay, getAgentModelOptions } = await import(
+  '../../utils/model/agent.js'
+)
+
+beforeEach(async () => {
+  const registry = createVexzyModelRegistry({
+    object: 'list',
+    data: [{
+      id: 'gpt-5.6-luna',
+      object: 'model',
+      owned_by: 'vexzy',
+      display_name: 'GPT-5.6 Luna',
+      available: true,
+      context_length: 1_100_000,
+      supported_reasoning_efforts: ['none', 'low', 'medium', 'high'],
+      input_modalities: ['text'],
+      output_modalities: ['text'],
+      capabilities: { reasoning: true, tools: true, vision: false },
+    }],
+  })
+  const catalog = configureVexzyModelCatalog({
+    getModels: async () => registry,
+    refresh: async () => registry,
+    getSnapshot: () => undefined,
+  })
+  await catalog.load()
+})
+
+afterEach(() => resetVexzyModelCatalog())
 
 test('Agent model display is fixed independently of legacy model input', () => {
   expect(getAgentModelDisplay(undefined)).toBe('GPT-5.6 Luna')
@@ -12,12 +51,12 @@ test('Agent model display is fixed independently of legacy model input', () => {
   expect(getAgentModelDisplay('haiku')).toBe('GPT-5.6 Luna')
 })
 
-test('agent configuration exposes only the fixed Luna model', () => {
+test('agent configuration exposes only the configured validated Worker model', () => {
   expect(getAgentModelOptions()).toEqual([
     {
       value: 'gpt-5.6-luna',
       label: 'GPT-5.6 Luna',
-      description: 'Fixed model for every agent and teammate',
+      description: 'Configured exact VEXZY model for every Worker/subagent',
     },
   ])
 })

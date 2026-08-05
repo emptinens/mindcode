@@ -37,6 +37,14 @@ function candidate(overrides: Partial<WorkerReport> = {}): WorkerReport {
 }
 
 describe('WorkerReport v1', () => {
+  test('rejects reports from a model other than the configured Worker model', () => {
+    expect(
+      workerReportSchema.safeParse(
+        candidate({ model: 'unconfigured-provider-model' }),
+      ).success,
+    ).toBe(false)
+  })
+
   test('emits the complete schema and owns runtime fields', () => {
     const report = buildWorkerReport({
       taskId: 'runtime-task',
