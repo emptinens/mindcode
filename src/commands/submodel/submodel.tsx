@@ -2,9 +2,12 @@ import * as React from 'react'
 import { Box, Text } from '../../ink.js'
 import { Select } from '../../components/CustomSelect/index.js'
 import type { LocalJSXCommandCall } from '../../types/command.js'
-import { loadVexzyModelCatalog } from '../../services/api/vexzy/modelCatalog.js'
 import { getConfiguredSubagentModel } from '../../utils/model/subagentModel.js'
-import { getSubmodelOptions, setSubmodel } from './modelSelection.js'
+import {
+  ensureSubmodelCatalogReady,
+  getSubmodelOptions,
+  setSubmodel,
+} from './modelSelection.js'
 
 function SubmodelPicker({ onDone }: { onDone: (message: string) => void }) {
   const current = getConfiguredSubagentModel()
@@ -22,7 +25,7 @@ export const call: LocalJSXCommandCall = async (onDone, _context, args) => {
   const requested = args.trim()
   if (requested === '--help' || requested === '-h') { onDone('Usage: /submodel [exact-vexzy-model-id]'); return null }
   try {
-    await loadVexzyModelCatalog({ refresh: true })
+    await ensureSubmodelCatalogReady()
     if (requested) { onDone(await setSubmodel(requested)); return null }
     return <SubmodelPicker onDone={onDone} />
   } catch (error) {

@@ -1,10 +1,16 @@
 import {
   getDefaultVexzyModelCatalog,
+  loadVexzyModelCatalog,
 } from '../../services/api/vexzy/modelCatalog.js'
 import {
   setConfiguredSubagentModel,
 } from '../../utils/model/subagentModel.js'
 import { updateSettingsForSource } from '../../utils/settings/settings.js'
+
+export async function ensureSubmodelCatalogReady(): Promise<void> {
+  if (getDefaultVexzyModelCatalog().state === 'ready') return
+  await loadVexzyModelCatalog()
+}
 
 export async function setSubmodel(model: string): Promise<string> {
   const entry = getDefaultVexzyModelCatalog().registry?.get(model)

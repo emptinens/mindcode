@@ -37,7 +37,11 @@ const { configureVexzyModelCatalog, resetVexzyModelCatalog } = await import(
 const { createVexzyModelRegistry } = await import(
   '../../services/api/vexzy/modelRegistry.js'
 )
-const { getSubmodelOptions, setSubmodel } = await import('./modelSelection.js')
+const {
+  ensureSubmodelCatalogReady,
+  getSubmodelOptions,
+  setSubmodel,
+} = await import('./modelSelection.js')
 
 const model = (
   id: string,
@@ -56,8 +60,11 @@ const model = (
   ...overrides,
 })
 
+let catalogLoads = 0
+
 beforeEach(async () => {
   configuredModel = 'gpt-5.6-luna'
+  catalogLoads = 0
   const registry = createVexzyModelRegistry({
     object: 'list',
     data: [
@@ -70,7 +77,10 @@ beforeEach(async () => {
     ],
   })
   const catalog = configureVexzyModelCatalog({
-    getModels: async () => registry,
+    getModels: async () => {
+      catalogLoads += 1
+      return registry
+    },
     refresh: async () => registry,
     getSnapshot: () => undefined,
   })
@@ -80,6 +90,12 @@ beforeEach(async () => {
 afterEach(() => resetVexzyModelCatalog())
 
 describe('/submodel', () => {
+  test('reuses the ready catalog without entering a loading UI state', async () => {
+    await ensureSubmodelCatalogReady()
+    expect(getSubmodelOptions()).toHaveLength(2)
+    expect(catalogLoads).toBe(1)
+  })
+
   test('offers only available VEXZY models with tool execution', () => {
     expect(getSubmodelOptions().map(option => option.value)).toEqual([
       'gpt-5.6-luna',
