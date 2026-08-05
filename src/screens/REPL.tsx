@@ -33,6 +33,7 @@ import { updateLastInteractionTime, getLastInteractionTime, getOriginalCwd, getP
 import { asSessionId, asAgentId } from '../types/ids.js';
 import { logForDebugging } from '../utils/debug.js';
 import { QueryGuard } from '../utils/QueryGuard.js';
+import { settleWithFallback } from '../utils/settleWithFallback.js';
 import { isEnvTruthy } from '../utils/envUtils.js';
 import { formatTokens, truncateToWidth } from '../utils/format.js';
 import { consumeEarlyInput } from '../utils/earlyInput.js';
@@ -1514,10 +1515,10 @@ export function REPL({
     setInputValue,
     setToolJSX
   });
-  const showSpinner = (!toolJSX || toolJSX.showSpinner === true) && toolUseConfirmQueue.length === 0 && promptQueue.length === 0 && (
+  const showSpinner = (((!toolJSX || toolJSX.showSpinner === true) && toolUseConfirmQueue.length === 0 && promptQueue.length === 0) || !!userInputOnProcessing) && (
   // Show spinner during input processing, API call, while teammates are running,
   // or while pending task notifications are queued (prevents spinner bounce between consecutive notifications)
-  isLoading || userInputOnProcessing || hasRunningTeammates ||
+  isLoading || queryGuard.isActive || userInputOnProcessing || hasRunningTeammates ||
   // Keep spinner visible while task notifications are queued for processing.
   // Without this, the spinner briefly disappears between consecutive notifications
   // (e.g., multiple background agents completing in rapid succession) because
@@ -2454,30 +2455,6 @@ export function REPL({
     // Mark onboarding as complete when any user message is sent to Claude
     void maybeMarkProjectOnboardingComplete();
 
-    // Extract a session title from the first real user message. One-shot
-    // via ref (was tengu_birch_mist experiment: first-message-only to save
-    // Haiku calls). The ref replaces the old `messages.length <= 1` check,
-    // which was broken by SessionStart hook messages (prepended via
-    // useDeferredHookMessages) and attachment messages (appended by
-    // processTextPrompt) — both pushed length past 1 on turn one, so the
-    // title silently fell through to the "MindCode" default.
-    if (!titleDisabled && !sessionTitle && !agentTitle && !haikuTitleAttemptedRef.current) {
-      const firstUserMessage = newMessages.find(m => m.type === 'user' && !m.isMeta);
-      const text = firstUserMessage?.type === 'user' ? getContentText(firstUserMessage.message.content) : null;
-      // Skip synthetic breadcrumbs — slash-command output, prompt-skill
-      // expansions (/commit → <command-message>), local-command headers
-      // (/help → <command-name>), and bash-mode (!cmd → <bash-input>).
-      // None of these are the user's topic; wait for real prose.
-      if (text && !text.startsWith(`<${LOCAL_COMMAND_STDOUT_TAG}>`) && !text.startsWith(`<${COMMAND_MESSAGE_TAG}>`) && !text.startsWith(`<${COMMAND_NAME_TAG}>`) && !text.startsWith(`<${BASH_INPUT_TAG}>`)) {
-        haikuTitleAttemptedRef.current = true;
-        void generateSessionTitle(text, new AbortController().signal).then(title => {
-          if (title) setHaikuTitle(title);else haikuTitleAttemptedRef.current = false;
-        }, () => {
-          haikuTitleAttemptedRef.current = false;
-        });
-      }
-    }
-
     // Apply slash-command-scoped allowedTools (from skill frontmatter) to the
     // store once per turn. This also covers the reset: the next non-skill turn
     // passes [] and clears it. Must run before the !shouldQuery gate: forked
@@ -2549,7 +2526,7 @@ export function REPL({
     // IMPORTANT: do this after setMessages() above, to avoid UI jank
     checkAndDisableBypassPermissionsIfNeeded(toolPermissionContext, setAppState),
     // Gated on TRANSCRIPT_CLASSIFIER so GrowthBook kill switch runs wherever auto mode is built in
-    feature('TRANSCRIPT_CLASSIFIER') ? checkAndDisableAutoModeIfNeeded(toolPermissionContext, setAppState, store.getState().fastMode) : undefined, getSystemPrompt(freshTools, mainLoopModelParam, Array.from(toolPermissionContext.additionalWorkingDirectories.keys()), freshMcpClients), getUserContext(), getSystemContext()]);
+    feature('TRANSCRIPT_CLASSIFIER') ? checkAndDisableAutoModeIfNeeded(toolPermissionContext, setAppState, store.getState().fastMode) : undefined, settleWithFallback(getSystemPrompt(freshTools, mainLoopModelParam, Array.from(toolPermissionContext.additionalWorkingDirectories.keys()), freshMcpClients), [], 3000), settleWithFallback(getUserContext(), {}, 3000), settleWithFallback(getSystemContext(), {}, 3000)]);
     const userContext = {
       ...baseUserContext,
       ...getCoordinatorUserContext(freshMcpClients, isScratchpadEnabled() ? getScratchpadDir() : undefined),
@@ -2581,6 +2558,31 @@ export function REPL({
     })) {
       onQueryEvent(event);
     }
+
+    // Extract a session title from the first real user message. One-shot
+    // via ref (was tengu_birch_mist experiment: first-message-only to save
+    // Haiku calls). The ref replaces the old `messages.length <= 1` check,
+    // which was broken by SessionStart hook messages (prepended via
+    // useDeferredHookMessages) and attachment messages (appended by
+    // processTextPrompt) — both pushed length past 1 on turn one, so the
+    // title silently fell through to the "MindCode" default.
+    if (!titleDisabled && !sessionTitle && !agentTitle && !haikuTitleAttemptedRef.current) {
+      const firstUserMessage = newMessages.find(m => m.type === 'user' && !m.isMeta);
+      const text = firstUserMessage?.type === 'user' ? getContentText(firstUserMessage.message.content) : null;
+      // Skip synthetic breadcrumbs — slash-command output, prompt-skill
+      // expansions (/commit → <command-message>), local-command headers
+      // (/help → <command-name>), and bash-mode (!cmd → <bash-input>).
+      // None of these are the user's topic; wait for real prose.
+      if (text && !text.startsWith(`<${LOCAL_COMMAND_STDOUT_TAG}>`) && !text.startsWith(`<${COMMAND_MESSAGE_TAG}>`) && !text.startsWith(`<${COMMAND_NAME_TAG}>`) && !text.startsWith(`<${BASH_INPUT_TAG}>`)) {
+        haikuTitleAttemptedRef.current = true;
+        void generateSessionTitle(text, AbortSignal.timeout(3000)).then(title => {
+          if (title) setHaikuTitle(title);else haikuTitleAttemptedRef.current = false;
+        }, () => {
+          haikuTitleAttemptedRef.current = false;
+        });
+      }
+    }
+
     if (feature('BUDDY')) {
       void fireCompanionObserver(messagesRef.current, reaction => setAppState(prev => prev.companionReaction === reaction ? prev : {
         ...prev,
@@ -4505,7 +4507,7 @@ export function REPL({
                       {"external" === 'ant' && skillImprovementSurvey.suggestion && <SkillImprovementSurvey isOpen={skillImprovementSurvey.isOpen} skillName={skillImprovementSurvey.suggestion.skillName} updates={skillImprovementSurvey.suggestion.updates} handleSelect={skillImprovementSurvey.handleSelect} inputValue={inputValue} setInputValue={setInputValue} />}
                       {showIssueFlagBanner && <IssueFlagBanner />}
                       {}
-                      <PromptInput debug={debug} ideSelection={ideSelection} hasSuppressedDialogs={!!hasSuppressedDialogs} isLocalJSXCommandActive={isShowingLocalJSXCommand} getToolUseContext={getToolUseContext} toolPermissionContext={toolPermissionContext} setToolPermissionContext={setToolPermissionContext} apiKeyStatus={apiKeyStatus} commands={commands} agents={agentDefinitions.activeAgents} isLoading={isLoading} onExit={handleExit} verbose={verbose} messages={messages} onAutoUpdaterResult={setAutoUpdaterResult} autoUpdaterResult={autoUpdaterResult} input={inputValue} onInputChange={setInputValue} mode={inputMode} onModeChange={setInputMode} stashedPrompt={stashedPrompt} setStashedPrompt={setStashedPrompt} submitCount={submitCount} onShowMessageSelector={handleShowMessageSelector} onMessageActionsEnter={
+                      <PromptInput debug={debug} ideSelection={ideSelection} hasSuppressedDialogs={!!hasSuppressedDialogs} isLocalJSXCommandActive={isShowingLocalJSXCommand} getToolUseContext={getToolUseContext} toolPermissionContext={toolPermissionContext} setToolPermissionContext={setToolPermissionContext} apiKeyStatus={apiKeyStatus} commands={commands} agents={agentDefinitions.activeAgents} isLoading={isLoading || queryGuard.isActive || userInputOnProcessing !== undefined} onExit={handleExit} verbose={verbose} messages={messages} onAutoUpdaterResult={setAutoUpdaterResult} autoUpdaterResult={autoUpdaterResult} input={inputValue} onInputChange={setInputValue} mode={inputMode} onModeChange={setInputMode} stashedPrompt={stashedPrompt} setStashedPrompt={setStashedPrompt} submitCount={submitCount} onShowMessageSelector={handleShowMessageSelector} onMessageActionsEnter={
             // Works during isLoading — edit cancels first; uuid selection survives appends.
             feature('MESSAGE_ACTIONS') && isFullscreenEnvEnabled() && !disableMessageActions ? enterMessageActions : undefined} mcpClients={mcpClients} pastedContents={pastedContents} setPastedContents={setPastedContents} vimMode={vimMode} setVimMode={setVimMode} showBashesDialog={showBashesDialog} setShowBashesDialog={setShowBashesDialog} onSubmit={onSubmit} onAgentSubmit={onAgentSubmit} isSearchingHistory={isSearchingHistory} setIsSearchingHistory={setIsSearchingHistory} helpOpen={isHelpOpen} setHelpOpen={setIsHelpOpen} insertTextRef={feature('VOICE_MODE') ? insertTextRef : undefined} voiceInterimRange={voice.interimRange} />
                       <SessionBackgroundHint onBackgroundSession={handleBackgroundSession} isLoading={isLoading} />

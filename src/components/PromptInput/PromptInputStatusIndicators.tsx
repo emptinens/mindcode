@@ -12,13 +12,16 @@ import { getJailbreakLevel } from '../../utils/jailbreak.js'
 import { getPublicModelDisplayName } from '../../utils/model/model.js'
 import { isCompactBoundaryMessage } from '../../utils/messages.js'
 import type { Theme } from '../../utils/theme.js'
+import { hasPendingAssistantTurn } from './processingStatus.js'
 
 type Props = {
   messages: Message[]
+  isLoading: boolean
 }
 
 function PromptInputStatusIndicatorsInner({
   messages,
+  isLoading,
 }: Props): React.ReactNode {
   // Subscribe to authVersion so the source updates on login/account switch.
   useAppState(s => s.authVersion)
@@ -43,9 +46,11 @@ function PromptInputStatusIndicatorsInner({
 
   const jailbreakLevel = getJailbreakLevel()
   const compactDepth = messages.filter(isCompactBoundaryMessage).length
+  const isWorking = isLoading || hasPendingAssistantTurn(messages)
 
   // Each part renders as text; ultracode gets the effortUltra accent color.
   const parts: { text: string; color?: keyof Theme }[] = []
+  if (isWorking) parts.push({ text: 'Working…' })
   parts.push({ text: modelLabel })
   if (ultracode) {
     // Ultracode runs at xhigh; surface it as a distinct accented indicator
