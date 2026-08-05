@@ -217,7 +217,7 @@ type TaskItemProps = {
   ownerActive: boolean;
   columns: number;
 };
-function getTaskIcon(status: Task['status']): {
+export function getTaskIcon(status: Task['status'] | string): {
   icon: string;
   color: keyof Theme | undefined;
 } {
@@ -227,12 +227,19 @@ function getTaskIcon(status: Task['status']): {
         icon: figures.tick,
         color: 'success'
       };
+    case 'claimed':
+    case 'running':
     case 'in_progress':
       return {
         icon: figures.squareSmallFilled,
         color: 'claude'
       };
-    case 'pending':
+    case 'failed':
+      return {
+        icon: figures.cross,
+        color: 'error'
+      };
+    default:
       return {
         icon: figures.squareSmall,
         color: undefined
@@ -250,7 +257,7 @@ function TaskItem(t0) {
     columns
   } = t0;
   const isCompleted = task.status === "completed";
-  const isInProgress = task.status === "in_progress";
+  const isInProgress = task.status === "in_progress" || task.status === "running" || task.status === "claimed";
   const isBlocked = openBlockers.length > 0;
   let t1;
   if ($[0] !== task.status) {
