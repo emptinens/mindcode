@@ -122,7 +122,7 @@ import { logPluginLoadErrors, logPluginsEnabledForSession } from './utils/teleme
 import { logSkillsLoaded } from './utils/telemetry/skillLoadedEvent.js';
 import { generateTempFilePath } from './utils/tempfile.js';
 import { validateUuid } from './utils/uuid.js';
-// Plugin startup checks are now handled non-blockingly in REPL.tsx
+import { initUser } from './utils/user.js';
 
 import { registerMcpAddCommand } from 'src/commands/mcp/addCommand.js';
 import { registerMcpXaaIdpCommand } from 'src/commands/mcp/xaaIdpCommand.js';

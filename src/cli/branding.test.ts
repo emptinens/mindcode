@@ -54,6 +54,7 @@ describe('bounded CLI branding', () => {
     ).text()
 
     expect(main).not.toContain('logPermissionContextForAnts(')
+    expect(main).toContain("import { initUser } from './utils/user.js'")
     expect(entrypoint).toContain('void main().catch')
     expect(entrypoint).toContain('process.exit(1)')
   })
