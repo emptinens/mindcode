@@ -1,112 +1,114 @@
 # MindCode VEXZY Roadmap
 
-Version: `0.1.0`
-Configuration directory: `~/.mindcode`
-Environment prefix: `MINDCODE_`
+Версия: `0.1.0`
+API: VEXZY-only
+Локальное состояние: `~/.mindcode`
+Переменные конфигурации: префикс `MINDCODE_`
 
-## P0 — Runtime diagnostics
+## Контракт VEXZY
 
-- `/vexzy-status`
-  - `BASE_URL`
-  - auth source without secret disclosure
-  - main model
-  - fixed Worker model
-  - compact model
-  - context-window size
-  - thinking mode and effort
-  - Agent/Task/Team tool availability
-- `/agent-smoke`
-  - spawn one isolated Agent
-  - verify effective model is `gpt-5.6-luna`
-  - verify explicitly assigned Worker thinking/effort
-  - verify TaskCreate/TaskUpdate/SendMessage
-- `/compact-status`
-  - last compact model
-  - input/output token counts
-  - elapsed time
-  - retries and timeout reason
-  - preserved-tail size
+- OpenAI-compatible base URL: `https://api.echogate.one/v1`
+  - `POST /chat/completions`
+  - `POST /responses`
+  - `GET /models`
+- Messages-compatible base URL: `https://api.echogate.one`
+  - `POST /v1/messages`
+- Auth: `Authorization: Bearer $VEXZY_API_KEY`; ключ формата `forge-…` не сохраняется в settings, fixtures, логах и отчётах.
+- Streaming: `stream: true`.
+- GPT-5.6 effort: `none|low|medium|high|xhigh|max`.
+- Реестр моделей загружается динамически через `GET https://api.echogate.one/v1/models`; текущий подтверждённый каталог содержит 33 модели.
+- `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol`: контекст `1 050 000` токенов, максимальный ответ `128 000`, усилия `none|low|medium|high|xhigh|max`.
+- Worker `gpt-5.6-luna`: фиксированная модель во всех runtime-путях; Worker context `1 050 000`, max output `128 000`.
 
-## P1 — Reliability
+## Реализовано
 
-- VEXZY-specific request timeout, retry, and circuit breaker settings.
-- Atomic `/compact`: retain old context until summary validation succeeds.
-- Compact watchdog with cancel/retry instead of indefinite 97% state.
-- Agent crash recovery and automatic replacement.
-- Team task reconciliation when task state lags behind teammate state.
-- Session resume that reconstructs in-process teammates from persisted task metadata.
+### Runtime и модели
 
-## P1 — Model controls
+- VEXZY transport, streaming, retry/error mapping и dynamic model registry.
+- User-selected Leader model, thinking mode и effort.
+- Fixed `gpt-5.6-luna` Workers.
+- Per-task Worker effort с fallback `medium`.
+- Effort weights: `none=1`, `low=1`, `medium=2`, `high=4`, `xhigh=6`, `max=8`.
+- Cost-budget lease с конфигурируемым `MINDCODE_AGENT_COST_BUDGET`, default `32`.
 
-- Dynamic VEXZY model capability registry:
-  - context window
-  - max output tokens
-  - adaptive thinking
-  - effort levels
-  - tool support
-  - image support
-- `/model` detail panel with capability table.
-- Separate selectors:
-  - main model
-  - main thinking mode
-  - main effort
-  - subagent thinking policy
-  - compact model
-- Per-agent reasoning policy: `adaptive`, `low`, `medium`, `high`, `xhigh`, `max`.
+### Tasks и агенты
 
-## P1 — Authentication
+- SQLite task graph с persistent metadata.
+- Atomic compare-and-swap claim.
+- Dependency blocking через `blocked_by`.
+- Validate overlap-check для `files_touched`.
+- Worktree isolation для конфликтующих активных задач.
+- Отдельный mailbox для сообщений.
+- JSON-only WorkerReport:
+  `{task_id,status,changed_files,evidence,tokens_used,effort_used}`.
+- Полный Worker transcript исключён из Leader payload.
 
-- macOS Keychain storage for `VEXZY_API_KEY`.
-- `mindcode vexzy login` and `mindcode vexzy logout`.
-- Gateway health check before REPL startup.
-- API-key rotation without restarting the terminal.
-- Sanitized auth diagnostics with endpoint and source only.
+### Context и команды
 
-## P2 — Agent UX
+- Soft-warning context на `85%`.
+- Auto-compact trigger на `95%`.
+- Atomic compact с snapshot, validation и watchdog.
+- `/model`, `/effort`, `/agents`, `/tasks`.
+- `/copy`, `/copycon`, `/compact`, `/status`, `/status html`.
+- `/jailbreak` применяется к Leader и Worker prompt paths.
+- `/mcp`, `/skills` с plugin allowlist: `ida`, `superpowers`, `math-mcp`.
+- Sakura mascot вместо исходной брендированной графики.
 
-- Agent panel columns: NAME, MODEL, EFFORT, TOKENS, STATE, TASK.
-- Live Agent transcript search.
-- One-key restart, stop, redirect, and clone.
-- Team presets: review, research, debug, implementation.
-- Automatic task partitioning with file-ownership conflict detection.
-- Shared artifact/evidence store between teammates.
+### Build и repository
 
-## P2 — Observability
+- Версия проекта `0.1.0`, CLI `mindcode`.
+- Bun-based build/test workflow.
+- Локальный Git без remote и push.
+- Локальные атомарные коммиты по функциональным блокам.
 
-- `/usage-live` per-model and per-agent token accounting.
-- Request latency histogram.
-- Compact duration and compression-ratio history.
-- Agent tool-call timeline.
-- Structured JSON debug log with automatic secret redaction.
-- Exportable session diagnostic bundle.
+## Реальные TODO и риски
 
-## P2 — Build and update
+### DONE — VEXZY-only cleanup
 
-- `./install-vexzy.sh`:
-  - build current architecture
-  - verify binary markers
-  - atomically update `~/.local/bin/mindcode`
-  - preserve rollback binary
-- `./rollback-vexzy.sh`.
-- Build metadata in `mindcode --version`: commit, target, build time.
-- CI smoke matrix for macOS x64/arm64 and Linux x64/arm64.
+- Legacy OAuth/provider/remote runtime-пути удалены или локально изолированы.
+- Runtime SDK transport заменён локальными VEXZY protocol types.
+- Production bundle audit даёт `0` для запрещённых provider endpoints,
+  credentials, package names и marketplace hosts.
 
-## P3 — Tests
+### P1 — Lifecycle и надёжность
 
-- Unit tests for fixed Worker model resolution.
-- Unit tests for custom-gateway auth status.
-- Integration test for Agent spawn and Task tools.
-- Integration test for `/compact` on 200k and 1M contexts.
-- Regression test for `MINDCODE_SIMPLE` disabling Agent tools.
-- Golden test for launcher environment propagation.
+- Lifecycle `Decompose → Validate → Route → Acquire → Execute → Report → Release`
+  покрыт integration tests, включая конфликты, зависимости и invalid reports.
+- Расширить multi-backend smoke на resume, tmux/iTerm и восстановление lease
+  после аварийного завершения отдельного процесса.
+- Проверить production wire details для tool calls, structured output и usage accounting через VEXZY fixtures.
+- Проверить восстановление in-process Workers после resume и reconcile зависших task statuses.
 
-## Recommended implementation order
+### P1 — Performance
 
-1. `/vexzy-status`
-2. `/agent-smoke`
-3. Compact watchdog and atomic summary validation
-4. Keychain-backed VEXZY login
-5. Dynamic model capability registry
-6. Agent panel telemetry
-7. Install/rollback scripts
-8. Integration test suite
+- Профилировать пути `Decompose → Route → Acquire`.
+- Устранить лишние синхронные чтения task graph и повторную загрузку immutable model/plugin metadata.
+- Измерить latency, spawn cost, memory, bundle size и compact duration.
+- Проверить warm in-process execution для мелких задач и адаптивный worker budget под CPU, память и VEXZY rate limits.
+
+### DONE — Coverage и CI baseline
+
+- `430` tests, `0` failures.
+- Architectural coverage `91.43%` при gate `≥85%`.
+- Race-тесты atomic claim, dependency blocking и overlap isolation добавлены.
+- CI запускает source check, lint/typecheck baseline, tests, coverage, build и smoke.
+
+### P1 — Quality debt
+
+- Постепенно устранить существующий baseline: `8167` lint diagnostics и `4184`
+  typecheck diagnostics, не ослабляя strict-конфигурацию.
+- Добавить отдельный multi-platform release job для всех бинарных targets.
+
+### P2 — Observability
+
+- Довести `/status html` до полной статистики Leader/Worker: токены, запросы, effort, lease, latency, compact history, ошибки и стоимость только при наличии надёжных данных VEXZY.
+- Добавить экспорт sanitized diagnostic bundle с автоматической redaction секретов.
+- Добавить детальный timeline task graph и Worker lifecycle.
+
+## Порядок завершения
+
+1. Multi-backend lifecycle/resume smoke и policy-epoch hardening.
+2. Performance profiling и устранение лишних ожиданий/чтений.
+3. Снижение lint/typecheck baseline debt.
+4. Multi-platform release build.
+5. Расширение `/status html`, sanitized diagnostics и документации.
