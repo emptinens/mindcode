@@ -9,14 +9,27 @@ import type { AppState } from '../../state/AppState.js'
 import { logForDebugging } from '../debug.js'
 import { addFunctionHook } from '../hooks/sessionHooks.js'
 import { applyPermissionUpdate } from '../permissions/PermissionUpdate.js'
-import { jsonStringify } from '../slowOperations.js'
 import { getTeammateColor } from '../teammate.js'
 import {
   createIdleNotification,
-  getLastPeerDmSummary,
   writeToMailbox,
 } from '../teammateMailbox.js'
+import { resolveWorkerEffort, type WorkerEffortInput } from './backends/types.js'
 import { readTeamFile, setMemberActive } from './teamHelpers.js'
+import {
+  buildWorkerTeamReportFromMessages,
+  isWorkerReportCompletionEligible,
+  serializeWorkerTeamReportMessage,
+} from './workerTeamReport.js'
+
+function getTeammateWorkerEffort(explicit: WorkerEffortInput | undefined) {
+  const effortFlagIndex = process.argv.indexOf('--effort')
+  const cliEffort =
+    effortFlagIndex >= 0 ? process.argv[effortFlagIndex + 1] : undefined
+  return resolveWorkerEffort(
+    explicit ?? process.env.MINDCODE_WORKER_EFFORT ?? cliEffort,
+  )
+}
 
 /**
  * Initializes hooks for a teammate running in a swarm.
@@ -28,7 +41,13 @@ import { readTeamFile, setMemberActive } from './teamHelpers.js'
 export function initializeTeammateHooks(
   setAppState: (updater: (prev: AppState) => AppState) => void,
   sessionId: string,
-  teamInfo: { teamName: string; agentId: string; agentName: string },
+  teamInfo: {
+    teamName: string
+    agentId: string
+    agentName: string
+    taskId?: string
+    effort?: WorkerEffortInput
+  },
 ): void {
   const { teamName, agentId, agentName } = teamInfo
 
@@ -40,6 +59,8 @@ export function initializeTeammateHooks(
   }
 
   const leadAgentId = teamFile.leadAgentId
+  const reportTaskId = teamInfo.taskId ?? sessionId
+  const workerEffort = getTeammateWorkerEffort(teamInfo.effort)
 
   // Apply team-wide allowed paths if any exist
   if (teamFile.teamAllowedPaths && teamFile.teamAllowedPaths.length > 0) {
@@ -104,15 +125,30 @@ export function initializeTeammateHooks(
       // Mark this teammate as idle in the team config (fire and forget)
       void setMemberActive(teamName, agentName, false)
 
+      // The Stop hook has no independent file watcher. changed_files therefore
+      // comes only from valid JSON in the final assistant text; malformed or
+      // free-form output falls back to changed_files: [] plus bounded evidence.
+      // Earlier transcript content is used only for deduplicated usage totals.
+      const report = buildWorkerTeamReportFromMessages({
+        taskId: reportTaskId,
+        runId: `${agentId}:${reportTaskId}`,
+        workerId: agentId,
+        policyEpoch: 0,
+        effortUsed: workerEffort,
+        messages,
+      })
+
       // Send idle notification to the team leader using agent name (not UUID)
       // Must await to ensure the write completes before process shutdown
       const notification = createIdleNotification(agentName, {
-        idleReason: 'available',
-        summary: getLastPeerDmSummary(messages),
+        idleReason: isWorkerReportCompletionEligible(report)
+          ? 'available'
+          : 'failed',
+        report,
       })
       await writeToMailbox(leadAgentName, {
         from: agentName,
-        text: jsonStringify(notification),
+        text: serializeWorkerTeamReportMessage(notification),
         timestamp: new Date().toISOString(),
         color: getTeammateColor(),
       })

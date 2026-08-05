@@ -5,7 +5,6 @@ import { GREP_TOOL_NAME } from 'src/tools/GrepTool/prompt.js'
 import { SEND_MESSAGE_TOOL_NAME } from 'src/tools/SendMessageTool/constants.js'
 import { WEB_FETCH_TOOL_NAME } from 'src/tools/WebFetchTool/prompt.js'
 import { WEB_SEARCH_TOOL_NAME } from 'src/tools/WebSearchTool/prompt.js'
-import { isUsing3PServices } from 'src/utils/auth.js'
 import { hasEmbeddedSearchTools } from 'src/utils/embeddedTools.js'
 import { getSettings_DEPRECATED } from 'src/utils/settings/settings.js'
 import { jsonStringify } from '../../../utils/slowOperations.js'
@@ -14,32 +13,27 @@ import type {
   BuiltInAgentDefinition,
 } from '../loadAgentsDir.js'
 
-const MINDCODE_DOCS_MAP_URL =
-  'https://code.claude.com/docs/en/claude_code_docs_map.md'
-const CDP_DOCS_MAP_URL = 'https://platform.claude.com/llms.txt'
+const VEXZY_MODELS_URL = 'https://api.echogate.one/v1/models'
 
 export const MINDCODE_GUIDE_AGENT_TYPE = 'mindcode-guide'
 
 function getMindCodeGuideBasePrompt(): string {
-  // Ant-native builds alias find/grep to embedded bfs/ugrep and remove the
-  // dedicated Glob/Grep tools, so point at find/grep instead.
+  // Embedded builds alias find/grep and remove the dedicated Glob/Grep tools.
   const localSearchHint = hasEmbeddedSearchTools()
     ? `${FILE_READ_TOOL_NAME}, \`find\`, and \`grep\``
     : `${FILE_READ_TOOL_NAME}, ${GLOB_TOOL_NAME}, and ${GREP_TOOL_NAME}`
 
-  return `You are the Claude guide agent. Your primary responsibility is helping users understand and use MindCode, the Claude Agent SDK, and the Claude API (formerly the Anthropic API) effectively.
+  return `You are the MindCode guide agent. Your primary responsibility is helping users understand and use MindCode and the VEXZY API effectively.
 
-**Your expertise spans three domains:**
+**Your expertise spans two domains:**
 
 1. **MindCode** (the CLI tool): Installation, configuration, hooks, skills, MCP servers, keyboard shortcuts, IDE integrations, settings, and workflows.
 
-2. **Claude Agent SDK**: A framework for building custom AI agents based on MindCode technology. Available for Node.js/TypeScript and Python.
-
-3. **Claude API**: The Claude API (formerly known as the Anthropic API) for direct model interaction, tool use, and integrations.
+2. **VEXZY API**: The OpenAI-compatible API at https://api.echogate.one/v1 for model discovery, chat completions, responses, streaming, tool use, and integrations.
 
 **Documentation sources:**
 
-- **MindCode docs** (${MINDCODE_DOCS_MAP_URL}): Fetch this for questions about the MindCode CLI tool, including:
+- **Local MindCode documentation**: Read the repository's MINDCODE.md, local command help, and project configuration for questions about the MindCode CLI tool, including:
   - Installation, setup, and getting started
   - Hooks (pre/post command execution)
   - Custom skills
@@ -50,56 +44,35 @@ function getMindCodeGuideBasePrompt(): string {
   - Subagents and plugins
   - Sandboxing and security
 
-- **Claude Agent SDK docs** (${CDP_DOCS_MAP_URL}): Fetch this for questions about building agents with the SDK, including:
-  - SDK overview and getting started (Python and TypeScript)
-  - Agent configuration + custom tools
-  - Session management and permissions
-  - MCP integration in agents
-  - Hosting and deployment
-  - Cost tracking and context management
-  Note: Agent SDK docs are part of the Claude API documentation at the same URL.
-
-- **Claude API docs** (${CDP_DOCS_MAP_URL}): Fetch this for questions about the Claude API (formerly the Anthropic API), including:
-  - Messages API and streaming
-  - Tool use (function calling) and Anthropic-defined tools (computer use, code execution, web search, text editor, bash, programmatic tool calling, tool search tool, context editing, Files API, structured outputs)
-  - Vision, PDF support, and citations
-  - Extended thinking and structured outputs
-  - MCP connector for remote MCP servers
-  - Cloud provider integrations (Bedrock, Vertex AI, Foundry)
+- **VEXZY endpoint contract** (${VEXZY_MODELS_URL}): Use this live catalog for the available model IDs, capabilities, and status. Use the \`/v1/chat/completions\` or \`/v1/responses\` endpoint under the same base URL for API examples. Authenticate with the \`VEXZY_API_KEY\` environment variable. If no confirmed VEXZY documentation index is available, state that the answer is based on local documentation and the endpoint contract rather than inventing a documentation URL.
 
 **Approach:**
 1. Determine which domain the user's question falls into
-2. Use ${WEB_FETCH_TOOL_NAME} to fetch the appropriate docs map
-3. Identify the most relevant documentation URLs from the map
-4. Fetch the specific documentation pages
-5. Provide clear, actionable guidance based on official documentation
-6. Use ${WEB_SEARCH_TOOL_NAME} if docs don't cover the topic
-7. Reference local project files (MINDCODE.md, .mindcode/ directory) when relevant using ${localSearchHint}
+2. Read local documentation first for MindCode questions
+3. Use ${WEB_FETCH_TOOL_NAME} to fetch ${VEXZY_MODELS_URL} for the live VEXZY model catalog
+4. Fetch only confirmed VEXZY endpoint documentation or pages supplied by the user
+5. Provide clear, actionable guidance based on the local documentation and endpoint contract
+6. Use ${WEB_SEARCH_TOOL_NAME} only when a confirmed source is available and relevant
+7. Reference local project files (MINDCODE.md, .mindcode/ directory) using ${localSearchHint}
 
 **Guidelines:**
 - Always prioritize official documentation over assumptions
 - Keep responses concise and actionable
 - Include specific examples or code snippets when helpful
-- Reference exact documentation URLs in your responses
+- Reference exact local files or confirmed VEXZY endpoint URLs in your responses
 - Help users discover features by proactively suggesting related commands, shortcuts, or capabilities
 
 Complete the user's request by providing accurate, documentation-based guidance.`
 }
 
 function getFeedbackGuideline(): string {
-  // For 3P services (Bedrock/Vertex/Foundry), /feedback command is disabled
-  // Direct users to the appropriate feedback channel instead
-  if (isUsing3PServices()) {
-    return `- When you cannot find an answer or the feature doesn't exist, direct the user to ${MACRO.ISSUES_EXPLAINER}`
-  }
   return "- When you cannot find an answer or the feature doesn't exist, direct the user to use /feedback to report a feature request or bug"
 }
 
 export const MINDCODE_GUIDE_AGENT: BuiltInAgentDefinition = {
   agentType: MINDCODE_GUIDE_AGENT_TYPE,
-  whenToUse: `Use this agent when the user asks questions ("Can Claude...", "Does Claude...", "How do I...") about: (1) MindCode (the CLI tool) - features, hooks, slash commands, MCP servers, settings, IDE integrations, keyboard shortcuts; (2) Claude Agent SDK - building custom agents; (3) Claude API (formerly Anthropic API) - API usage, tool use, Anthropic SDK usage. **IMPORTANT:** Before spawning a new agent, check if there is already a running or recently completed mindcode-guide agent that you can continue via ${SEND_MESSAGE_TOOL_NAME}.`,
-  // Ant-native builds: Glob/Grep tools are removed; use Bash (with embedded
-  // bfs/ugrep via find/grep aliases) for local file search instead.
+  whenToUse: `Use this agent when the user asks questions ("Can MindCode...", "Does MindCode...", "How do I...") about MindCode features, hooks, slash commands, MCP servers, settings, IDE integrations, keyboard shortcuts, or the VEXZY API and its models. **IMPORTANT:** Before spawning a new agent, check if there is already a running or recently completed mindcode-guide agent that you can continue via ${SEND_MESSAGE_TOOL_NAME}.`,
+  // Embedded builds: Glob/Grep tools are removed; use Bash for local search.
   tools: hasEmbeddedSearchTools()
     ? [
         BASH_TOOL_NAME,
@@ -179,7 +152,7 @@ export const MINDCODE_GUIDE_AGENT: BuiltInAgentDefinition = {
       )
     }
 
-    // Add the feedback guideline (conditional based on whether user is using 3P services)
+    // Add the feedback guideline.
     const feedbackGuideline = getFeedbackGuideline()
     const basePromptWithFeedback = `${getMindCodeGuideBasePrompt()}
 ${feedbackGuideline}`

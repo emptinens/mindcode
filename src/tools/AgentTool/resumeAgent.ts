@@ -1,6 +1,9 @@
 import { promises as fsp } from 'fs'
 import { getSdkAgentProgressSummariesEnabled } from '../../bootstrap/state.js'
-import { getSystemPrompt } from '../../constants/prompts.js'
+import {
+  getSystemPrompt,
+  getWorkerPolicySnapshot,
+} from '../../constants/prompts.js'
 import { isCoordinatorMode } from '../../coordinator/coordinatorMode.js'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 import type { ToolUseContext } from '../../Tool.js'
@@ -17,16 +20,21 @@ import {
   filterWhitespaceOnlyAssistantMessages,
 } from '../../utils/messages.js'
 import { getAgentModel } from '../../utils/model/agent.js'
+import { resolveWorkerEffort } from '../../utils/swarm/backends/types.js'
 import { getQuerySourceForAgent } from '../../utils/promptCategory.js'
 import {
   getAgentTranscript,
   readAgentMetadata,
 } from '../../utils/sessionStorage.js'
 import { buildEffectiveSystemPrompt } from '../../utils/systemPrompt.js'
-import type { SystemPrompt } from '../../utils/systemPromptType.js'
+import {
+  type SystemPrompt,
+  asSystemPrompt,
+} from '../../utils/systemPromptType.js'
 import { getTaskOutputPath } from '../../utils/task/diskOutput.js'
 import { getParentSessionId } from '../../utils/teammate.js'
 import { reconstructForSubagentResume } from '../../utils/toolResultStorage.js'
+import { createAgentId } from '../../utils/uuid.js'
 import { runAsyncAgentLifecycle } from './agentToolUtils.js'
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js'
 import { FORK_AGENT, isForkSubagentEnabled } from './forkSubagent.js'
@@ -146,6 +154,12 @@ export async function resumeAgentBackground({
         'Cannot resume fork agent: unable to reconstruct parent system prompt',
       )
     }
+    // Fork resumes inherit the parent prompt for cache continuity, then receive
+    // the current canonical worker policy snapshot at the worker boundary.
+    forkParentSystemPrompt = asSystemPrompt([
+      ...forkParentSystemPrompt,
+      getWorkerPolicySnapshot(),
+    ])
   }
 
   // Resolve model for analytics metadata (runAgent resolves its own internally)
@@ -180,9 +194,8 @@ export async function resumeAgentBackground({
       isBuiltInAgent(selectedAgent),
     ),
     model: undefined,
-    // Preserve an explicitly selected worker effort across resume. Older
-    // metadata has no effort field and therefore falls back to leader state.
-    effort: meta?.effort,
+    // Preserve resolved worker effort; legacy metadata defaults to medium.
+    effort: resolveWorkerEffort(meta?.effort),
     // Fork resume: pass parent's system prompt (cache-identical prefix).
     // Non-fork: undefined → runAgent recomputes under wrapWithCwd so
     // getCwd() sees resumedWorktreePath.
@@ -217,6 +230,11 @@ export async function resumeAgentBackground({
     startTime,
     agentType: selectedAgent.agentType,
     isAsync: true,
+    taskId: agentId,
+    runId: createAgentId('run'),
+    workerId: agentId,
+    policyEpoch: 0,
+    effort: resolveWorkerEffort(meta?.effort),
   }
 
   const asyncAgentContext = {

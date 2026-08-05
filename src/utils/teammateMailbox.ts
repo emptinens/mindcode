@@ -25,6 +25,11 @@ import { logError } from './log.js'
 import { jsonParse, jsonStringify } from './slowOperations.js'
 import type { BackendType } from './swarm/backends/types.js'
 import { TEAM_LEAD_NAME } from './swarm/constants.js'
+import {
+  createWorkerTeamReportMessage,
+  parseWorkerTeamReportMessage,
+  type WorkerTeamReportMessage,
+} from './swarm/workerTeamReport.js'
 import { sanitizePathComponent } from './tasks.js'
 import { getAgentName, getTeammateColor, getTeamName } from './teammate.js'
 
@@ -389,19 +394,19 @@ export function formatTeammateMessages(
 }
 
 /**
- * Structured message sent when a teammate becomes idle (via Stop hook)
+ * Mailbox transport envelope for the canonical WorkerReport payload.
+ * Deprecated fields remain type-compatible for old UI readers, but new
+ * messages never serialize them and parsing rejects free-form notifications.
  */
-export type IdleNotificationMessage = {
-  type: 'idle_notification'
-  from: string
-  timestamp: string
-  /** Why the agent went idle */
-  idleReason?: 'available' | 'interrupted' | 'failed'
-  /** Brief summary of the last DM sent this turn (if any) */
-  summary?: string
+export type IdleNotificationMessage = WorkerTeamReportMessage & {
+  /** @deprecated use report.task_id */
   completedTaskId?: string
+  /** @deprecated use report.status */
   completedStatus?: 'resolved' | 'blocked' | 'failed'
+  /** @deprecated evidence is carried by report.evidence */
   failureReason?: string
+  /** @deprecated transcripts and free-form summaries are not transported */
+  summary?: string
 }
 
 /**
@@ -409,24 +414,16 @@ export type IdleNotificationMessage = {
  */
 export function createIdleNotification(
   agentId: string,
-  options?: {
-    idleReason?: IdleNotificationMessage['idleReason']
-    summary?: string
-    completedTaskId?: string
-    completedStatus?: 'resolved' | 'blocked' | 'failed'
-    failureReason?: string
+  options: {
+    idleReason?: WorkerTeamReportMessage['idleReason']
+    report: WorkerTeamReportMessage['report']
   },
 ): IdleNotificationMessage {
-  return {
-    type: 'idle_notification',
+  return createWorkerTeamReportMessage({
     from: agentId,
-    timestamp: new Date().toISOString(),
-    idleReason: options?.idleReason,
-    summary: options?.summary,
-    completedTaskId: options?.completedTaskId,
-    completedStatus: options?.completedStatus,
-    failureReason: options?.failureReason,
-  }
+    idleReason: options.idleReason ?? 'available',
+    report: options.report,
+  })
 }
 
 /**
@@ -435,15 +432,7 @@ export function createIdleNotification(
 export function isIdleNotification(
   messageText: string,
 ): IdleNotificationMessage | null {
-  try {
-    const parsed = jsonParse(messageText)
-    if (parsed && parsed.type === 'idle_notification') {
-      return parsed as IdleNotificationMessage
-    }
-  } catch {
-    // Not JSON or not a valid idle notification
-  }
-  return null
+  return parseWorkerTeamReportMessage(messageText) as IdleNotificationMessage | null
 }
 
 /**

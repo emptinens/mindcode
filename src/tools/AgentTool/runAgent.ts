@@ -8,8 +8,7 @@ import { getCommand, getSkillToolCommands, hasCommand } from '../../commands.js'
 import {
   DEFAULT_AGENT_PROMPT,
   enhanceSystemPromptWithEnvDetails,
-  getContentHandlingSection,
-  getInjectionHandlingSection,
+  getWorkerPolicySnapshot,
 } from '../../constants/prompts.js'
 import type { QuerySource } from '../../constants/querySource.js'
 import { getSystemContext, getUserContext } from '../../context.js'
@@ -45,7 +44,10 @@ import type {
 import { createAttachmentMessage } from '../../utils/attachments.js'
 import { AbortError } from '../../utils/errors.js'
 import { getDisplayPath } from '../../utils/file.js'
-import type { EffortValue } from '../../utils/effort.js'
+import {
+  resolveWorkerEffort,
+  type WorkerEffortInput,
+} from '../../utils/swarm/backends/types.js'
 import {
   cloneFileStateCache,
   createFileStateCacheWithSizeLimit,
@@ -290,8 +292,8 @@ export async function* runAgent({
     agentId?: AgentId
   }
   model?: ModelAlias
-  /** Per-worker reasoning effort. Defaults to the leader's current effort. */
-  effort?: EffortValue
+  /** Per-worker reasoning effort. Missing/invalid values resolve to medium. */
+  effort?: WorkerEffortInput
   maxTurns?: number
   /** Preserve toolUseResult on messages for subagents with viewable transcripts */
   preserveToolUseResults?: boolean
@@ -337,6 +339,7 @@ export async function* runAgent({
 
   const appState = toolUseContext.getAppState()
   const permissionMode = appState.toolPermissionContext.mode
+  const resolvedWorkerEffort = resolveWorkerEffort(effort)
   // Always-shared channel to the root AppState store. toolUseContext.setAppState
   // is a no-op when the *parent* is itself an async agent (nested async→async),
   // so session-scoped writes (hooks, bash tasks) must go through this instead.
@@ -484,11 +487,8 @@ export async function* runAgent({
       }
     }
 
-    // Workers inherit the leader's selected effort. Agent frontmatter may
-    // describe a preferred effort for the default Claude routing, but it must
-    // not override the leader's runtime reasoning choice on the Luna worker
-    // path. This keeps /effort and /thinking authoritative at the leader.
-    const effortValue = effort ?? state.effortValue
+    // Worker effort is resolved per task. Never read or inherit Leader effort.
+    const effortValue = resolvedWorkerEffort
 
     if (
       toolPermissionContext === state.toolPermissionContext &&
@@ -743,7 +743,7 @@ export async function* runAgent({
     agentType: agentDefinition.agentType,
     ...(worktreePath && { worktreePath }),
     ...(description && { description }),
-    ...(effort !== undefined && { effort }),
+    effort: resolvedWorkerEffort,
   }).catch(_err => logForDebugging(`Failed to write agent metadata: ${_err}`))
 
   // Track the last recorded message UUID for parent chain continuity
@@ -918,7 +918,7 @@ async function getAgentSystemPrompt(
   const enabledToolNames = new Set(resolvedTools.map(t => t.name))
   try {
     const agentPrompt = agentDefinition.getSystemPrompt({ toolUseContext })
-    const prompts = [agentPrompt, getInjectionHandlingSection(), getContentHandlingSection()]
+    const prompts = [agentPrompt, getWorkerPolicySnapshot()]
 
     return await enhanceSystemPromptWithEnvDetails(
       prompts,
@@ -928,7 +928,7 @@ async function getAgentSystemPrompt(
     )
   } catch (_error) {
     return enhanceSystemPromptWithEnvDetails(
-      [DEFAULT_AGENT_PROMPT, getInjectionHandlingSection(), getContentHandlingSection()],
+      [DEFAULT_AGENT_PROMPT, getWorkerPolicySnapshot()],
       resolvedAgentModel,
       additionalWorkingDirectories,
       enabledToolNames,

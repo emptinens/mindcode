@@ -212,9 +212,13 @@ ${
 }
 
 Per-worker reasoning:
-- Set the optional \`effort\` parameter to one of \`low\`, \`medium\`, \`high\`, \`xhigh\`, or \`max\` when a worker needs a specific reasoning budget.
-- If \`effort\` is omitted, the worker inherits the leader's current effort setting.
+- Set \`effort\` per worker to \`none\`, \`low\`, \`medium\`, \`high\`,
+  \`xhigh\`, or \`max\` when supported by gpt-5.6-luna.
+- Missing or invalid \`effort\` resolves to \`medium\` and never inherits the
+  Leader's effort.
 - The worker model remains fixed at \`gpt-5.6-luna\`; the \`model\` field is legacy compatibility only.
+- Declare \`files_touched\` or precise \`read_set\`/\`write_set\` targets and
+  \`blocked_by\` IDs so overlap validation serializes conflicting work.
 `
 
   // Coordinator mode gets the slim prompt -- the coordinator system prompt

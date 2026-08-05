@@ -59,6 +59,15 @@ import { getTokenCountFromUsage } from '../../utils/tokens.js'
 import { EXIT_PLAN_MODE_V2_TOOL_NAME } from '../ExitPlanModeTool/constants.js'
 import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME } from './constants.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
+import type { WorkerEffort } from '../../utils/swarm/backends/types.js'
+import {
+  appendWorkerReportEvidence,
+  buildWorkerReport,
+  persistValidatedWorkerReport,
+  serializeWorkerReport,
+  type WorkerReportStatus,
+  workerReportSchema,
+} from './workerReport.js'
 export type ResolvedAgentTools = {
   hasWildcard: boolean
   validTools: string[]
@@ -254,6 +263,7 @@ export const agentToolResultSchema = lazySchema(() =>
         })
         .nullable(),
     }),
+    workerReport: workerReportSchema,
   }),
 )
 
@@ -283,6 +293,13 @@ export function finalizeAgentTool(
     startTime: number
     agentType: string
     isAsync: boolean
+    taskId?: string
+    runId?: string
+    workerId?: string
+    policyEpoch?: number
+    effort?: WorkerEffort
+    declaredChangedFiles?: readonly string[]
+    reportStatus?: WorkerReportStatus
   },
 ): AgentToolResult {
   const {
@@ -318,6 +335,23 @@ export function finalizeAgentTool(
 
   const totalTokens = getTokenCountFromUsage(lastAssistantMessage.message.usage)
   const totalToolUseCount = countToolUses(agentMessages)
+  const workerReport = buildWorkerReport({
+    taskId: metadata.taskId ?? agentId,
+    runId: metadata.runId,
+    workerId: metadata.workerId ?? agentId,
+    policyEpoch: metadata.policyEpoch,
+    status: metadata.reportStatus ?? 'completed',
+    declaredChangedFiles: metadata.declaredChangedFiles,
+    finalText: extractTextContent(content, '\n'),
+    tokensUsed: totalTokens,
+    effortUsed: metadata.effort ?? 'medium',
+  })
+  content = [
+    {
+      type: 'text' as const,
+      text: serializeWorkerReport(workerReport),
+    },
+  ]
 
   logEvent('tengu_agent_tool_completed', {
     agent_type:
@@ -353,6 +387,24 @@ export function finalizeAgentTool(
     totalTokens,
     totalToolUseCount,
     usage: lastAssistantMessage.message.usage,
+    workerReport,
+  }
+}
+
+export function appendAgentResultEvidence(
+  result: AgentToolResult,
+  evidence: string,
+): AgentToolResult {
+  const workerReport = appendWorkerReportEvidence(result.workerReport, evidence)
+  return {
+    ...result,
+    workerReport,
+    content: [
+      {
+        type: 'text',
+        text: serializeWorkerReport(workerReport),
+      },
+    ],
   }
 }
 
@@ -516,6 +568,9 @@ export async function runAsyncAgentLifecycle({
   agentIdForCleanup,
   enableSummarization,
   getWorktreeResult,
+  onExecutionCompleted,
+  onExecutionFailed,
+  onExecutionReleased,
 }: {
   taskId: string
   abortController: AbortController
@@ -532,11 +587,29 @@ export async function runAsyncAgentLifecycle({
     worktreePath?: string
     worktreeBranch?: string
   }>
+  onExecutionCompleted?: (result: AgentToolResult) => void
+  onExecutionFailed?: (error: unknown) => void
+  onExecutionReleased?: () => void
 }): Promise<void> {
   let stopSummarization: (() => void) | undefined
   const agentMessages: MessageType[] = []
+  const tracker = createProgressTracker()
+  let executionSettled = false
+  const settleExecution = (
+    kind: 'completed' | 'failed' | 'released',
+    value?: AgentToolResult | unknown,
+  ) => {
+    if (executionSettled) return
+    executionSettled = true
+    if (kind === 'completed') {
+      onExecutionCompleted?.(value as AgentToolResult)
+    } else if (kind === 'failed') {
+      onExecutionFailed?.(value)
+    } else {
+      onExecutionReleased?.()
+    }
+  }
   try {
-    const tracker = createProgressTracker()
     const resolveActivity = createActivityDescriptionResolver(
       toolUseContext.options.tools,
     )
@@ -594,15 +667,40 @@ export async function runAsyncAgentLifecycle({
 
     stopSummarization?.()
 
-    const agentResult = finalizeAgentTool(agentMessages, taskId, metadata)
-
-    // Mark task completed FIRST so TaskOutput(block=true) unblocks
-    // immediately. classifyHandoffIfNeeded (API call) and getWorktreeResult
-    // (git exec) are notification embellishments that can hang — they must
-    // not gate the status transition (gh-20236).
-    completeAsyncAgent(agentResult, rootSetAppState)
-
-    let finalMessage = extractTextContent(agentResult.content, '\n')
+    let agentResult = finalizeAgentTool(agentMessages, taskId, metadata)
+    const validationError = new Error(
+      'Worker report validation failed; task completion was rejected',
+    )
+    const reportCanComplete = persistValidatedWorkerReport(agentResult, {
+      persist: result => completeAsyncAgent(result, rootSetAppState),
+      complete: result => settleExecution('completed', result),
+      reject: () => {
+        failAsyncAgent(taskId, validationError.message, rootSetAppState)
+        settleExecution('failed', validationError)
+      },
+    })
+    if (!reportCanComplete) {
+      const invalidReportMessage = serializeWorkerReport(
+        agentResult.workerReport,
+      )
+      const worktreeResult = await getWorktreeResult()
+      enqueueAgentNotification({
+        taskId,
+        description,
+        status: 'failed',
+        error: validationError.message,
+        setAppState: rootSetAppState,
+        finalMessage: invalidReportMessage,
+        usage: {
+          totalTokens: getTokenCountFromTracker(tracker),
+          toolUses: agentResult.totalToolUseCount,
+          durationMs: agentResult.totalDurationMs,
+        },
+        toolUseId: toolUseContext.toolUseId,
+        ...worktreeResult,
+      })
+      return
+    }
 
     if (feature('TRANSCRIPT_CLASSIFIER')) {
       const handoffWarning = await classifyHandoffIfNeeded({
@@ -615,9 +713,10 @@ export async function runAsyncAgentLifecycle({
         totalToolUseCount: agentResult.totalToolUseCount,
       })
       if (handoffWarning) {
-        finalMessage = `${handoffWarning}\n\n${finalMessage}`
+        agentResult = appendAgentResultEvidence(agentResult, handoffWarning)
       }
     }
+    const finalMessage = serializeWorkerReport(agentResult.workerReport)
 
     const worktreeResult = await getWorktreeResult()
 
@@ -638,6 +737,7 @@ export async function runAsyncAgentLifecycle({
   } catch (error) {
     stopSummarization?.()
     if (error instanceof AbortError) {
+      settleExecution('released')
       // killAsyncAgent is a no-op if TaskStop already set status='killed' —
       // but only this catch handler has agentMessages, so the notification
       // must fire unconditionally. Transition status BEFORE worktree cleanup
@@ -656,30 +756,55 @@ export async function runAsyncAgentLifecycle({
       })
       const worktreeResult = await getWorktreeResult()
       const partialResult = extractPartialResult(agentMessages)
+      const failureReport = buildWorkerReport({
+        taskId: metadata.taskId ?? taskId,
+        runId: metadata.runId,
+        workerId: metadata.workerId ?? taskId,
+        policyEpoch: metadata.policyEpoch,
+        status: 'failed',
+        declaredChangedFiles: metadata.declaredChangedFiles,
+        finalText: partialResult ?? 'Worker execution was cancelled.',
+        tokensUsed: getTokenCountFromTracker(tracker),
+        effortUsed: metadata.effort ?? 'medium',
+      })
       enqueueAgentNotification({
         taskId,
         description,
         status: 'killed',
         setAppState: rootSetAppState,
         toolUseId: toolUseContext.toolUseId,
-        finalMessage: partialResult,
+        finalMessage: serializeWorkerReport(failureReport),
         ...worktreeResult,
       })
       return
     }
     const msg = errorMessage(error)
+    settleExecution('failed', error)
     failAsyncAgent(taskId, msg, rootSetAppState)
     const worktreeResult = await getWorktreeResult()
     enqueueAgentNotification({
       taskId,
       description,
       status: 'failed',
-      error: msg,
+      error: serializeWorkerReport(
+        buildWorkerReport({
+          taskId: metadata.taskId ?? taskId,
+          runId: metadata.runId,
+          workerId: metadata.workerId ?? taskId,
+          policyEpoch: metadata.policyEpoch,
+          status: 'failed',
+          declaredChangedFiles: metadata.declaredChangedFiles,
+          finalText: msg,
+          tokensUsed: getTokenCountFromTracker(tracker),
+          effortUsed: metadata.effort ?? 'medium',
+        }),
+      ),
       setAppState: rootSetAppState,
       toolUseId: toolUseContext.toolUseId,
       ...worktreeResult,
     })
   } finally {
+    settleExecution('released')
     clearInvokedSkillsForAgent(agentIdForCleanup)
     clearDumpState(agentIdForCleanup)
   }
