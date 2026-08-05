@@ -4,6 +4,7 @@ import type { ModelAlias } from './aliases.js'
 import {
   FIXED_SUBAGENT_MODEL,
   FIXED_SUBAGENT_MODEL_DISPLAY,
+  getConfiguredSubagentModel,
 } from './subagentModel.js'
 
 export const AGENT_MODEL_OPTIONS = [FIXED_SUBAGENT_MODEL] as const
@@ -19,14 +20,14 @@ export type AgentModelOption = {
  * Get the model shown for newly created subagents.
  */
 export function getDefaultSubagentModel(): string {
-  return FIXED_SUBAGENT_MODEL
+  return getConfiguredSubagentModel()
 }
 
 export class FixedSubagentModelUnavailableError extends Error {
   readonly code = 'FIXED_SUBAGENT_MODEL_UNAVAILABLE'
 
   constructor(reason: string) {
-    super(`Fixed subagent model ${FIXED_SUBAGENT_MODEL} is unavailable: ${reason}`)
+    super(`Configured subagent model is unavailable: ${reason}`)
     this.name = 'FixedSubagentModelUnavailableError'
   }
 }
@@ -38,7 +39,8 @@ export class FixedSubagentModelUnavailableError extends Error {
  * entry that is available and exposes tool execution. This resolver fails
  * closed when the catalog is loading, stale, missing, or incompatible.
  */
-export function resolveFixedSubagentModel(): typeof FIXED_SUBAGENT_MODEL {
+export function resolveFixedSubagentModel(): string {
+  const configuredModel = getConfiguredSubagentModel()
   const catalog = getVexzyModelCatalogState()
   if (catalog.state !== 'ready' || catalog.registry === undefined) {
     throw new FixedSubagentModelUnavailableError(
@@ -46,7 +48,7 @@ export function resolveFixedSubagentModel(): typeof FIXED_SUBAGENT_MODEL {
     )
   }
 
-  const model = catalog.registry.get(FIXED_SUBAGENT_MODEL)
+  const model = catalog.registry.get(configuredModel)
   if (model === undefined) {
     throw new FixedSubagentModelUnavailableError('model is absent from catalog')
   }
@@ -59,7 +61,7 @@ export function resolveFixedSubagentModel(): typeof FIXED_SUBAGENT_MODEL {
     )
   }
 
-  return FIXED_SUBAGENT_MODEL
+  return configuredModel
 }
 
 /**
@@ -82,7 +84,9 @@ export function getAgentModel(
 }
 
 export function getAgentModelDisplay(_model: string | undefined): string {
-  return FIXED_SUBAGENT_MODEL_DISPLAY
+  return getConfiguredSubagentModel() === FIXED_SUBAGENT_MODEL
+    ? FIXED_SUBAGENT_MODEL_DISPLAY
+    : getConfiguredSubagentModel()
 }
 
 /**
@@ -91,9 +95,9 @@ export function getAgentModelDisplay(_model: string | undefined): string {
 export function getAgentModelOptions(): AgentModelOption[] {
   return [
     {
-      value: FIXED_SUBAGENT_MODEL,
-      label: FIXED_SUBAGENT_MODEL_DISPLAY,
-      description: 'Fixed model for every agent and teammate',
+      value: getConfiguredSubagentModel(),
+      label: getAgentModelDisplay(undefined),
+      description: 'Configured exact VEXZY model for every Worker/subagent',
     },
   ]
 }

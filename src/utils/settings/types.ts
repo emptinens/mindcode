@@ -710,6 +710,11 @@ export const SettingsSchema = lazySchema(() =>
         .describe(
           'Persisted VEXZY Leader reasoning override.',
         ),
+      subagentModel: z
+        .string()
+        .min(1)
+        .optional()
+        .describe('Persisted exact VEXZY model for Worker/subagent execution.'),
       advisorModel: z
         .string()
         .optional()

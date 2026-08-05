@@ -68,14 +68,14 @@ import {
   isInsideTmux,
 } from '../../utils/swarm/teammateLayoutManager.js'
 import { acquireSwarmWorkerSlot } from '../../utils/swarm/concurrencyPolicy.js'
-import { FIXED_SUBAGENT_MODEL } from '../../utils/model/subagentModel.js'
+import { getConfiguredSubagentModel } from '../../utils/model/subagentModel.js'
 import { registerTask } from '../../utils/task/framework.js'
 import { writeToMailbox } from '../../utils/teammateMailbox.js'
 import type { CustomAgentDefinition } from '../AgentTool/loadAgentsDir.js'
 import { isCustomAgent } from '../AgentTool/loadAgentsDir.js'
 
 /**
- * Resolve every Agent/teammate spawn to the dedicated Luna model.
+ * Resolve every Agent/teammate spawn to the configured VEXZY Worker model.
  * The leader model, tool model aliases, and teammate config are intentionally
  * not consulted here.
  */
@@ -83,7 +83,7 @@ export function resolveTeammateModel(
   _inputModel: string | undefined,
   _leaderModel: string | null,
 ): string {
-  return FIXED_SUBAGENT_MODEL
+  return getConfiguredSubagentModel()
 }
 
 // ============================================================================

@@ -4,7 +4,7 @@ import { formatAgentId, parseAgentId } from '../../../utils/agentId.js'
 import { quote } from '../../../utils/bash/shellQuote.js'
 import { registerCleanup } from '../../../utils/cleanupRegistry.js'
 import { logForDebugging } from '../../../utils/debug.js'
-import { FIXED_SUBAGENT_MODEL } from '../../../utils/model/subagentModel.js'
+import { getConfiguredSubagentModel } from '../../../utils/model/subagentModel.js'
 import { jsonStringify } from '../../../utils/slowOperations.js'
 import { writeToMailbox } from '../../../utils/teammateMailbox.js'
 import { readTeamFile } from '../teamHelpers.js'
@@ -184,8 +184,8 @@ export class PaneBackendExecutor implements TeammateExecutor {
         )
         .join(' ')
       inheritedFlags = inheritedFlags
-        ? `${inheritedFlags} --model ${quote([FIXED_SUBAGENT_MODEL])}`
-        : `--model ${quote([FIXED_SUBAGENT_MODEL])}`
+        ? `${inheritedFlags} --model ${quote([getConfiguredSubagentModel()])}`
+        : `--model ${quote([getConfiguredSubagentModel()])}`
       inheritedFlags = `${inheritedFlags} --effort ${quote([resolvedEffort])}`
 
       const flagsStr = inheritedFlags ? ` ${inheritedFlags}` : ''

@@ -13,7 +13,7 @@ import type {
 } from '../../types/message.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { createUserMessage } from '../../utils/messages.js'
-import { FIXED_SUBAGENT_MODEL } from '../../utils/model/subagentModel.js'
+import { getConfiguredSubagentModel } from '../../utils/model/subagentModel.js'
 import type { BuiltInAgentDefinition } from './loadAgentsDir.js'
 
 /**
@@ -66,7 +66,7 @@ export const FORK_AGENT = {
     'Implicit fork — inherits full conversation context. Not selectable via subagent_type; triggered by omitting subagent_type when the fork experiment is active.',
   tools: ['*'],
   maxTurns: 200,
-  model: FIXED_SUBAGENT_MODEL,
+  model: getConfiguredSubagentModel(),
   permissionMode: 'bubble',
   source: 'built-in',
   baseDir: 'built-in',

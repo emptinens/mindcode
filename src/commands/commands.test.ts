@@ -15,6 +15,7 @@ test('VEXZY builtin registry exposes the active MindCode command surface', () =>
     'copycon',
     'model',
     'effort',
+    'submodel',
     'agents',
     'tasks',
     'compact',

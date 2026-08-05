@@ -16,7 +16,7 @@ import {
   getJailbreakLevel,
   parseJailbreakLevel,
 } from '../jailbreak.js'
-import { FIXED_SUBAGENT_MODEL } from '../model/subagentModel.js'
+import { getConfiguredSubagentModel } from '../model/subagentModel.js'
 import type { PermissionMode } from '../permissions/PermissionMode.js'
 import { getTeammateModeFromSnapshot } from './backends/teammateModeSnapshot.js'
 import { TEAMMATE_COMMAND_ENV_VAR } from './constants.js'
@@ -155,7 +155,7 @@ export function buildInheritedEnvVars(
 
   for (const key of TEAMMATE_ENV_VARS) {
     const value =
-      key === 'MINDCODE_MODEL' ? FIXED_SUBAGENT_MODEL : process.env[key]
+      key === 'MINDCODE_MODEL' ? getConfiguredSubagentModel() : process.env[key]
     if (value !== undefined && value !== '') {
       envVars.push(`${key}=${quote([value])}`)
     }

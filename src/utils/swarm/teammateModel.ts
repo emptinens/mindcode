@@ -1,5 +1,5 @@
-import { FIXED_SUBAGENT_MODEL } from '../model/subagentModel.js'
+import { getConfiguredSubagentModel } from '../model/subagentModel.js'
 
 export function getHardcodedTeammateModelFallback(): string {
-  return FIXED_SUBAGENT_MODEL
+  return getConfiguredSubagentModel()
 }

@@ -1,7 +1,6 @@
 import type { AgentColorName } from '../../../tools/AgentTool/agentColorManager.js'
 import type { EffortValue } from '../../../utils/effort.js'
 import { resolveFixedSubagentModel } from '../../model/agent.js'
-import type { FIXED_SUBAGENT_MODEL } from '../../model/subagentModel.js'
 
 /** Worker-only reasoning levels supported by the fixed VEXZY Luna model. */
 export const WORKER_EFFORT_LEVELS = [
@@ -25,7 +24,7 @@ export function resolveWorkerEffort(value: unknown): WorkerEffort {
 }
 
 export function resolveWorkerRuntime(value: unknown): Readonly<{
-  model: typeof FIXED_SUBAGENT_MODEL
+  model: string
   effort: WorkerEffort
 }> {
   const model = resolveFixedSubagentModel()

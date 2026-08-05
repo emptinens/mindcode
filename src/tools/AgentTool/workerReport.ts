@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod/v4'
 import type { WorkerEffort } from '../../utils/swarm/backends/types.js'
-import { FIXED_SUBAGENT_MODEL } from '../../utils/model/subagentModel.js'
+import { getConfiguredSubagentModel } from '../../utils/model/subagentModel.js'
 
 export const WORKER_REPORT_SCHEMA_VERSION = 'worker-report/1' as const
 export const WORKER_REPORT_STATUSES = [
@@ -77,7 +77,7 @@ export const workerReportSchema = z
     task_id: boundedId,
     run_id: boundedId,
     worker_id: boundedId,
-    model: z.literal(FIXED_SUBAGENT_MODEL),
+    model: z.string().min(1),
     effort_used: z.enum(WORKER_REPORT_EFFORTS),
     policy_epoch: z.number().int().nonnegative().finite(),
     status: z.enum(WORKER_REPORT_STATUSES),
@@ -289,7 +289,7 @@ export function buildWorkerReport(input: BuildWorkerReportInput): WorkerReport {
     task_id: taskId,
     run_id: runId,
     worker_id: workerId,
-    model: FIXED_SUBAGENT_MODEL,
+    model: getConfiguredSubagentModel(),
     effort_used: normalizeEffort(input.effortUsed),
     policy_epoch: policyEpoch,
     status,
@@ -389,7 +389,7 @@ export function buildWorkerReportInstruction(
     task_id: taskId,
     run_id: context.runId ?? taskId,
     worker_id: context.workerId ?? taskId,
-    model: FIXED_SUBAGENT_MODEL,
+    model: getConfiguredSubagentModel(),
     effort_used: effort,
     policy_epoch: context.policyEpoch ?? 0,
     status: 'completed',

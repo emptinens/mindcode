@@ -2,7 +2,7 @@ import { feature } from 'bun:bundle'
 import { getIsNonInteractiveSession } from '../../bootstrap/state.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
-import { FIXED_SUBAGENT_MODEL } from '../../utils/model/subagentModel.js'
+import { getConfiguredSubagentModel } from '../../utils/model/subagentModel.js'
 import { MINDCODE_GUIDE_AGENT } from './built-in/mindCodeGuideAgent.js'
 import { EXPLORE_AGENT } from './built-in/exploreAgent.js'
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js'
@@ -12,7 +12,7 @@ import { VERIFICATION_AGENT } from './built-in/verificationAgent.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
 
 function withFixedWorkerModel(agent: AgentDefinition): AgentDefinition {
-  return { ...agent, model: FIXED_SUBAGENT_MODEL }
+  return { ...agent, model: getConfiguredSubagentModel() }
 }
 
 export function areExplorePlanAgentsEnabled(): boolean {
