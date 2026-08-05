@@ -58,73 +58,14 @@ plugin({
     build.onResolve(
       {
         filter:
-          /^(?:@ant\/|@anthropic-ai\/(?:bedrock-sdk|foundry-sdk|vertex-sdk|mcpb|sandbox-runtime)$|audio-capture-napi$|modifiers-napi$|sharp$)/,
+          /^(?:@ant\/|@anthropic-ai\/(?:bedrock-sdk|foundry-sdk|vertex-sdk)$|audio-capture-napi$|modifiers-napi$|sharp$)/,
       },
       args => ({
         path: args.path,
-        namespace:
-          args.path === '@anthropic-ai/sandbox-runtime'
-            ? 'sandbox-runtime-shim'
-            : args.path === '@ant/claude-for-chrome-mcp'
-              ? 'chrome-mcp-shim'
-              : 'missing-package',
+        namespace: 'missing-package',
       }),
     )
 
-    build.onLoad({ filter: /.*/, namespace: 'sandbox-runtime-shim' }, () => ({
-      loader: 'js',
-      contents: `
-export class SandboxViolationStore {
-  getRecentViolations() { return [] }
-  getViolationCount() { return 0 }
-  getTotalCount() { return 0 }
-  subscribe(_cb) { return () => {} }
-  clear() {}
-}
-
-const emptyStore = new SandboxViolationStore()
-
-export const SandboxRuntimeConfigSchema = {
-  parse(value) { return value },
-  safeParse(value) { return { success: true, data: value } },
-}
-
-export const SandboxManager = {
-  checkDependencies() { return { errors: [], warnings: [] } },
-  isSupportedPlatform() { return false },
-  async initialize() {},
-  updateConfig() {},
-  async reset() {},
-  getFsReadConfig() { return { allowed: [], denied: [] } },
-  getFsWriteConfig() { return { allowOnly: [], denyWithinAllow: [] } },
-  getNetworkRestrictionConfig() { return { allowed: [], denied: [] } },
-  getIgnoreViolations() { return undefined },
-  getAllowUnixSockets() { return undefined },
-  getAllowLocalBinding() { return undefined },
-  getEnableWeakerNestedSandbox() { return undefined },
-  getProxyPort() { return undefined },
-  getSocksProxyPort() { return undefined },
-  getLinuxHttpSocketPath() { return undefined },
-  getLinuxSocksSocketPath() { return undefined },
-  async waitForNetworkInitialization() { return false },
-  getSandboxViolationStore() { return emptyStore },
-  annotateStderrWithSandboxFailures(_command, stderr) { return stderr },
-  cleanupAfterCommand() {},
-  async wrapWithSandbox(command) { return command },
-}
-`,
-    }))
-
-    build.onLoad({ filter: /.*/, namespace: 'chrome-mcp-shim' }, () => ({
-      loader: 'js',
-      contents: `
-export const BROWSER_TOOLS = []
-export function createClaudeForChromeMcpServer() {
-  return { async connect() {} }
-}
-export default { BROWSER_TOOLS, createClaudeForChromeMcpServer }
-`,
-    }))
 
     build.onLoad(
       { filter: /.*/, namespace: 'missing-package' },

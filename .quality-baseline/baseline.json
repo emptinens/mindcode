@@ -3,13 +3,13 @@
   "typecheck": {
     "command": "tsc --noEmit",
     "version": "Version 5.9.3",
-    "hash": "0da46d66c07d0e595f96415d98d92af5f6c9c94e76464861d6f157e972256ad4",
-    "count": 4766
+    "hash": "69d4beeab0cfa7ed0ff5faf02c48a594dbaf7517cd2c58cf2fa1c263e0cf401a",
+    "count": 4184
   },
   "lint": {
     "command": "biome lint src/ --max-diagnostics=none --reporter=github",
     "version": "Version: 1.9.4",
-    "hash": "087db5dd3f68b596ce817b9f6c05b7816dcf1ae2c9505a4407b8112f48e29a69",
-    "count": 9341
+    "hash": "c765651ef26cf2c74e486b529fba14b14629848552ccd3a1df596ca6eef5b363",
+    "count": 8167
   }
 }
