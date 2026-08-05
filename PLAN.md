@@ -65,7 +65,7 @@
 | Проверка | Результат |
 |---|---|
 | Полный test-run | `431 pass`, `0 fail`, `96 files` |
-| Architectural coverage | `91.43%` (`6394/6993`), required `>=85%` |
+| Architectural coverage | `91.44%` (`6376/6973`), required `>=85%` |
 | `bun run lint` | PASS; baseline `8167` diagnostics |
 | `bun run typecheck` | PASS; baseline `4184` diagnostics |
 | `bun run sources:check` | `1929 files`, `0 trailers` |
