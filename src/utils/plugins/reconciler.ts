@@ -62,12 +62,6 @@ export function diffMarketplaces(
 
     if (!state) {
       missing.push(name)
-    } else if (intent.sourceIsFallback) {
-      // Fallback: presence suffices. Don't compare sources — the declared source
-      // is only a default for the `missing` branch. If seed/prior-install/mirror
-      // materialized this marketplace under ANY source, leave it alone. Comparing
-      // would report sourceChanged → re-clone → stomp the materialized content.
-      upToDate.push(name)
     } else if (!isEqual(normalizedIntent, state.source)) {
       sourceChanged.push({
         name,

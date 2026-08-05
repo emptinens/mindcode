@@ -21,6 +21,7 @@ describe('Vexzy authentication', () => {
         'content-type': 'application/json',
         Authorization: 'Basic wrong',
         'x-request-id': 'request-1',
+        'X-API-Key': 'legacy-key',
       }),
     ).toEqual({
       Authorization: 'Bearer forge-test-key',
@@ -40,7 +41,6 @@ describe('Vexzy authentication', () => {
 
     expect(redactVexzyHeaders(headers ?? {})).toEqual({
       authorization: 'Bearer [REDACTED]',
-      'x-api-key': '[REDACTED]',
     })
     expect(JSON.stringify(redactVexzyHeaders(headers ?? {}))).not.toContain(
       apiKey,

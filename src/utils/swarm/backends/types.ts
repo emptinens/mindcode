@@ -1,5 +1,39 @@
 import type { AgentColorName } from '../../../tools/AgentTool/agentColorManager.js'
 import type { EffortValue } from '../../../utils/effort.js'
+import { resolveFixedSubagentModel } from '../../model/agent.js'
+import type { FIXED_SUBAGENT_MODEL } from '../../model/subagentModel.js'
+
+/** Worker-only reasoning levels supported by the fixed VEXZY Luna model. */
+export const WORKER_EFFORT_LEVELS = [
+  'none',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+] as const
+
+export type WorkerEffort = (typeof WORKER_EFFORT_LEVELS)[number]
+export type WorkerEffortInput = WorkerEffort | EffortValue
+
+/** Resolve worker effort without consulting Leader AppState. */
+export function resolveWorkerEffort(value: unknown): WorkerEffort {
+  return typeof value === 'string' &&
+    (WORKER_EFFORT_LEVELS as readonly string[]).includes(value)
+    ? (value as WorkerEffort)
+    : 'medium'
+}
+
+export function resolveWorkerRuntime(value: unknown): Readonly<{
+  model: typeof FIXED_SUBAGENT_MODEL
+  effort: WorkerEffort
+}> {
+  const model = resolveFixedSubagentModel()
+  return Object.freeze({
+    model,
+    effort: resolveWorkerEffort(value),
+  })
+}
 
 /**
  * Types of backends available for teammate execution.
@@ -220,7 +254,7 @@ export type TeammateSpawnConfig = TeammateIdentity & {
   /** Model to use for this teammate */
   model?: string
   /** Reasoning effort to pass to the child CLI. */
-  effort?: EffortValue
+  effort?: WorkerEffortInput
   /** System prompt for this teammate (resolved from workflow config) */
   systemPrompt?: string
   /** How to apply the system prompt: 'replace' or 'append' to default */

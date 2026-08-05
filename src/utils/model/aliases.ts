@@ -1,29 +1,20 @@
-export const MODEL_ALIASES = [
-  'sonnet',
-  'sonnet5',
-  'opus46',
-  'opus5',
-  'haiku',
-  'best',
-  'sonnet[1m]',
-  'sonnet5[1m]',
-  'opus46[1m]',
-  'opus5[1m]',
-  'opusplan',
-] as const
-export type ModelAlias = (typeof MODEL_ALIASES)[number]
+/**
+ * Model identifiers are owned by the VEXZY `/models` response.
+ *
+ * Keep this compatibility module because a few public tool contracts still
+ * carry the historical `ModelAlias` type, but do not define or resolve any
+ * built-in model aliases here. An identifier only becomes selectable after it
+ * is returned by the ready VEXZY catalog.
+ */
+export type ModelAlias = string
 
-export function isModelAlias(modelInput: string): modelInput is ModelAlias {
-  return MODEL_ALIASES.includes(modelInput as ModelAlias)
+export const MODEL_ALIASES: readonly [] = []
+export const MODEL_FAMILY_ALIASES: readonly [] = []
+
+export function isModelAlias(_modelInput: string): _modelInput is ModelAlias {
+  return false
 }
 
-/**
- * Bare model family aliases that act as wildcards in the availableModels allowlist.
- * When "opus46" is in the allowlist, ANY opus model is allowed (opus 4.5, 4.6, etc.).
- * When a specific model ID is in the allowlist, only that exact version is allowed.
- */
-export const MODEL_FAMILY_ALIASES = ['sonnet', 'sonnet5', 'opus46', 'haiku'] as const
-
-export function isModelFamilyAlias(model: string): boolean {
-  return (MODEL_FAMILY_ALIASES as readonly string[]).includes(model)
+export function isModelFamilyAlias(_model: string): boolean {
+  return false
 }

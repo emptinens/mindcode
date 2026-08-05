@@ -42,7 +42,6 @@ const KNOWN_PUBLIC_HOSTS = new Set([
   'codeberg.org',
   'dev.azure.com',
   'ssh.dev.azure.com',
-  'storage.googleapis.com', // GCS — where Dickson's migration points
 ])
 
 /**

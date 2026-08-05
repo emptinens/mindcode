@@ -1,108 +1,39 @@
-// biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered
 import addDir from './commands/add-dir/index.js'
-import autofixPr from './commands/autofix-pr/index.js'
-import backfillSessions from './commands/backfill-sessions/index.js'
-import goodClaude from './commands/good-claude/index.js'
-import issue from './commands/issue/index.js'
 import clear from './commands/clear/index.js'
-import commit from './commands/commit.js'
-import commitPushPr from './commands/commit-push-pr.js'
 import compact from './commands/compact/index.js'
+import copy from './commands/copy/index.js'
+import copycon from './commands/copycon/index.js'
 import config from './commands/config/index.js'
 import { context, contextNonInteractive } from './commands/context/index.js'
-import cost from './commands/cost/index.js'
 import diff from './commands/diff/index.js'
-import ctx_viz from './commands/ctx_viz/index.js'
 import doctor from './commands/doctor/index.js'
 import memory from './commands/memory/index.js'
 import help from './commands/help/index.js'
 import ide from './commands/ide/index.js'
-import init from './commands/init.js'
-import initVerifiers from './commands/init-verifiers.js'
 import keybindings from './commands/keybindings/index.js'
 import account from './commands/account/index.js'
 import login from './commands/login/index.js'
 import logout from './commands/logout/index.js'
-import breakCache from './commands/break-cache/index.js'
 import mcp from './commands/mcp/index.js'
-import onboarding from './commands/onboarding/index.js'
 import rename from './commands/rename/index.js'
 import resume from './commands/resume/index.js'
-import review from './commands/review.js'
-import session from './commands/session/index.js'
-import share from './commands/share/index.js'
 import skills from './commands/skills/index.js'
 import status from './commands/status/index.js'
 import tasks from './commands/tasks/index.js'
-import teleport from './commands/teleport/index.js'
-/* eslint-disable @typescript-eslint/no-require-imports */
-const agentsPlatform =
-  process.env.USER_TYPE === 'ant'
-    ? require('./commands/agents-platform/index.js').default
-    : null
-/* eslint-enable @typescript-eslint/no-require-imports */
-import securityReview from './commands/security-review.js'
-import bughunter from './commands/bughunter/index.js'
 import theme from './commands/theme/index.js'
 import vim from './commands/vim/index.js'
 import thinking from './commands/thinking/index.js'
-import { feature } from 'bun:bundle'
-// Dead code elimination: conditional imports
-/* eslint-disable @typescript-eslint/no-require-imports */
-const forceSnip = feature('HISTORY_SNIP')
-  ? require('./commands/force-snip.js').default
-  : null
-const workflowsCmd = feature('WORKFLOW_SCRIPTS')
-  ? (
-      require('./commands/workflows/index.js') as typeof import('./commands/workflows/index.js')
-    ).default
-  : null
-const clearSkillIndexCache = feature('EXPERIMENTAL_SKILL_SEARCH')
-  ? (
-      require('./services/skillSearch/localSearch.js') as typeof import('./services/skillSearch/localSearch.js')
-    ).clearSkillIndexCache
-  : null
-const subscribePr = feature('KAIROS_GITHUB_WEBHOOKS')
-  ? require('./commands/subscribe-pr.js').default
-  : null
-const ultraplan = feature('ULTRAPLAN')
-  ? require('./commands/ultraplan.js').default
-  : null
-const peersCmd = feature('UDS_INBOX')
-  ? (
-      require('./commands/peers/index.js') as typeof import('./commands/peers/index.js')
-    ).default
-  : null
-const forkCmd = feature('FORK_SUBAGENT')
-  ? (
-      require('./commands/fork/index.js') as typeof import('./commands/fork/index.js')
-    ).default
-  : null
-/* eslint-enable @typescript-eslint/no-require-imports */
+import securityReview from './commands/security-review.js'
 import permissions from './commands/permissions/index.js'
 import plan from './commands/plan/index.js'
-import fast from './commands/fast/index.js'
 import hooks from './commands/hooks/index.js'
-import files from './commands/files/index.js'
 import folder from './commands/folder/index.js'
 import branch from './commands/branch/index.js'
 import agents from './commands/agents/index.js'
 import plugin from './commands/plugin/index.js'
 import reloadPlugins from './commands/reload-plugins/index.js'
 import rewind from './commands/rewind/index.js'
-import mockLimits from './commands/mock-limits/index.js'
-import bridgeKick from './commands/bridge-kick.js'
-import version from './commands/version.js'
-import summary from './commands/summary/index.js'
-import {
-  resetLimits,
-  resetLimitsNonInteractive,
-} from './commands/reset-limits/index.js'
-import antTrace from './commands/ant-trace/index.js'
-import perfIssue from './commands/perf-issue/index.js'
-import { logError } from './utils/log.js'
-import { toError } from './utils/errors.js'
-import { logForDebugging } from './utils/debug.js'
+import { feature } from 'bun:bundle'
 import {
   getSkillDirCommands,
   clearSkillCaches,
@@ -117,9 +48,6 @@ import {
   clearPluginSkillsCache,
 } from './utils/plugins/loadPluginCommands.js'
 import memoize from 'lodash-es/memoize.js'
-import { isUsing3PServices, isClaudeAISubscriber } from './utils/auth.js'
-import { isFirstPartyAnthropicBaseUrl } from './utils/model/providers.js'
-import env from './commands/env/index.js'
 import exit from './commands/exit/index.js'
 import jailbreak from './commands/jailbreak/index.js'
 import model from './commands/model/index.js'
@@ -127,14 +55,23 @@ import outputStyle from './commands/output-style/index.js'
 import statusline from './commands/statusline.js'
 import effort from './commands/effort/index.js'
 import stats from './commands/stats/index.js'
-import oauthRefresh from './commands/oauth-refresh/index.js'
-import debugToolCall from './commands/debug-tool-call/index.js'
+import { logError } from './utils/log.js'
+import { toError } from './utils/errors.js'
+import { logForDebugging } from './utils/debug.js'
 import { getSettingSourceName } from './utils/settings/constants.js'
 import {
   type Command,
   getCommandName,
   isCommandEnabled,
 } from './types/command.js'
+
+/* eslint-disable @typescript-eslint/no-require-imports */
+const clearSkillIndexCache = feature('EXPERIMENTAL_SKILL_SEARCH')
+  ? (
+      require('./services/skillSearch/localSearch.js') as typeof import('./services/skillSearch/localSearch.js')
+    ).clearSkillIndexCache
+  : null
+/* eslint-enable @typescript-eslint/no-require-imports */
 
 // Re-export types from the centralized location
 export type {
@@ -148,38 +85,6 @@ export type {
 } from './types/command.js'
 export { getCommandName, isCommandEnabled } from './types/command.js'
 
-// Commands that get eliminated from the external build
-export const INTERNAL_ONLY_COMMANDS = [
-  backfillSessions,
-  breakCache,
-  bughunter,
-  commit,
-  commitPushPr,
-  ctx_viz,
-  goodClaude,
-  issue,
-  initVerifiers,
-  ...(forceSnip ? [forceSnip] : []),
-  mockLimits,
-  bridgeKick,
-  version,
-  ...(ultraplan ? [ultraplan] : []),
-  ...(subscribePr ? [subscribePr] : []),
-  resetLimits,
-  resetLimitsNonInteractive,
-  onboarding,
-  share,
-  summary,
-  teleport,
-  antTrace,
-  perfIssue,
-  env,
-  oauthRefresh,
-  debugToolCall,
-  agentsPlatform,
-  autofixPr,
-].filter(Boolean)
-
 // Declared as a function so that we don't run this until getCommands is called,
 // since underlying functions read from config, which can't be read at module initialization time
 const COMMANDS = memoize((): Command[] => [
@@ -188,20 +93,18 @@ const COMMANDS = memoize((): Command[] => [
   branch,
   clear,
   compact,
+  copy,
+  copycon,
   config,
   context,
   contextNonInteractive,
-  cost,
   diff,
   doctor,
   effort,
   exit,
-  fast,
-  files,
   folder,
   help,
   ide,
-  init,
   keybindings,
   jailbreak,
   mcp,
@@ -212,28 +115,22 @@ const COMMANDS = memoize((): Command[] => [
   reloadPlugins,
   rename,
   resume,
-  session,
   skills,
   stats,
   status,
   statusline,
   theme,
-  review,
   rewind,
   securityReview,
   vim,
   thinking,
-  ...(forkCmd ? [forkCmd] : []),
   permissions,
   plan,
   hooks,
-  ...(!isUsing3PServices() ? [logout, login(), account] : []),
-  ...(peersCmd ? [peersCmd] : []),
+  logout,
+  login(),
+  account,
   tasks,
-  ...(workflowsCmd ? [workflowsCmd] : []),
-  ...(process.env.USER_TYPE === 'ant' && !process.env.IS_DEMO
-    ? INTERNAL_ONLY_COMMANDS
-    : []),
 ])
 
 export const builtInCommandNames = memoize(
@@ -288,14 +185,6 @@ async function getSkills(cwd: string): Promise<{
   }
 }
 
-/* eslint-disable @typescript-eslint/no-require-imports */
-const getWorkflowCommands = feature('WORKFLOW_SCRIPTS')
-  ? (
-      require('./tools/WorkflowTool/createWorkflowCommand.js') as typeof import('./tools/WorkflowTool/createWorkflowCommand.js')
-    ).getWorkflowCommands
-  : null
-/* eslint-enable @typescript-eslint/no-require-imports */
-
 /**
  * Filters commands by their declared `availability` (auth/provider requirement).
  * Commands without `availability` are treated as universal.
@@ -306,53 +195,28 @@ const getWorkflowCommands = feature('WORKFLOW_SCRIPTS')
  * so this must be re-evaluated on every getCommands() call.
  */
 export function meetsAvailabilityRequirement(cmd: Command): boolean {
-  if (!cmd.availability) return true
-  for (const a of cmd.availability) {
-    switch (a) {
-      case 'claude-ai':
-        if (isClaudeAISubscriber()) return true
-        break
-      case 'console':
-        // Console API key user = direct 1P API customer (not 3P, not claude.ai).
-        // Excludes 3P (Bedrock/Vertex/Foundry) who don't set ANTHROPIC_BASE_URL
-        // and gateway users who proxy through a custom base URL.
-        if (
-          !isClaudeAISubscriber() &&
-          !isUsing3PServices() &&
-          isFirstPartyAnthropicBaseUrl()
-        )
-          return true
-        break
-      default: {
-        const _exhaustive: never = a
-        void _exhaustive
-        break
-      }
-    }
-  }
-  return false
+  // MindCode is VEXZY-only. Legacy provider availability markers are never
+  // satisfied, so provider-specific commands fail closed without auth imports.
+  return !cmd.availability
 }
 
 /**
- * Loads all command sources (skills, plugins, workflows). Memoized by cwd
+ * Loads all command sources (skills and plugins). Memoized by cwd
  * because loading is expensive (disk I/O, dynamic imports).
  */
 const loadAllCommands = memoize(async (cwd: string): Promise<Command[]> => {
   const [
     { skillDirCommands, pluginSkills, bundledSkills, builtinPluginSkills },
     pluginCommands,
-    workflowCommands,
   ] = await Promise.all([
     getSkills(cwd),
     getPluginCommands(),
-    getWorkflowCommands ? getWorkflowCommands(cwd) : Promise.resolve([]),
   ])
 
   return [
     ...bundledSkills,
     ...builtinPluginSkills,
     ...skillDirCommands,
-    ...workflowCommands,
     ...pluginCommands,
     ...pluginSkills,
     ...COMMANDS(),
@@ -508,16 +372,13 @@ export const getSlashCommandToolSkills = memoize(
  * 2. Preserving local-only commands in REPL's handleRemoteInit after CCR filters
  */
 export const REMOTE_SAFE_COMMANDS: Set<Command> = new Set([
-  session, // Shows QR code / URL for remote session
   exit, // Exit the TUI
   clear, // Clear screen
   help, // Show help
   theme, // Change terminal theme
   vim, // Toggle vim mode
-  cost, // Show session cost (local cost tracking)
   plan, // Plan mode toggle
   keybindings, // Keybinding management
-  statusline, // Status line toggle
 ])
 
 /**
@@ -536,10 +397,7 @@ export const BRIDGE_SAFE_COMMANDS: Set<Command> = new Set(
   [
     compact, // Shrink context — useful mid-session from a phone
     clear, // Wipe transcript
-    cost, // Show session cost
-    summary, // Summarize conversation
-    files, // List tracked files
-  ].filter((c): c is Command => c !== null),
+  ],
 )
 
 /**

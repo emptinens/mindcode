@@ -7,7 +7,7 @@ const sessionTranscriptModule = feature('KAIROS')
   ? (require('../sessionTranscript/sessionTranscript.js') as typeof import('../sessionTranscript/sessionTranscript.js'))
   : null
 
-import { APIUserAbortError } from '@anthropic-ai/sdk'
+import { APIUserAbortError } from '../api/vexzy/errors.js'
 import {
   getInvokedSkillsForAgent,
   getSdkBetas,
@@ -107,7 +107,7 @@ import {
 import {
   getMaxOutputTokensForModel,
   queryModelWithStreaming,
-} from '../api/claude.js'
+} from '../api/modelRuntime.js'
 import {
   getPromptTooLongTokenGap,
   PROMPT_TOO_LONG_ERROR_MESSAGE,
@@ -126,6 +126,12 @@ import {
   getCompactUserSummaryMessage,
   getPartialCompactPrompt,
 } from './prompt.js'
+import {
+  commitCompactState,
+  createCompactWatchdog,
+  restoreCompactState,
+  snapshotCompactState,
+} from './compactWatchdog.js'
 
 export const POST_COMPACT_MAX_FILES_TO_RESTORE = 5
 export const POST_COMPACT_TOKEN_BUDGET = 50_000
@@ -138,8 +144,8 @@ export const POST_COMPACT_MAX_TOKENS_PER_SKILL = 5_000
 export const POST_COMPACT_SKILLS_TOKEN_BUDGET = 25_000
 const MAX_COMPACT_STREAMING_RETRIES = 2
 
-function getCompactModel(mainLoopModel: string): string {
-  return process.env.MINDCODE_COMPACT_MODEL?.trim() || mainLoopModel
+export function getCompactModel(_mainLoopModel: string): string {
+  return process.env.MINDCODE_COMPACT_MODEL?.trim() || 'gpt-5.6-luna'
 }
 
 function isCompactCacheSharingEnabled(
@@ -416,13 +422,20 @@ export function mergeHookInstructions(
  */
 export async function compactConversation(
   messages: Message[],
-  context: ToolUseContext,
+  parentContext: ToolUseContext,
   cacheSafeParams: CacheSafeParams,
   suppressFollowUpQuestions: boolean,
   customInstructions?: string,
   isAutoCompact: boolean = false,
   recompactionInfo?: RecompactionInfo,
 ): Promise<CompactionResult> {
+  const watchdog = createCompactWatchdog(parentContext.abortController)
+  const context = { ...parentContext, abortController: watchdog.controller }
+  const stateSnapshot = snapshotCompactState(
+    context.readFileState,
+    context.loadedNestedMemoryPaths,
+  )
+
   try {
     if (messages.length === 0) {
       throw new Error(ERROR_MESSAGE_NOT_ENOUGH_MESSAGES)
@@ -440,12 +453,14 @@ export async function compactConversation(
 
     // Execute PreCompact hooks
     context.setSDKStatus?.('compacting')
-    const hookResult = await executePreCompactHooks(
-      {
-        trigger: isAutoCompact ? 'auto' : 'manual',
-        customInstructions: customInstructions ?? null,
-      },
-      context.abortController.signal,
+    const hookResult = await watchdog.guard(
+      executePreCompactHooks(
+        {
+          trigger: isAutoCompact ? 'auto' : 'manual',
+          customInstructions: customInstructions ?? null,
+        },
+        context.abortController.signal,
+      ),
     )
     customInstructions = mergeHookInstructions(
       customInstructions,
@@ -493,14 +508,16 @@ export async function compactConversation(
     let summary: string | null
     let ptlAttempts = 0
     for (;;) {
-      summaryResponse = await streamCompactSummary({
-        messages: messagesToSummarize,
-        summaryRequest,
-        appState,
-        context,
-        preCompactTokenCount,
-        cacheSafeParams: retryCacheSafeParams,
-      })
+      summaryResponse = await watchdog.guard(
+        streamCompactSummary({
+          messages: messagesToSummarize,
+          summaryRequest,
+          appState,
+          context,
+          preCompactTokenCount,
+          cacheSafeParams: retryCacheSafeParams,
+        }),
+      )
       summary = getAssistantMessageText(summaryResponse)
       if (!summary?.startsWith(PROMPT_TOO_LONG_ERROR_MESSAGE)) break
 
@@ -562,10 +579,6 @@ export async function compactConversation(
     // Store the current file state before clearing
     const preCompactReadFileState = cacheToObject(context.readFileState)
 
-    // Clear the cache
-    context.readFileState.clear()
-    context.loadedNestedMemoryPaths?.clear()
-
     // Intentionally NOT resetting sentSkillNames: re-injecting the full
     // skill_listing (~4K tokens) post-compact is pure cache_creation with
     // marginal benefit. The model still has SkillTool in its schema and
@@ -574,14 +587,16 @@ export async function compactConversation(
     // early-return in getSkillListingAttachments.
 
     // Run async attachment generation in parallel
-    const [fileAttachments, asyncAgentAttachments] = await Promise.all([
-      createPostCompactFileAttachments(
-        preCompactReadFileState,
-        context,
-        POST_COMPACT_MAX_FILES_TO_RESTORE,
-      ),
-      createAsyncAgentAttachmentsIfNeeded(context),
-    ])
+    const [fileAttachments, asyncAgentAttachments] = await watchdog.guard(
+      Promise.all([
+        createPostCompactFileAttachments(
+          preCompactReadFileState,
+          context,
+          POST_COMPACT_MAX_FILES_TO_RESTORE,
+        ),
+        createAsyncAgentAttachmentsIfNeeded(context),
+      ]),
+    )
 
     const postCompactFileAttachments: AttachmentMessage[] = [
       ...fileAttachments,
@@ -594,7 +609,9 @@ export async function compactConversation(
 
     // Add plan mode instructions if currently in plan mode, so the model
     // continues operating in plan mode after compaction
-    const planModeAttachment = await createPlanModeAttachmentIfNeeded(context)
+    const planModeAttachment = await watchdog.guard(
+      createPlanModeAttachmentIfNeeded(context),
+    )
     if (planModeAttachment) {
       postCompactFileAttachments.push(planModeAttachment)
     }
@@ -622,8 +639,6 @@ export async function compactConversation(
     }
     for (const att of getMcpInstructionsDeltaAttachment(
       context.options.mcpClients,
-      context.options.tools,
-      context.options.mainLoopModel,
       [],
     )) {
       postCompactFileAttachments.push(createAttachmentMessage(att))
@@ -634,9 +649,11 @@ export async function compactConversation(
       hookType: 'session_start',
     })
     // Execute SessionStart hooks after successful compaction
-    const hookMessages = await processSessionStartHooks('compact', {
-      model: context.options.mainLoopModel,
-    })
+    const hookMessages = await watchdog.guard(
+      processSessionStartHooks('compact', {
+        model: context.options.mainLoopModel,
+      }),
+    )
 
     // Create the compact boundary marker and summary messages before the
     // event so we can compute the true resulting-context size.
@@ -739,7 +756,23 @@ export async function compactConversation(
       })(),
     })
 
-    // Reset cache read baseline so the post-compact drop isn't flagged as a break
+    context.onCompactProgress?.({
+      type: 'hooks_start',
+      hookType: 'post_compact',
+    })
+    const postCompactHookResult = await watchdog.guard(
+      executePostCompactHooks(
+        {
+          trigger: isAutoCompact ? 'auto' : 'manual',
+          compactSummary: summary,
+        },
+        context.abortController.signal,
+      ),
+    )
+
+    // Commit only after summary, attachments, SessionStart, and PostCompact
+    // hooks have all succeeded. This is the transaction's commit point.
+    commitCompactState(context.readFileState, context.loadedNestedMemoryPaths)
     if (feature('PROMPT_CACHE_BREAK_DETECTION')) {
       notifyCompaction(
         context.options.querySource ?? 'compact',
@@ -747,31 +780,10 @@ export async function compactConversation(
       )
     }
     markPostCompaction()
-
-    // Re-append session metadata (custom title, tag) so it stays within
-    // the 16KB tail window that readLiteMetadata reads for --resume display.
-    // Without this, enough post-compaction messages push the metadata entry
-    // out of the window, causing --resume to show the auto-generated title
-    // instead of the user-set session name.
     reAppendSessionMetadata()
-
-    // Write a reduced transcript segment for the pre-compaction messages
-    // (assistant mode only). Fire-and-forget — errors are logged internally.
     if (feature('KAIROS')) {
       void sessionTranscriptModule?.writeSessionTranscriptSegment(messages)
     }
-
-    context.onCompactProgress?.({
-      type: 'hooks_start',
-      hookType: 'post_compact',
-    })
-    const postCompactHookResult = await executePostCompactHooks(
-      {
-        trigger: isAutoCompact ? 'auto' : 'manual',
-        compactSummary: summary,
-      },
-      context.abortController.signal,
-    )
 
     const combinedUserDisplayMessage = [
       userDisplayMessage,
@@ -794,6 +806,11 @@ export async function compactConversation(
       compactionUsage,
     }
   } catch (error) {
+    restoreCompactState(
+      context.readFileState,
+      context.loadedNestedMemoryPaths,
+      stateSnapshot,
+    )
     // Only show the error notification for manual /compact.
     // Auto-compact failures are retried on the next turn and the
     // notification is confusing when compaction eventually succeeds.
@@ -802,6 +819,7 @@ export async function compactConversation(
     }
     throw error
   } finally {
+    watchdog.dispose()
     context.setStreamMode?.('requesting')
     context.setResponseLength?.(() => 0)
     context.onCompactProgress?.({ type: 'compact_end' })
@@ -819,11 +837,18 @@ export async function compactConversation(
 export async function partialCompactConversation(
   allMessages: Message[],
   pivotIndex: number,
-  context: ToolUseContext,
+  parentContext: ToolUseContext,
   cacheSafeParams: CacheSafeParams,
   userFeedback?: string,
   direction: PartialCompactDirection = 'from',
 ): Promise<CompactionResult> {
+  const watchdog = createCompactWatchdog(parentContext.abortController)
+  const context = { ...parentContext, abortController: watchdog.controller }
+  const stateSnapshot = snapshotCompactState(
+    context.readFileState,
+    context.loadedNestedMemoryPaths,
+  )
+
   try {
     const messagesToSummarize =
       direction === 'up_to'
@@ -862,12 +887,14 @@ export async function partialCompactConversation(
     })
 
     context.setSDKStatus?.('compacting')
-    const hookResult = await executePreCompactHooks(
-      {
-        trigger: 'manual',
-        customInstructions: null,
-      },
-      context.abortController.signal,
+    const hookResult = await watchdog.guard(
+      executePreCompactHooks(
+        {
+          trigger: 'manual',
+          customInstructions: null,
+        },
+        context.abortController.signal,
+      ),
     )
 
     // Merge hook instructions with user feedback
@@ -907,14 +934,16 @@ export async function partialCompactConversation(
     let summary: string | null
     let ptlAttempts = 0
     for (;;) {
-      summaryResponse = await streamCompactSummary({
-        messages: apiMessages,
-        summaryRequest,
-        appState: context.getAppState(),
-        context,
-        preCompactTokenCount,
-        cacheSafeParams: retryCacheSafeParams,
-      })
+      summaryResponse = await watchdog.guard(
+        streamCompactSummary({
+          messages: apiMessages,
+          summaryRequest,
+          appState: context.getAppState(),
+          context,
+          preCompactTokenCount,
+          cacheSafeParams: retryCacheSafeParams,
+        }),
+      )
       summary = getAssistantMessageText(summaryResponse)
       if (!summary?.startsWith(PROMPT_TOO_LONG_ERROR_MESSAGE)) break
 
@@ -964,20 +993,20 @@ export async function partialCompactConversation(
 
     // Store the current file state before clearing
     const preCompactReadFileState = cacheToObject(context.readFileState)
-    context.readFileState.clear()
-    context.loadedNestedMemoryPaths?.clear()
     // Intentionally NOT resetting sentSkillNames — see compactConversation()
     // for rationale (~4K tokens saved per compact event).
 
-    const [fileAttachments, asyncAgentAttachments] = await Promise.all([
-      createPostCompactFileAttachments(
-        preCompactReadFileState,
-        context,
-        POST_COMPACT_MAX_FILES_TO_RESTORE,
-        messagesToKeep,
-      ),
-      createAsyncAgentAttachmentsIfNeeded(context),
-    ])
+    const [fileAttachments, asyncAgentAttachments] = await watchdog.guard(
+      Promise.all([
+        createPostCompactFileAttachments(
+          preCompactReadFileState,
+          context,
+          POST_COMPACT_MAX_FILES_TO_RESTORE,
+          messagesToKeep,
+        ),
+        createAsyncAgentAttachmentsIfNeeded(context),
+      ]),
+    )
 
     const postCompactFileAttachments: AttachmentMessage[] = [
       ...fileAttachments,
@@ -989,7 +1018,9 @@ export async function partialCompactConversation(
     }
 
     // Add plan mode instructions if currently in plan mode
-    const planModeAttachment = await createPlanModeAttachmentIfNeeded(context)
+    const planModeAttachment = await watchdog.guard(
+      createPlanModeAttachmentIfNeeded(context),
+    )
     if (planModeAttachment) {
       postCompactFileAttachments.push(planModeAttachment)
     }
@@ -1014,8 +1045,6 @@ export async function partialCompactConversation(
     }
     for (const att of getMcpInstructionsDeltaAttachment(
       context.options.mcpClients,
-      context.options.tools,
-      context.options.mainLoopModel,
       messagesToKeep,
     )) {
       postCompactFileAttachments.push(createAttachmentMessage(att))
@@ -1025,9 +1054,11 @@ export async function partialCompactConversation(
       type: 'hooks_start',
       hookType: 'session_start',
     })
-    const hookMessages = await processSessionStartHooks('compact', {
-      model: context.options.mainLoopModel,
-    })
+    const hookMessages = await watchdog.guard(
+      processSessionStartHooks('compact', {
+        model: context.options.mainLoopModel,
+      }),
+    )
 
     const postCompactTokenCount = tokenCountFromLastAPIResponse([
       summaryResponse,
@@ -1091,6 +1122,21 @@ export async function partialCompactConversation(
       }),
     ]
 
+    context.onCompactProgress?.({
+      type: 'hooks_start',
+      hookType: 'post_compact',
+    })
+    const postCompactHookResult = await watchdog.guard(
+      executePostCompactHooks(
+        {
+          trigger: 'manual',
+          compactSummary: summary,
+        },
+        context.abortController.signal,
+      ),
+    )
+
+    commitCompactState(context.readFileState, context.loadedNestedMemoryPaths)
     if (feature('PROMPT_CACHE_BREAK_DETECTION')) {
       notifyCompaction(
         context.options.querySource ?? 'compact',
@@ -1098,28 +1144,12 @@ export async function partialCompactConversation(
       )
     }
     markPostCompaction()
-
-    // Re-append session metadata (custom title, tag) so it stays within
-    // the 16KB tail window that readLiteMetadata reads for --resume display.
     reAppendSessionMetadata()
-
     if (feature('KAIROS')) {
       void sessionTranscriptModule?.writeSessionTranscriptSegment(
         messagesToSummarize,
       )
     }
-
-    context.onCompactProgress?.({
-      type: 'hooks_start',
-      hookType: 'post_compact',
-    })
-    const postCompactHookResult = await executePostCompactHooks(
-      {
-        trigger: 'manual',
-        compactSummary: summary,
-      },
-      context.abortController.signal,
-    )
 
     context.onCompactProgress?.({ type: 'compact_done', summary })
 
@@ -1144,9 +1174,15 @@ export async function partialCompactConversation(
       compactionUsage,
     }
   } catch (error) {
+    restoreCompactState(
+      context.readFileState,
+      context.loadedNestedMemoryPaths,
+      stateSnapshot,
+    )
     addErrorNotificationIfNeeded(error, context)
     throw error
   } finally {
+    watchdog.dispose()
     context.setStreamMode?.('requesting')
     context.setResponseLength?.(() => 0)
     context.onCompactProgress?.({ type: 'compact_end' })

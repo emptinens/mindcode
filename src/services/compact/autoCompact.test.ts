@@ -33,7 +33,7 @@ mock.module('../../utils/tokens.js', () => ({
 mock.module('../analytics/growthbook.js', () => ({
   getFeatureValue_CACHED_MAY_BE_STALE: () => false,
 }))
-mock.module('../api/claude.js', () => ({
+mock.module('../api/modelRuntime.js', () => ({
   getMaxOutputTokensForModel: () => 128_000,
 }))
 mock.module('../api/promptCacheBreakDetection.js', () => ({

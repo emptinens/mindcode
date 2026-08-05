@@ -1,4 +1,3 @@
-import { feature } from 'bun:bundle'
 import { chmod, open, rename, stat, unlink } from 'fs/promises'
 import mapValues from 'lodash-es/mapValues.js'
 import memoize from 'lodash-es/memoize.js'
@@ -6,7 +5,6 @@ import { dirname, join, parse } from 'path'
 import { getPlatform } from 'src/utils/platform.js'
 import type { PluginError } from '../../types/plugin.js'
 import { getPluginErrorMessage } from '../../types/plugin.js'
-import { isClaudeInChromeMCPServer } from '../../utils/claudeInChrome/common.js'
 import {
   getCurrentProjectConfig,
   getGlobalConfig,
@@ -20,6 +18,10 @@ import { getFsImplementation } from '../../utils/fsOperations.js'
 import { safeParseJSON } from '../../utils/json.js'
 import { logError } from '../../utils/log.js'
 import { getPluginMcpServers } from '../../utils/plugins/mcpPluginIntegration.js'
+import {
+  evaluateMindCodeMcpPolicy,
+  filterMindCodeMcpEntries,
+} from '../../utils/plugins/mindcodePluginPolicy.js'
 import { loadAllPluginsCacheOnly } from '../../utils/plugins/pluginLoader.js'
 import { isSettingSourceEnabled } from '../../utils/settings/constants.js'
 import { getManagedFilePath } from '../../utils/settings/managedPath.js'
@@ -36,11 +38,6 @@ import {
 } from '../../utils/settings/types.js'
 import type { ValidationError } from '../../utils/settings/validation.js'
 import { jsonStringify } from '../../utils/slowOperations.js'
-import {
-  type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-  logEvent,
-} from '../analytics/index.js'
-import { fetchClaudeAIMcpConfigsIfEligible } from './claudeai.js'
 import { expandEnvVarsInString } from './envExpansion.js'
 import {
   type ConfigScope,
@@ -161,13 +158,7 @@ function getServerUrl(config: McpServerConfig): string | null {
   return 'url' in config ? config.url : null
 }
 
-/**
- * CCR proxy URL path markers. In remote sessions, claude.ai connectors arrive
- * via --mcp-config with URLs rewritten to route through the CCR/session-ingress
- * SHTTP proxy. The original vendor URL is preserved in the mcp_url query param
- * so the proxy knows where to forward. See api-go/ccr/internal/ccrshared/
- * mcp_url_rewriter.go and api-go/ccr/internal/mcpproxy/proxy.go.
- */
+/** Remote MCP proxy URL path markers used for signature normalization. */
 const CCR_PROXY_PATH_MARKERS = [
   '/v2/session_ingress/shttp/mcp/',
   '/v2/ccr-sessions/',
@@ -260,50 +251,6 @@ export function dedupPluginMcpServers(
       continue
     }
     seenPluginSigs.set(sig, name)
-    servers[name] = config
-  }
-  return { servers, suppressed }
-}
-
-/**
- * Filter claude.ai connectors, dropping any whose signature matches an enabled
- * manually-configured server. Manual wins: a user who wrote .mcp.json or ran
- * `mindcode mcp add` expressed higher intent than a connector toggled in the web UI.
- *
- * Connector keys are `claude.ai <DisplayName>` so they never key-collide with
- * manual servers in the merge — this content-based check catches the case where
- * both point at the same underlying URL (e.g. `mcp__slack__*` and
- * `mcp__claude_ai_Slack__*` both hitting mcp.slack.com, ~600 chars/turn wasted).
- *
- * Only enabled manual servers count as dedup targets — a disabled manual server
- * mustn't suppress its connector twin, or neither runs.
- */
-export function dedupClaudeAiMcpServers(
-  claudeAiServers: Record<string, ScopedMcpServerConfig>,
-  manualServers: Record<string, ScopedMcpServerConfig>,
-): {
-  servers: Record<string, ScopedMcpServerConfig>
-  suppressed: Array<{ name: string; duplicateOf: string }>
-} {
-  const manualSigs = new Map<string, string>()
-  for (const [name, config] of Object.entries(manualServers)) {
-    if (isMcpServerDisabled(name)) continue
-    const sig = getMcpServerSignature(config)
-    if (sig && !manualSigs.has(sig)) manualSigs.set(sig, name)
-  }
-
-  const servers: Record<string, ScopedMcpServerConfig> = {}
-  const suppressed: Array<{ name: string; duplicateOf: string }> = []
-  for (const [name, config] of Object.entries(claudeAiServers)) {
-    const sig = getMcpServerSignature(config)
-    const manualDup = sig !== null ? manualSigs.get(sig) : undefined
-    if (manualDup !== undefined) {
-      logForDebugging(
-        `Suppressing claude.ai connector "${name}": duplicates manually-configured "${manualDup}"`,
-      )
-      suppressed.push({ name, duplicateOf: manualDup })
-      continue
-    }
     servers[name] = config
   }
   return { servers, suppressed }
@@ -541,13 +488,43 @@ export function filterMcpServersByPolicy<T>(configs: Record<string, T>): {
   const blocked: string[] = []
   for (const [name, config] of Object.entries(configs)) {
     const c = config as McpServerConfig
-    if (c.type === 'sdk' || isMcpServerAllowedByPolicy(name, c)) {
+    const mindCodeDecision = evaluateMindCodeMcpPolicy(
+      name,
+      (c as ScopedMcpServerConfig).pluginSource,
+    )
+    const isSdkPlaceholder = c.type === 'sdk' && !c.pluginSource
+    if (
+      (isSdkPlaceholder || mindCodeDecision.allowed) &&
+      (c.type === 'sdk' || isMcpServerAllowedByPolicy(name, c))
+    ) {
       allowed[name] = config
     } else {
       blocked.push(name)
     }
   }
   return { allowed, blocked }
+}
+
+/**
+ * Apply MindCode's component allowlist without touching persisted settings.
+ * The caller owns diagnostics because different call sites expose different
+ * error types (CLI filtering versus the async MCP aggregation path).
+ */
+export function filterMcpServersByMindCodePolicy<T>(configs: Record<string, T>): {
+  allowed: Record<string, T>
+  blocked: Array<{ name: string; reason: string }>
+} {
+  const result = filterMindCodeMcpEntries(
+    configs,
+    config => (config as ScopedMcpServerConfig).pluginSource,
+  )
+  for (const { name, reason } of result.blocked) {
+    logForDebugging(
+      `MindCode MCP policy skipped "${name}": ${reason}`,
+      { level: 'warn' },
+    )
+  }
+  return result
 }
 
 /**
@@ -604,9 +581,6 @@ function expandEnvVars(config: McpServerConfig): {
     case 'sdk':
       expanded = config
       break
-    case 'claudeai-proxy':
-      expanded = config
-      break
   }
 
   return {
@@ -633,19 +607,6 @@ export async function addMcpConfig(
     )
   }
 
-  // Block reserved server name "claude-in-chrome"
-  if (isClaudeInChromeMCPServer(name)) {
-    throw new Error(`Cannot add MCP server "${name}": this name is reserved.`)
-  }
-
-  if (feature('CHICAGO_MCP')) {
-    const { isComputerUseMCPServer } = await import(
-      '../../utils/computerUse/common.js'
-    )
-    if (isComputerUseMCPServer(name)) {
-      throw new Error(`Cannot add MCP server "${name}": this name is reserved.`)
-    }
-  }
 
   // Block adding servers when enterprise MCP config exists (it has exclusive control)
   if (doesEnterpriseMcpConfigExist()) {
@@ -705,8 +666,6 @@ export async function addMcpConfig(
       throw new Error('Cannot add MCP server to scope: dynamic')
     case 'enterprise':
       throw new Error('Cannot add MCP server to scope: enterprise')
-    case 'claudeai':
-      throw new Error('Cannot add MCP server to scope: claudeai')
   }
 
   // Add based on scope
@@ -1030,13 +989,29 @@ export function getMcpConfigsByScope(
  * @param name The name of the server
  * @returns The server configuration with scope, or undefined if not found
  */
+function getMindCodeMcpServerIfAllowed(
+  name: string,
+  server: ScopedMcpServerConfig | undefined,
+): ScopedMcpServerConfig | null {
+  if (!server) return null
+  const decision = evaluateMindCodeMcpPolicy(name, server.pluginSource)
+  if (!decision.allowed) {
+    logForDebugging(
+      `MindCode MCP policy skipped "${name}": ${decision.reason}`,
+      { level: 'warn' },
+    )
+    return null
+  }
+  return server
+}
+
 export function getMcpConfigByName(name: string): ScopedMcpServerConfig | null {
   const { servers: enterpriseServers } = getMcpConfigsByScope('enterprise')
 
   // When MCP is locked to plugin-only, only enterprise servers are reachable
   // by name. User/project/local servers are blocked — same as getMindCodeMcpConfigs().
   if (isRestrictedToPluginOnly('mcp')) {
-    return enterpriseServers[name] ?? null
+    return getMindCodeMcpServerIfAllowed(name, enterpriseServers[name])
   }
 
   const { servers: userServers } = getMcpConfigsByScope('user')
@@ -1044,35 +1019,28 @@ export function getMcpConfigByName(name: string): ScopedMcpServerConfig | null {
   const { servers: localServers } = getMcpConfigsByScope('local')
 
   if (enterpriseServers[name]) {
-    return enterpriseServers[name]
+    return getMindCodeMcpServerIfAllowed(name, enterpriseServers[name])
   }
   if (localServers[name]) {
-    return localServers[name]
+    return getMindCodeMcpServerIfAllowed(name, localServers[name])
   }
   if (projectServers[name]) {
-    return projectServers[name]
+    return getMindCodeMcpServerIfAllowed(name, projectServers[name])
   }
   if (userServers[name]) {
-    return userServers[name]
+    return getMindCodeMcpServerIfAllowed(name, userServers[name])
   }
 
   return null
 }
 
 /**
- * Get MindCode MCP configurations (excludes claude.ai servers from the
- * returned set — they're fetched separately and merged by callers).
- * This is fast: only local file reads; no awaited network calls on the
- * critical path. The optional extraDedupTargets promise (e.g. the in-flight
- * claude.ai connector fetch) is awaited only after loadAllPluginsCacheOnly() completes,
- * so the two overlap rather than serialize.
+ * Get MindCode MCP configurations from enterprise, local, configured, and
+ * enabled plugin sources.
  * @returns MindCode server configurations with appropriate scopes
  */
 export async function getMindCodeMcpConfigs(
   dynamicServers: Record<string, ScopedMcpServerConfig> = {},
-  extraDedupTargets: Promise<
-    Record<string, ScopedMcpServerConfig>
-  > = Promise.resolve({}),
 ): Promise<{
   servers: Record<string, ScopedMcpServerConfig>
   errors: PluginError[]
@@ -1083,16 +1051,27 @@ export async function getMindCodeMcpConfigs(
   // (enterprise customers often do not want their users to be able to add their own MCP servers).
   if (doesEnterpriseMcpConfigExist()) {
     // Apply policy filtering to enterprise servers
-    const filtered: Record<string, ScopedMcpServerConfig> = {}
+    const enterprisePolicyServers: Record<string, ScopedMcpServerConfig> = {}
 
     for (const [name, serverConfig] of Object.entries(enterpriseServers)) {
       if (!isMcpServerAllowedByPolicy(name, serverConfig)) {
         continue
       }
-      filtered[name] = serverConfig
+      enterprisePolicyServers[name] = serverConfig
     }
 
-    return { servers: filtered, errors: [] }
+    const { allowed, blocked } = filterMcpServersByMindCodePolicy(
+      enterprisePolicyServers,
+    )
+    return {
+      servers: allowed,
+      errors: blocked.map(({ name, reason }) => ({
+        type: 'generic-error' as const,
+        source: name,
+        plugin: name,
+        error: `MindCode MCP policy skipped "${name}": ${reason}`,
+      })),
+    }
   }
 
   // Load other scopes — unless the managed policy locks MCP to plugin-only.
@@ -1132,6 +1111,13 @@ export async function getMindCodeMcpConfigs(
       ) {
         const errorMessage = `Plugin MCP loading error - ${error.type}: ${getPluginErrorMessage(error)}`
         logError(new Error(errorMessage))
+      } else if (
+        error.type === 'generic-error' &&
+        error.error?.startsWith('MindCode plugin policy blocked')
+      ) {
+        // Preserve an explicit policy diagnostic for /mcp consumers while
+        // keeping the user's external settings untouched.
+        mcpErrors.push(error)
       } else {
         // Plugin doesn't exist or isn't available - this is common and not necessarily an error
         // The plugin system will handle installing it if possible
@@ -1176,18 +1162,21 @@ export async function getMindCodeMcpConfigs(
   // Only servers that will actually connect are valid dedup targets — a
   // disabled manual server mustn't suppress a plugin server, or neither runs
   // (manual is skipped by name at connection time; plugin was removed here).
-  const extraTargets = await extraDedupTargets
   const enabledManualServers: Record<string, ScopedMcpServerConfig> = {}
   for (const [name, config] of Object.entries({
     ...userServers,
     ...approvedProjectServers,
     ...localServers,
     ...dynamicServers,
-    ...extraTargets,
   })) {
+    const mindCodeAllowed = evaluateMindCodeMcpPolicy(
+      name,
+      config.pluginSource,
+    ).allowed
     if (
       !isMcpServerDisabled(name) &&
-      isMcpServerAllowedByPolicy(name, config)
+      isMcpServerAllowedByPolicy(name, config) &&
+      mindCodeAllowed
     ) {
       enabledManualServers[name] = config
     }
@@ -1237,56 +1226,40 @@ export async function getMindCodeMcpConfigs(
     localServers,
   )
 
-  // Apply policy filtering to merged configs
-  const filtered: Record<string, ScopedMcpServerConfig> = {}
-
+  // Apply enterprise policy first, then MindCode's component allowlist. Both
+  // filters are runtime-only: user/project/local files remain unchanged.
+  const enterpriseFiltered: Record<string, ScopedMcpServerConfig> = {}
   for (const [name, serverConfig] of Object.entries(configs)) {
-    if (!isMcpServerAllowedByPolicy(name, serverConfig as McpServerConfig)) {
-      continue
+    if (isMcpServerAllowedByPolicy(name, serverConfig as McpServerConfig)) {
+      enterpriseFiltered[name] = serverConfig as ScopedMcpServerConfig
     }
-    filtered[name] = serverConfig as ScopedMcpServerConfig
+  }
+  const { allowed: filtered, blocked } = filterMcpServersByMindCodePolicy(
+    enterpriseFiltered,
+  )
+  for (const { name, reason } of blocked) {
+    const config = configs[name]
+    mcpErrors.push({
+      type: 'generic-error',
+      source: name,
+      plugin: config?.pluginSource?.split('@', 1)[0] ?? name,
+      error: `MindCode MCP policy skipped "${name}": ${reason}`,
+    })
   }
 
   return { servers: filtered, errors: mcpErrors }
 }
 
 /**
- * Get all MCP configurations across all scopes, including claude.ai servers.
- * This may be slow due to network calls - use getMindCodeMcpConfigs() for fast startup.
+ * Get all MCP configurations across all supported local/configured/plugin
+ * sources.
  * @returns All server configurations with appropriate scopes
  */
 export async function getAllMcpConfigs(): Promise<{
   servers: Record<string, ScopedMcpServerConfig>
   errors: PluginError[]
 }> {
-  // In enterprise mode, don't load claude.ai servers (enterprise has exclusive control)
-  if (doesEnterpriseMcpConfigExist()) {
-    return getMindCodeMcpConfigs()
-  }
-
-  // Kick off the claude.ai fetch before getMindCodeMcpConfigs so it overlaps
-  // with loadAllPluginsCacheOnly() inside. Memoized — the awaited call below is a cache hit.
-  const claudeaiPromise = fetchClaudeAIMcpConfigsIfEligible()
-  const { servers: mindCodeServers, errors } = await getMindCodeMcpConfigs(
-    {},
-    claudeaiPromise,
-  )
-  const { allowed: claudeaiMcpServers } = filterMcpServersByPolicy(
-    await claudeaiPromise,
-  )
-
-  // Suppress claude.ai connectors that duplicate an enabled manual server.
-  // Keys never collide (`slack` vs `claude.ai Slack`) so the merge below
-  // won't catch this — need content-based dedup by URL signature.
-  const { servers: dedupedClaudeAi } = dedupClaudeAiMcpServers(
-    claudeaiMcpServers,
-    mindCodeServers,
-  )
-
-  // Merge with claude.ai having lowest precedence
-  const servers = Object.assign({}, dedupedClaudeAi, mindCodeServers)
-
-  return { servers, errors }
+  return getMindCodeMcpConfigs()
 }
 
 /**
@@ -1504,33 +1477,12 @@ export function areMcpConfigsAllowedWithEnterpriseMcpConfig(
 }
 
 /**
- * Built-in MCP server that defaults to disabled. Unlike user-configured servers
- * (opt-out via disabledMcpServers), this requires explicit opt-in via
- * enabledMcpServers. Shows up in /mcp as disabled until the user enables it.
- */
-/* eslint-disable @typescript-eslint/no-require-imports */
-const DEFAULT_DISABLED_BUILTIN = feature('CHICAGO_MCP')
-  ? (
-      require('../../utils/computerUse/common.js') as typeof import('../../utils/computerUse/common.js')
-    ).COMPUTER_USE_MCP_SERVER_NAME
-  : null
-/* eslint-enable @typescript-eslint/no-require-imports */
-
-function isDefaultDisabledBuiltin(name: string): boolean {
-  return DEFAULT_DISABLED_BUILTIN !== null && name === DEFAULT_DISABLED_BUILTIN
-}
-
-/**
  * Check if an MCP server is disabled
  * @param name The name of the server
  * @returns true if the server is disabled
  */
 export function isMcpServerDisabled(name: string): boolean {
   const projectConfig = getCurrentProjectConfig()
-  if (isDefaultDisabledBuiltin(name)) {
-    const enabledServers = projectConfig.enabledMcpServers || []
-    return !enabledServers.includes(name)
-  }
   const disabledServers = projectConfig.disabledMcpServers || []
   return disabledServers.includes(name)
 }
@@ -1551,28 +1503,10 @@ function toggleMembership(
  * @param enabled Whether the server should be enabled
  */
 export function setMcpServerEnabled(name: string, enabled: boolean): void {
-  const isBuiltinStateChange =
-    isDefaultDisabledBuiltin(name) && isMcpServerDisabled(name) === enabled
-
   saveCurrentProjectConfig(current => {
-    if (isDefaultDisabledBuiltin(name)) {
-      const prev = current.enabledMcpServers || []
-      const next = toggleMembership(prev, name, enabled)
-      if (next === prev) return current
-      return { ...current, enabledMcpServers: next }
-    }
-
     const prev = current.disabledMcpServers || []
     const next = toggleMembership(prev, name, !enabled)
     if (next === prev) return current
     return { ...current, disabledMcpServers: next }
   })
-
-  if (isBuiltinStateChange) {
-    logEvent('tengu_builtin_mcp_toggle', {
-      serverName:
-        name as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-      enabled,
-    })
-  }
 }

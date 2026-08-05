@@ -254,15 +254,15 @@ export async function validatePluginManifest(
   if (result.success) {
     const manifest = result.data
 
-    // Warn if name isn't strict kebab-case. CC's schema only rejects spaces,
-    // but the Claude.ai marketplace sync rejects non-kebab names. Surfacing
-    // this here lets authors catch it in CI before the sync fails on them.
+    // Warn if name isn't strict kebab-case. The schema only rejects spaces,
+    // but marketplace synchronization rejects non-kebab names. Surfacing
+    // this here lets authors catch it in CI before synchronization fails.
     if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(manifest.name)) {
       warnings.push({
         path: 'name',
         message:
           `Plugin name "${manifest.name}" is not kebab-case. MindCode accepts ` +
-          `it, but the Claude.ai marketplace sync requires kebab-case ` +
+          `it, but marketplace synchronization requires kebab-case ` +
           `(lowercase letters, digits, and hyphens only, e.g., "my-plugin").`,
       })
     }

@@ -22,7 +22,7 @@ Usage notes:
 \`\`\`
 # MINDCODE.md
 
-This file provides guidance to MindCode (claude.ai/code) when working with code in this repository.
+This file provides guidance to MindCode when working with code in this repository.
 \`\`\``
 
 const NEW_INIT_PROMPT = `Set up a minimal MINDCODE.md (and optionally skills and hooks) for this repo. MINDCODE.md is loaded into every MindCode session, so it must be concise — only include what Claude would get wrong without it.
@@ -125,7 +125,7 @@ Prefix the file with:
 \`\`\`
 # MINDCODE.md
 
-This file provides guidance to MindCode (claude.ai/code) when working with code in this repository.
+This file provides guidance to MindCode when working with code in this repository.
 \`\`\`
 
 If MINDCODE.md already exists: read it, propose specific changes as diffs, and explain why each change improves it. Do not silently overwrite.

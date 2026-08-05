@@ -1,4 +1,4 @@
-import type { APIError } from '@anthropic-ai/sdk'
+import type { APIError } from './vexzy/errors.js'
 
 // SSL/TLS error codes from OpenSSL (used by both Node.js and Bun)
 // See: https://www.openssl.org/docs/man3.1/man3/X509_STORE_CTX_get_error.html

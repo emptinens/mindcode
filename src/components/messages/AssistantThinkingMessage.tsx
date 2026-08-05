@@ -1,7 +1,7 @@
 import type {
   ThinkingBlock,
   ThinkingBlockParam,
-} from '@anthropic-ai/sdk/resources/index.mjs'
+} from '../../services/api/vexzy/protocolTypes.js'
 import type * as React from 'react'
 import { Box, Text } from '../../ink.js'
 import { CtrlOToExpand } from '../CtrlOToExpand.js'

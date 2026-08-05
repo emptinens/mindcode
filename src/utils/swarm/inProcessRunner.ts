@@ -10,8 +10,12 @@
  */
 
 import { feature } from 'bun:bundle'
-import type { ContentBlockParam } from '@anthropic-ai/sdk/resources/messages.mjs'
-import { getSystemPrompt } from '../../constants/prompts.js'
+import type { ContentBlockParam } from '../../services/api/vexzy/protocolTypes.js'
+import {
+  getSystemPrompt,
+  getWorkerPolicySnapshot,
+} from '../../constants/prompts.js'
+import { MINDCODE_WORKER_PROMPT } from '../../constants/prompts/mindcodeArchitecture.js'
 import { TEAMMATE_MESSAGE_TAG } from '../../constants/xml.js'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 import {
@@ -83,14 +87,12 @@ import type { PermissionUpdate } from '../permissions/PermissionUpdateSchema.js'
 import { hasPermissionsToUseTool } from '../permissions/permissions.js'
 import { emitTaskTerminatedSdk } from '../sdkEventQueue.js'
 import { sleep } from '../sleep.js'
-import { jsonStringify } from '../slowOperations.js'
 import { asSystemPrompt } from '../systemPromptType.js'
 import { claimTask, listTasks, type Task, updateTask } from '../tasks.js'
 import type { TeammateContext } from '../teammateContext.js'
 import { runWithTeammateContext } from '../teammateContext.js'
 import {
   createIdleNotification,
-  getLastPeerDmSummary,
   isPermissionResponse,
   isShutdownRequest,
   markMessageAsReadByIndex,
@@ -100,6 +102,7 @@ import {
 import { unregisterAgent as unregisterPerfettoAgent } from '../telemetry/perfettoTracing.js'
 import { createContentReplacementState } from '../toolResultStorage.js'
 import { TEAM_LEAD_NAME } from './constants.js'
+import { resolveWorkerRuntime } from './backends/types.js'
 import { releaseSwarmWorkerSlot } from './concurrencyPolicy.js'
 import {
   getLeaderSetToolPermissionContext,
@@ -110,6 +113,13 @@ import {
   sendPermissionRequestViaMailbox,
 } from './permissionSync.js'
 import { TEAMMATE_SYSTEM_PROMPT_ADDENDUM } from './teammatePromptAddendum.js'
+import {
+  accumulateWorkerTokenUsage,
+  type buildWorkerTeamReport,
+  buildWorkerTeamReportFromMessages,
+  isWorkerReportCompletionEligible,
+  serializeWorkerTeamReportMessage,
+} from './workerTeamReport.js'
 
 type SetAppStateFn = (updater: (prev: AppState) => AppState) => void
 
@@ -485,9 +495,9 @@ export type InProcessRunnerConfig = {
   toolUseContext: ToolUseContext
   /** Abort controller linked to parent */
   abortController: AbortController
-  /** Optional model override for this teammate */
+  /** Ignored compatibility input; every teammate uses GPT-5.6 Luna. */
   model?: string
-  /** Reasoning effort for this teammate; undefined inherits the leader. */
+  /** Per-worker reasoning effort; invalid or missing values resolve to medium. */
   effort?: EffortValue
   /** Optional system prompt override for this teammate */
   systemPrompt?: string
@@ -517,6 +527,8 @@ export type InProcessRunnerResult = {
   error?: string
   /** Messages produced by the agent */
   messages: Message[]
+  /** Canonical result delivered to the Leader mailbox */
+  workerReport?: ReturnType<typeof buildWorkerTeamReport>
 }
 
 /**
@@ -578,17 +590,17 @@ async function sendIdleNotification(
   teamName: string,
   options?: {
     idleReason?: 'available' | 'interrupted' | 'failed'
-    summary?: string
-    completedTaskId?: string
-    completedStatus?: 'resolved' | 'blocked' | 'failed'
-    failureReason?: string
+    report: ReturnType<typeof buildWorkerTeamReport>
   },
 ): Promise<void> {
+  if (!options) {
+    throw new Error('Worker report is required for teammate notification')
+  }
   const notification = createIdleNotification(agentName, options)
 
   await sendMessageToLeader(
     agentName,
-    jsonStringify(notification),
+    serializeWorkerTeamReportMessage(notification),
     agentColor,
     teamName,
   )
@@ -716,7 +728,8 @@ async function waitForNextPromptOrShutdown(
       task.type === 'in_process_teammate' &&
       task.pendingUserMessages.length > 0
     ) {
-      const message = task.pendingUserMessages[0]! // Safe: checked length > 0
+      const message = task.pendingUserMessages[0]
+      if (message === undefined) continue
       // Pop the message from the queue
       setAppState(prev => {
         const prevTask = prev.tasks[taskId]
@@ -789,7 +802,8 @@ async function waitForNextPromptOrShutdown(
       }
 
       if (shutdownIndex !== -1) {
-        const msg = allMessages[shutdownIndex]!
+        const msg = allMessages[shutdownIndex]
+        if (!msg) continue
         const skippedUnread = count(
           allMessages.slice(0, shutdownIndex),
           m => !m.read,
@@ -898,7 +912,6 @@ export async function runInProcessTeammate(
     teammateContext,
     toolUseContext,
     abortController,
-    model,
     effort,
     systemPrompt,
     systemPromptMode,
@@ -907,6 +920,8 @@ export async function runInProcessTeammate(
     invokingRequestId,
   } = config
   const { setAppState } = toolUseContext
+  const { model: workerModel, effort: workerEffort } =
+    resolveWorkerRuntime(effort)
 
   logForDebugging(
     `[inProcessRunner] Starting agent loop for ${identity.agentId}`,
@@ -930,7 +945,13 @@ export async function runInProcessTeammate(
   // Build system prompt based on systemPromptMode
   let teammateSystemPrompt: string
   if (systemPromptMode === 'replace' && systemPrompt) {
-    teammateSystemPrompt = systemPrompt
+    teammateSystemPrompt = [
+      systemPrompt,
+      getWorkerPolicySnapshot(),
+      TEAMMATE_SYSTEM_PROMPT_ADDENDUM,
+    ]
+      .filter(Boolean)
+      .join('\n')
   } else {
     const fullSystemPromptParts = await getSystemPrompt(
       toolUseContext.options.tools,
@@ -939,9 +960,13 @@ export async function runInProcessTeammate(
       toolUseContext.options.mcpClients,
     )
 
+    const hasBasePolicy = fullSystemPromptParts.some(section =>
+      section.includes('# Handling injected reminder tags'),
+    )
     const systemPromptParts = [
       ...fullSystemPromptParts,
       TEAMMATE_SYSTEM_PROMPT_ADDENDUM,
+      hasBasePolicy ? MINDCODE_WORKER_PROMPT : getWorkerPolicySnapshot(),
     ]
 
     // If custom agent definition provided, append its prompt
@@ -1002,9 +1027,7 @@ export async function runInProcessTeammate(
       : ['*'],
     source: 'projectSettings',
     permissionMode: 'default',
-    // Propagate model from custom agent definition so getAgentModel()
-    // can use it as a fallback when no tool-level model is specified
-    ...(agentDefinition?.model ? { model: agentDefinition.model } : {}),
+    // Model selection from custom definitions is intentionally ignored.
   }
 
   // All messages across all prompts
@@ -1018,6 +1041,9 @@ export async function runInProcessTeammate(
   )
   let currentPrompt = wrappedInitialPrompt
   let shouldExit = false
+  let totalTokensUsed = 0
+  const countedUsageIds = new Set<string>()
+  let lastWorkerReport: ReturnType<typeof buildWorkerTeamReport> | undefined
 
   // Try to claim an available task immediately so the UI can show activity
   // from the very start. The idle loop handles claiming for subsequent tasks.
@@ -1202,8 +1228,8 @@ export async function runInProcessTeammate(
             forkContextMessages,
             querySource: 'agent:custom',
             override: { abortController: currentWorkAbortController },
-            model: model as ModelAlias | undefined,
-            effort,
+            model: workerModel as ModelAlias,
+            effort: workerEffort,
             preserveToolUseResults: true,
             availableTools: toolUseContext.options.tools,
             allowedTools,
@@ -1228,6 +1254,11 @@ export async function runInProcessTeammate(
 
             iterationMessages.push(message)
             allMessages.push(message)
+
+            totalTokensUsed += accumulateWorkerTokenUsage(
+              [message],
+              countedUsageIds,
+            )
 
             updateProgressFromMessage(
               tracker,
@@ -1327,7 +1358,7 @@ export async function runInProcessTeammate(
         taskId,
         task => {
           // Call any registered idle callbacks
-          task.onIdleCallbacks?.forEach(cb => cb())
+          for (const callback of task.onIdleCallbacks ?? []) callback()
           return { ...task, isIdle: true, onIdleCallbacks: [] }
         },
         setAppState,
@@ -1339,13 +1370,28 @@ export async function runInProcessTeammate(
 
       // Only send idle notification on transition to idle (not if already idle)
       if (!wasAlreadyIdle) {
+        lastWorkerReport = buildWorkerTeamReportFromMessages({
+          taskId,
+          runId: `${identity.agentId}:${taskId}`,
+          workerId: identity.agentId,
+          policyEpoch: 0,
+          status: workWasAborted ? 'failed' : undefined,
+          tokensUsed: totalTokensUsed,
+          effortUsed: workerEffort,
+          evidence: workWasAborted ? ['turn interrupted'] : [],
+          messages: iterationMessages,
+        })
         await sendIdleNotification(
           identity.agentName,
           identity.color,
           identity.teamName,
           {
-            idleReason: workWasAborted ? 'interrupted' : 'available',
-            summary: getLastPeerDmSummary(allMessages),
+            idleReason: workWasAborted
+              ? 'interrupted'
+              : !isWorkerReportCompletionEligible(lastWorkerReport)
+                ? 'failed'
+                : 'available',
+            report: lastWorkerReport,
           },
         )
       } else {
@@ -1438,14 +1484,15 @@ export async function runInProcessTeammate(
           return task
         }
         toolUseId = task.toolUseId
-        task.onIdleCallbacks?.forEach(cb => cb())
+        for (const callback of task.onIdleCallbacks ?? []) callback()
         task.unregisterCleanup?.()
+        const lastMessage = task.messages?.at(-1)
         return {
           ...task,
           status: 'completed' as const,
           notified: true,
           endTime: Date.now(),
-          messages: task.messages?.length ? [task.messages.at(-1)!] : undefined,
+          messages: lastMessage ? [lastMessage] : undefined,
           pendingUserMessages: [],
           inProgressToolUseIDs: undefined,
           abortController: undefined,
@@ -1469,7 +1516,11 @@ export async function runInProcessTeammate(
     }
 
     unregisterPerfettoAgent(identity.agentId)
-    return { success: true, messages: allMessages }
+    return {
+      success: true,
+      messages: allMessages,
+      workerReport: lastWorkerReport,
+    }
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : 'Unknown error'
@@ -1489,8 +1540,9 @@ export async function runInProcessTeammate(
           return task
         }
         toolUseId = task.toolUseId
-        task.onIdleCallbacks?.forEach(cb => cb())
+        for (const callback of task.onIdleCallbacks ?? []) callback()
         task.unregisterCleanup?.()
+        const lastMessage = task.messages?.at(-1)
         return {
           ...task,
           status: 'failed' as const,
@@ -1499,7 +1551,7 @@ export async function runInProcessTeammate(
           isIdle: true,
           endTime: Date.now(),
           onIdleCallbacks: [],
-          messages: task.messages?.length ? [task.messages.at(-1)!] : undefined,
+          messages: lastMessage ? [lastMessage] : undefined,
           pendingUserMessages: [],
           inProgressToolUseIDs: undefined,
           abortController: undefined,
@@ -1521,14 +1573,24 @@ export async function runInProcessTeammate(
     }
 
     // Send idle notification with failure via file-based mailbox
+    lastWorkerReport = buildWorkerTeamReportFromMessages({
+      taskId,
+      runId: `${identity.agentId}:${taskId}`,
+      workerId: identity.agentId,
+      policyEpoch: 0,
+      status: 'failed',
+      tokensUsed: totalTokensUsed,
+      effortUsed: workerEffort,
+      evidence: [errorMessage],
+      messages: allMessages,
+    })
     await sendIdleNotification(
       identity.agentName,
       identity.color,
       identity.teamName,
       {
         idleReason: 'failed',
-        completedStatus: 'failed',
-        failureReason: errorMessage,
+        report: lastWorkerReport,
       },
     )
 
@@ -1537,6 +1599,7 @@ export async function runInProcessTeammate(
       success: false,
       error: errorMessage,
       messages: allMessages,
+      workerReport: lastWorkerReport,
     }
   }
 }

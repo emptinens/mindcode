@@ -1,25 +1,194 @@
 /**
- * Adapter layer that wraps @anthropic-ai/sandbox-runtime with Claude CLI-specific integrations.
- * This file provides the bridge between the external sandbox-runtime package and Claude CLI's
- * settings system, tool integration, and additional features.
+ * MindCode local sandbox adapter.
+ *
+ * The adapter keeps the settings, permission, and prompt contracts local. The
+ * native OS backend is intentionally unavailable until a maintained local
+ * implementation is added; commands therefore remain unsandboxed and the
+ * UI reports the unavailable backend instead of silently claiming enforcement.
  */
 
-import type {
-  FsReadRestrictionConfig,
-  FsWriteRestrictionConfig,
-  IgnoreViolationsConfig,
-  NetworkHostPattern,
-  NetworkRestrictionConfig,
-  SandboxAskCallback,
-  SandboxDependencyCheck,
-  SandboxRuntimeConfig,
-  SandboxViolationEvent,
-} from '@anthropic-ai/sandbox-runtime'
-import {
-  SandboxManager as BaseSandboxManager,
-  SandboxRuntimeConfigSchema,
-  SandboxViolationStore,
-} from '@anthropic-ai/sandbox-runtime'
+export type NetworkHostPattern = { host: string; port?: number }
+export type SandboxAskCallback = (
+  hostPattern: NetworkHostPattern,
+) => Promise<boolean>
+export type SandboxDependencyCheck = { errors: string[]; warnings: string[] }
+export type FsReadRestrictionConfig = {
+  denyOnly: string[]
+  allowWithinDeny?: string[]
+}
+export type FsWriteRestrictionConfig = {
+  allowOnly: string[]
+  denyWithinAllow: string[]
+}
+export type NetworkRestrictionConfig = {
+  allowedHosts?: string[]
+  deniedHosts?: string[]
+}
+export type IgnoreViolationsConfig = Record<string, unknown> | string[]
+export type SandboxViolationEvent = {
+  timestamp: Date
+  command?: string
+  line: string
+}
+export type SandboxRuntimeConfig = {
+  network: {
+    allowedDomains?: string[]
+    deniedDomains?: string[]
+    allowUnixSockets?: string[]
+    allowAllUnixSockets?: boolean
+    allowLocalBinding?: boolean
+    httpProxyPort?: number
+    socksProxyPort?: number
+  }
+  filesystem: {
+    denyRead: string[]
+    allowRead: string[]
+    allowWrite: string[]
+    denyWrite: string[]
+  }
+  ignoreViolations?: IgnoreViolationsConfig
+  enableWeakerNestedSandbox?: boolean
+  enableWeakerNetworkIsolation?: boolean
+  ripgrep?: { command: string; args: string[]; argv0?: string }
+}
+
+export class SandboxViolationStore {
+  private violations: SandboxViolationEvent[] = []
+  private listeners = new Set<(events: SandboxViolationEvent[]) => void>()
+
+  getRecentViolations(): SandboxViolationEvent[] {
+    return this.violations.slice(-10)
+  }
+  getViolationCount(): number {
+    return this.violations.length
+  }
+  getTotalCount(): number {
+    return this.violations.length
+  }
+  subscribe(callback: (events: SandboxViolationEvent[]) => void): () => void {
+    this.listeners.add(callback)
+    callback(this.violations.slice())
+    return () => this.listeners.delete(callback)
+  }
+  clear(): void {
+    this.violations = []
+    for (const listener of this.listeners) listener([])
+  }
+}
+
+export const SandboxRuntimeConfigSchema = {
+  parse(value: unknown): SandboxRuntimeConfig {
+    if (!value || typeof value !== 'object') {
+      throw new Error('Invalid sandbox configuration')
+    }
+    return value as SandboxRuntimeConfig
+  },
+  safeParse(value: unknown):
+    | { success: true; data: SandboxRuntimeConfig }
+    | { success: false; error: Error } {
+    try {
+      return { success: true, data: this.parse(value) }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error : new Error(String(error)) }
+    }
+  },
+}
+
+let activeRuntimeConfig: SandboxRuntimeConfig = {
+  network: {},
+  filesystem: { denyRead: [], allowRead: [], allowWrite: [], denyWrite: [] },
+}
+const localViolationStore = new SandboxViolationStore()
+
+/** Local runtime contract used by the adapter and easy to replace later. */
+const BaseSandboxManager = {
+  checkDependencies(_options?: { command?: string; args?: string[] }): SandboxDependencyCheck {
+    return {
+      errors: ['native sandbox backend is unavailable'],
+      warnings: [],
+    }
+  },
+  isSupportedPlatform(): boolean {
+    return false
+  },
+  async initialize(
+    config: SandboxRuntimeConfig,
+    _sandboxAskCallback?: SandboxAskCallback,
+  ): Promise<void> {
+    activeRuntimeConfig = config
+  },
+  updateConfig(config: SandboxRuntimeConfig): void {
+    activeRuntimeConfig = config
+  },
+  async reset(): Promise<void> {
+    activeRuntimeConfig = {
+      network: {},
+      filesystem: { denyRead: [], allowRead: [], allowWrite: [], denyWrite: [] },
+    }
+    localViolationStore.clear()
+  },
+  getFsReadConfig(): FsReadRestrictionConfig {
+    return {
+      denyOnly: activeRuntimeConfig.filesystem.denyRead,
+      allowWithinDeny: activeRuntimeConfig.filesystem.allowRead,
+    }
+  },
+  getFsWriteConfig(): FsWriteRestrictionConfig {
+    return {
+      allowOnly: activeRuntimeConfig.filesystem.allowWrite,
+      denyWithinAllow: activeRuntimeConfig.filesystem.denyWrite,
+    }
+  },
+  getNetworkRestrictionConfig(): NetworkRestrictionConfig {
+    return {
+      allowedHosts: activeRuntimeConfig.network.allowedDomains,
+      deniedHosts: activeRuntimeConfig.network.deniedDomains,
+    }
+  },
+  getIgnoreViolations(): IgnoreViolationsConfig | undefined {
+    return activeRuntimeConfig.ignoreViolations
+  },
+  getAllowUnixSockets(): string[] | undefined {
+    return activeRuntimeConfig.network.allowUnixSockets
+  },
+  getAllowLocalBinding(): boolean | undefined {
+    return activeRuntimeConfig.network.allowLocalBinding
+  },
+  getEnableWeakerNestedSandbox(): boolean | undefined {
+    return activeRuntimeConfig.enableWeakerNestedSandbox
+  },
+  getProxyPort(): number | undefined {
+    return activeRuntimeConfig.network.httpProxyPort
+  },
+  getSocksProxyPort(): number | undefined {
+    return activeRuntimeConfig.network.socksProxyPort
+  },
+  getLinuxHttpSocketPath(): string | undefined {
+    return undefined
+  },
+  getLinuxSocksSocketPath(): string | undefined {
+    return undefined
+  },
+  async waitForNetworkInitialization(): Promise<boolean> {
+    return false
+  },
+  getSandboxViolationStore(): SandboxViolationStore {
+    return localViolationStore
+  },
+  annotateStderrWithSandboxFailures(_command: string, stderr: string): string {
+    return stderr
+  },
+  cleanupAfterCommand(): void {},
+  async wrapWithSandbox(
+    command: string,
+    _binShell?: string,
+    _customConfig?: Partial<SandboxRuntimeConfig>,
+    _abortSignal?: AbortSignal,
+  ): Promise<string> {
+    return command
+  },
+}
+
 import { rmSync, statSync } from 'fs'
 import { readFile } from 'fs/promises'
 import { memoize } from 'lodash-es'
@@ -81,17 +250,17 @@ function permissionRuleExtractPrefix(permissionRule: string): string | null {
 }
 
 /**
- * Resolve MindCode-specific path patterns for sandbox-runtime.
+ * Resolve MindCode-specific path patterns for local sandbox backend.
  *
  * MindCode uses special path prefixes in permission rules:
  * - `//path` → absolute from filesystem root (becomes `/path`)
  * - `/path` → relative to settings file directory (becomes `$SETTINGS_DIR/path`)
- * - `~/path` → passed through (sandbox-runtime handles this)
- * - `./path` or `path` → passed through (sandbox-runtime handles this)
+ * - `~/path` → passed through unchanged
+ * - `./path` or `path` → passed through unchanged
  *
  * This function only handles CC-specific conventions (`//` and `/`).
  * Standard path patterns like `~/` and relative paths are passed through
- * for sandbox-runtime's normalizePathForSandbox to handle.
+ * for the command wrapper to resolve.
  *
  * @param pattern The path pattern from a permission rule
  * @param source The settings source this pattern came from (needed to resolve `/path` patterns)
@@ -106,7 +275,7 @@ export function resolvePathPatternForSandbox(
   }
 
   // Handle / prefix - relative to settings file directory (CC-specific convention)
-  // Note: ~/path and relative paths are passed through for sandbox-runtime to handle
+  // Note: ~/path and relative paths are passed through unchanged.
   if (pattern.startsWith('/') && !pattern.startsWith('//')) {
     const root = getSettingsRootPathForSource(source)
     // Pattern like "/foo/**" becomes "${root}/foo/**"
@@ -114,7 +283,7 @@ export function resolvePathPatternForSandbox(
   }
 
   // Other patterns (~/path, ./path, path) pass through as-is
-  // sandbox-runtime's normalizePathForSandbox will handle them
+  // The adapter passes these patterns through unchanged.
   return pattern
 }
 
@@ -131,9 +300,7 @@ export function resolvePathPatternForSandbox(
  * settings-relative (permission-rule convention). Users reasonably expect
  * absolute paths in sandbox.filesystem.allowWrite to work as-is.
  *
- * Also expands `~` here rather than relying on sandbox-runtime, because
- * sandbox-runtime's getFsWriteConfig() does not call normalizePathForSandbox
- * on allowWrite paths (it only strips trailing glob suffixes).
+ * Also expands `~` here so the resulting config is platform-independent.
  */
 export function resolveSandboxFilesystemPath(
   pattern: string,
@@ -164,7 +331,7 @@ function shouldAllowManagedReadPathsOnly(): boolean {
 }
 
 /**
- * Convert MindCode settings format to SandboxRuntimeConfig format
+ * Convert MindCode settings format to local sandbox configuration format
  * (Function exported for testing)
  *
  * @param settings Merged settings (used for sandbox config like network, ripgrep, etc.)
@@ -245,7 +412,7 @@ export function convertToSandboxRuntimeConfig(
   }
 
   // Block writes to .mindcode/skills in both original and current working directories.
-  // The sandbox-runtime's getDangerousDirectories() protects .mindcode/commands and
+  // The native wrapper protects .mindcode/commands and
   // .mindcode/agents but not .mindcode/skills. Skills have the same privilege level
   // (auto-discovered, auto-loaded, full Claude capabilities) so they need the
   // same OS-level sandbox protection.
@@ -258,7 +425,7 @@ export function convertToSandboxRuntimeConfig(
   // HEAD + objects/ + refs/. An attacker planting these (plus a config with
   // core.fsmonitor) escapes the sandbox when Claude's unsandboxed git runs.
   //
-  // Unconditionally denying these paths makes sandbox-runtime mount
+  // Unconditionally denying these paths makes the native wrapper mount
   // /dev/null at non-existent ones, which (a) leaves a 0-byte HEAD stub on
   // the host and (b) breaks `git log HEAD` inside bwrap ("ambiguous argument").
   // So: if a file exists, denyWrite (ro-bind in place, no stub). If not, scrub
@@ -348,7 +515,7 @@ export function convertToSandboxRuntimeConfig(
     }
   }
   // Ripgrep config for sandbox. User settings take priority; otherwise pass our rg.
-  // In embedded mode (argv0='rg' dispatch), sandbox-runtime spawns with argv0 set.
+  // In embedded mode (argv0='rg' dispatch), the native wrapper spawns with argv0 set.
   const { rgPath, rgArgs, argv0 } = ripgrepCommand()
   const ripgrepConfig = settings.sandbox?.ripgrep ?? {
     command: rgPath,
@@ -381,7 +548,7 @@ export function convertToSandboxRuntimeConfig(
 }
 
 // ============================================================================
-// Claude CLI-specific state
+// MindCode-specific state
 // ============================================================================
 
 let initializationPromise: Promise<void> | undefined
@@ -823,7 +990,7 @@ async function reset(): Promise<void> {
 
 /**
  * Add a command to the excluded commands list (commands that should not be sandboxed)
- * This is a Claude CLI-specific function that updates local settings.
+ * This is a MindCode-specific function that updates local settings.
  */
 export function addToExcludedCommands(
   command: string,
@@ -922,7 +1089,7 @@ export interface ISandboxManager {
 }
 
 /**
- * Claude CLI sandbox manager - wraps sandbox-runtime with Claude-specific features
+ * MindCode sandbox manager - integrates local settings and command permissions.
  */
 export const SandboxManager: ISandboxManager = {
   // Custom implementations
@@ -967,7 +1134,7 @@ export const SandboxManager: ISandboxManager = {
 }
 
 // ============================================================================
-// Re-export types from sandbox-runtime
+// Local sandbox contracts
 // ============================================================================
 
 export type {
@@ -981,5 +1148,3 @@ export type {
   SandboxRuntimeConfig,
   IgnoreViolationsConfig,
 }
-
-export { SandboxViolationStore, SandboxRuntimeConfigSchema }

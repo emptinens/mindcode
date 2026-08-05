@@ -30,7 +30,9 @@ describe("Vexzy model client", () => {
       apiKey: "forge-test-key",
       fetch: async (input, init) => {
         calls.push({ input, init });
-        return response(payload("vendor-dynamic-model"));
+        return response(payload("vendor-dynamic-model"), 200, {
+          "request-id": "models-live-1",
+        });
       },
       now: () => 123,
     });
@@ -49,6 +51,13 @@ describe("Vexzy model client", () => {
       "vendor-dynamic-model",
     );
     expect(client.getSnapshot()?.fetchedAt).toBe(123);
+    expect(client.getSnapshot()?.response?.status).toBe(200);
+    expect(client.getSnapshot()?.response?.headers.get("request-id")).toBe(
+      "models-live-1",
+    );
+    expect(await client.getSnapshot()?.response?.clone().json()).toEqual(
+      payload("vendor-dynamic-model"),
+    );
   });
 
   test("uses the last successful snapshot for exhausted 429 responses", async () => {

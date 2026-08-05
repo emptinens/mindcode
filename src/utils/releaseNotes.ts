@@ -1,35 +1,18 @@
-import axios from 'axios'
 import { mkdir, readFile, writeFile } from 'fs/promises'
 import { dirname, join } from 'path'
 import { coerce } from 'semver'
-import { getIsNonInteractiveSession } from '../bootstrap/state.js'
 import { getGlobalConfig, saveGlobalConfig } from './config.js'
 import { getMindCodeConfigHomeDir } from './envUtils.js'
 import { toError } from './errors.js'
 import { logError } from './log.js'
-import { isEssentialTrafficOnly } from './privacyLevel.js'
 import { gt } from './semver.js'
 
 const MAX_RELEASE_NOTES_SHOWN = 5
 
 /**
- * We fetch the changelog from GitHub instead of bundling it with the build.
- *
- * This is necessary because Ink's static rendering makes it difficult to
- * dynamically update/show components after initial render. By storing the
- * changelog in config, we ensure it's available on the next startup without
- * requiring a full re-render of the current UI.
- *
- * The flow is:
- * 1. User updates to a new version
- * 2. We fetch the changelog in the background and store it in config
- * 3. Next time the user starts Claude, the cached changelog is available immediately
+ * The changelog is local-only. It is read from the MindCode cache or from the
+ * build-time changelog macro; this module never performs a network request.
  */
-export const CHANGELOG_URL =
-  'https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md'
-const RAW_CHANGELOG_URL =
-  'https://raw.githubusercontent.com/anthropics/claude-code/refs/heads/main/CHANGELOG.md'
-
 /**
  * Get the path for the cached changelog file.
  * The changelog is stored at ~/.mindcode/cache/changelog.md
@@ -76,46 +59,12 @@ export async function migrateChangelogFromConfig(): Promise<void> {
 }
 
 /**
- * Fetch the changelog from GitHub and store it in cache file
- * This runs in the background and doesn't block the UI
+ * Compatibility entry point retained for callers that used to refresh the
+ * changelog. Local builds do not refresh from a remote source; loading the
+ * local cache is the only operation performed here.
  */
 export async function fetchAndStoreChangelog(): Promise<void> {
-  // Skip in noninteractive mode
-  if (getIsNonInteractiveSession()) {
-    return
-  }
-
-  // Skip network requests if nonessential traffic is disabled
-  if (isEssentialTrafficOnly()) {
-    return
-  }
-
-  const response = await axios.get(RAW_CHANGELOG_URL)
-  if (response.status === 200) {
-    const changelogContent = response.data
-
-    // Skip write if content unchanged — writing Date.now() defeats the
-    // dirty-check in saveGlobalConfig since the timestamp always differs.
-    if (changelogContent === changelogMemoryCache) {
-      return
-    }
-
-    const cachePath = getChangelogCachePath()
-
-    // Ensure cache directory exists
-    await mkdir(dirname(cachePath), { recursive: true })
-
-    // Write changelog to cache file
-    await writeFile(cachePath, changelogContent, { encoding: 'utf-8' })
-    changelogMemoryCache = changelogContent
-
-    // Update timestamp in config
-    const changelogLastFetched = Date.now()
-    saveGlobalConfig(current => ({
-      ...current,
-      changelogLastFetched,
-    }))
-  }
+  await getStoredChangelog()
 }
 
 /**
@@ -130,12 +79,18 @@ export async function getStoredChangelog(): Promise<string> {
   const cachePath = getChangelogCachePath()
   try {
     const content = await readFile(cachePath, 'utf-8')
-    changelogMemoryCache = content
-    return content
+    if (content.trim()) {
+      changelogMemoryCache = content
+      return content
+    }
   } catch {
-    changelogMemoryCache = ''
-    return ''
+    // Fall through to the build-time local changelog.
   }
+
+  const bundledChangelog =
+    typeof MACRO.VERSION_CHANGELOG === 'string' ? MACRO.VERSION_CHANGELOG : ''
+  changelogMemoryCache = bundledChangelog
+  return bundledChangelog
 }
 
 /**
@@ -288,30 +243,8 @@ export async function checkForReleaseNotes(
   lastSeenVersion: string | null | undefined,
   currentVersion: string = MACRO.VERSION,
 ): Promise<{ hasReleaseNotes: boolean; releaseNotes: string[] }> {
-  // For Ant builds, use VERSION_CHANGELOG bundled at build time
-  if (process.env.USER_TYPE === 'ant') {
-    const changelog = MACRO.VERSION_CHANGELOG
-    if (changelog) {
-      const commits = changelog.trim().split('\n').filter(Boolean)
-      return {
-        hasReleaseNotes: commits.length > 0,
-        releaseNotes: commits,
-      }
-    }
-    return {
-      hasReleaseNotes: false,
-      releaseNotes: [],
-    }
-  }
-
-  // Ensure the in-memory cache is populated for subsequent sync reads
+  // Ensure the local cache is populated for subsequent sync reads.
   const cachedChangelog = await getStoredChangelog()
-
-  // If the version has changed or we don't have a cached changelog, fetch a new one
-  // This happens in the background and doesn't block the UI
-  if (lastSeenVersion !== currentVersion || !cachedChangelog) {
-    fetchAndStoreChangelog().catch(error => logError(toError(error)))
-  }
 
   const releaseNotes = getRecentReleaseNotes(
     currentVersion,
@@ -336,22 +269,6 @@ export function checkForReleaseNotesSync(
   lastSeenVersion: string | null | undefined,
   currentVersion: string = MACRO.VERSION,
 ): { hasReleaseNotes: boolean; releaseNotes: string[] } {
-  // For Ant builds, use VERSION_CHANGELOG bundled at build time
-  if (process.env.USER_TYPE === 'ant') {
-    const changelog = MACRO.VERSION_CHANGELOG
-    if (changelog) {
-      const commits = changelog.trim().split('\n').filter(Boolean)
-      return {
-        hasReleaseNotes: commits.length > 0,
-        releaseNotes: commits,
-      }
-    }
-    return {
-      hasReleaseNotes: false,
-      releaseNotes: [],
-    }
-  }
-
   const releaseNotes = getRecentReleaseNotes(currentVersion, lastSeenVersion)
   return {
     hasReleaseNotes: releaseNotes.length > 0,

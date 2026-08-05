@@ -1,6 +1,6 @@
 import { feature } from 'bun:bundle'
 import chalk from 'chalk'
-import { spawnSync } from 'child_process'
+import { spawnSync } from 'node:child_process'
 import {
   copyFile,
   mkdir,
@@ -9,9 +9,9 @@ import {
   stat,
   symlink,
   utimes,
-} from 'fs/promises'
+} from 'node:fs/promises'
 import ignore from 'ignore'
-import { basename, dirname, join } from 'path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { saveCurrentProjectConfig } from './config.js'
 import { getCwd } from './cwd.js'
 import { logForDebugging } from './debug.js'
@@ -22,13 +22,11 @@ import {
   getCommonDir,
   readWorktreeHeadSha,
   resolveGitDir,
-  resolveRef,
 } from './git/gitFilesystem.js'
 import {
   findCanonicalGitRoot,
   findGitRoot,
   getBranch,
-  getDefaultBranch,
   gitExe,
 } from './git.js'
 import {
@@ -44,6 +42,13 @@ import {
 } from './settings/settings.js'
 import { sleep } from './sleep.js'
 import { isInITerm2 } from './swarm/backends/detection.js'
+import {
+  bootstrapLocalGitRepository,
+  ensureLocalGitRepositoryUnlocked,
+  withBootstrapLock,
+} from './worktreeBootstrap.js'
+
+export { bootstrapLocalGitRepository } from './worktreeBootstrap.js'
 
 const VALID_WORKTREE_SLUG_SEGMENT = /^[a-zA-Z0-9._-]+$/
 const MAX_WORKTREE_SLUG_LENGTH = 64
@@ -192,15 +197,6 @@ type WorktreeCreateResult =
       existed: false
     }
 
-// Env vars to prevent git/SSH from prompting for credentials (which hangs the CLI).
-// GIT_TERMINAL_PROMPT=0 prevents git from opening /dev/tty for credential prompts.
-// GIT_ASKPASS='' disables askpass GUI programs.
-// stdin: 'ignore' closes stdin so interactive prompts can't block.
-const GIT_NO_PROMPT_ENV = {
-  GIT_TERMINAL_PROMPT: '0',
-  GIT_ASKPASS: '',
-}
-
 function worktreesDir(repoRoot: string): string {
   return join(repoRoot, '.mindcode', 'worktrees')
 }
@@ -229,8 +225,7 @@ function worktreePathFor(repoRoot: string, slug: string): string {
 /**
  * Creates a new git worktree for the given slug, or resumes it if it already exists.
  * Named worktrees reuse the same path across invocations, so the existence check
- * prevents unconditionally running `git fetch` (which can hang waiting for credentials)
- * on every resume.
+ * avoids re-running worktree creation on every resume.
  */
 async function getOrCreateWorktree(
   repoRoot: string,
@@ -254,69 +249,25 @@ async function getOrCreateWorktree(
     }
   }
 
-  // New worktree: fetch base branch then add
+  // New worktree: use only the local HEAD. Bootstrap creates a valid HEAD for
+  // new/empty repositories; existing repositories are never fetched or
+  // otherwise contacted remotely as part of agent isolation.
   await mkdir(worktreesDir(repoRoot), { recursive: true })
 
-  const fetchEnv = { ...process.env, ...GIT_NO_PROMPT_ENV }
-
-  let baseBranch: string
-  let baseSha: string | null = null
-  if (options?.prNumber) {
-    const { code: prFetchCode, stderr: prFetchStderr } =
-      await execFileNoThrowWithCwd(
-        gitExe(),
-        ['fetch', 'origin', `pull/${options.prNumber}/head`],
-        { cwd: repoRoot, stdin: 'ignore', env: fetchEnv },
-      )
-    if (prFetchCode !== 0) {
-      throw new Error(
-        `Failed to fetch PR #${options.prNumber}: ${prFetchStderr.trim() || 'PR may not exist or the repository may not have a remote named "origin"'}`,
-      )
-    }
-    baseBranch = 'FETCH_HEAD'
-  } else {
-    // If origin/<branch> already exists locally, skip fetch. In large repos
-    // (210k files, 16M objects) fetch burns ~6-8s on a local commit-graph
-    // scan before even hitting the network. A slightly stale base is fine —
-    // the user can pull in the worktree if they want latest.
-    // resolveRef reads the loose/packed ref directly; when it succeeds we
-    // already have the SHA, so the later rev-parse is skipped entirely.
-    const [defaultBranch, gitDir] = await Promise.all([
-      getDefaultBranch(),
-      resolveGitDir(repoRoot),
-    ])
-    const originRef = `origin/${defaultBranch}`
-    const originSha = gitDir
-      ? await resolveRef(gitDir, `refs/remotes/origin/${defaultBranch}`)
-      : null
-    if (originSha) {
-      baseBranch = originRef
-      baseSha = originSha
-    } else {
-      const { code: fetchCode } = await execFileNoThrowWithCwd(
-        gitExe(),
-        ['fetch', 'origin', defaultBranch],
-        { cwd: repoRoot, stdin: 'ignore', env: fetchEnv },
-      )
-      baseBranch = fetchCode === 0 ? originRef : 'HEAD'
-    }
-  }
-
-  // For the fetch/PR-fetch paths we still need the SHA — the fs-only resolveRef
-  // above only covers the "origin/<branch> already exists locally" case.
-  if (!baseSha) {
-    const { stdout, code: shaCode } = await execFileNoThrowWithCwd(
-      gitExe(),
-      ['rev-parse', baseBranch],
-      { cwd: repoRoot },
+  const baseBranch = 'HEAD'
+  const { stdout: baseShaOutput, code: shaCode } =
+    await execFileNoThrowWithCwd(gitExe(), ['rev-parse', baseBranch], {
+      cwd: repoRoot,
+    })
+  if (shaCode !== 0) {
+    const prHint = options?.prNumber
+      ? ` PR #${options.prNumber} is not available locally; no fetch was attempted.`
+      : ''
+    throw new Error(
+      `Failed to resolve local base HEAD: repository bootstrap did not produce a commit.${prHint}`,
     )
-    if (shaCode !== 0) {
-      throw new Error(
-        `Failed to resolve base branch "${baseBranch}": git rev-parse failed`,
-      )
-    }
-    baseSha = stdout.trim()
   }
+  const baseSha = baseShaOutput.trim()
 
   const sparsePaths = getInitialSettings().worktree?.sparsePaths
   const addArgs = ['worktree', 'add']
@@ -638,13 +589,13 @@ export function parsePRReference(input: string): number | null {
     /^https?:\/\/[^/]+\/[^/]+\/[^/]+\/pull\/(\d+)\/?(?:[?#].*)?$/i,
   )
   if (urlMatch?.[1]) {
-    return parseInt(urlMatch[1], 10)
+    return Number.parseInt(urlMatch[1], 10)
   }
 
   // #N format
   const hashMatch = input.match(/^#(\d+)$/)
   if (hashMatch?.[1]) {
-    return parseInt(hashMatch[1], 10)
+    return Number.parseInt(hashMatch[1], 10)
   }
 
   return null
@@ -731,8 +682,8 @@ export async function createWorktreeForSession(
     const gitRoot = findGitRoot(getCwd())
     if (!gitRoot) {
       throw new Error(
-        'Cannot create a worktree: not in a git repository and no WorktreeCreate hooks are configured. ' +
-          'Configure WorktreeCreate/WorktreeRemove hooks in settings.json to use worktree isolation with other VCS systems.',
+        'Cannot create a worktree: no local Git repository was found. ' +
+          'Initialize the project with `git init`, or use an explicitly configured VCS worktree hook.',
       )
     }
 
@@ -918,37 +869,34 @@ export async function createAgentWorktree(slug: string): Promise<{
     return { worktreePath: hookResult.worktreePath, hookBased: true }
   }
 
-  // Fall back to git worktree
-  // findCanonicalGitRoot (not findGitRoot) so agent worktrees always land in
-  // the main repo's .mindcode/worktrees/ even when spawned from inside a session
-  // worktree — otherwise they nest at <worktree>/.mindcode/worktrees/ and the
-  // periodic cleanup (which scans the canonical root) never finds them.
-  const gitRoot = findCanonicalGitRoot(getCwd())
-  if (!gitRoot) {
-    throw new Error(
-      'Cannot create agent worktree: not in a git repository and no WorktreeCreate hooks are configured. ' +
-        'Configure WorktreeCreate/WorktreeRemove hooks in settings.json to use worktree isolation with other VCS systems.',
-    )
-  }
+  // Fall back to git worktree. The repository bootstrap and the worktree
+  // creation share one lock: two agents starting in parallel cannot both
+  // commit the initial snapshot or race on the same branch/path.
+  const currentRoot = getCwd()
+  const lockRoot = findCanonicalGitRoot(currentRoot) ?? resolve(currentRoot)
+  return withBootstrapLock(lockRoot, async () => {
+    // findCanonicalGitRoot (not findGitRoot) keeps agent worktrees in the main
+    // repo's .mindcode/worktrees/ when the caller is itself a worktree.
+    const gitRoot = await ensureLocalGitRepositoryUnlocked(lockRoot)
+    const { worktreePath, worktreeBranch, headCommit, existed } =
+      await getOrCreateWorktree(gitRoot, slug)
 
-  const { worktreePath, worktreeBranch, headCommit, existed } =
-    await getOrCreateWorktree(gitRoot, slug)
+    if (!existed) {
+      logForDebugging(
+        `Created agent worktree at: ${worktreePath} on branch: ${worktreeBranch}`,
+      )
+      await performPostCreationSetup(gitRoot, worktreePath)
+    } else {
+      // Bump mtime so the periodic stale-worktree cleanup doesn't consider this
+      // worktree stale — the fast-resume path is read-only and leaves the original
+      // creation-time mtime intact, which can be past the 30-day cutoff.
+      const now = new Date()
+      await utimes(worktreePath, now, now)
+      logForDebugging(`Resuming existing agent worktree at: ${worktreePath}`)
+    }
 
-  if (!existed) {
-    logForDebugging(
-      `Created agent worktree at: ${worktreePath} on branch: ${worktreeBranch}`,
-    )
-    await performPostCreationSetup(gitRoot, worktreePath)
-  } else {
-    // Bump mtime so the periodic stale-worktree cleanup doesn't consider this
-    // worktree stale — the fast-resume path is read-only and leaves the original
-    // creation-time mtime intact, which can be past the 30-day cutoff.
-    const now = new Date()
-    await utimes(worktreePath, now, now)
-    logForDebugging(`Resuming existing agent worktree at: ${worktreePath}`)
-  }
-
-  return { worktreePath, worktreeBranch, headCommit, gitRoot }
+    return { worktreePath, worktreeBranch, headCommit, gitRoot }
+  })
 }
 
 /**
@@ -1165,7 +1113,7 @@ export async function hasWorktreeChanges(
   if (revListCode !== 0) {
     return true
   }
-  if (parseInt(revListOutput.trim(), 10) > 0) {
+  if (Number.parseInt(revListOutput.trim(), 10) > 0) {
     return true
   }
 
@@ -1268,7 +1216,6 @@ export async function execIntoTmuxWorktree(args: string[]): Promise<{
       }
     }
     repoName = basename(findCanonicalGitRoot(getCwd()) ?? getCwd())
-    // biome-ignore lint/suspicious/noConsole: intentional console output
     console.log(`Using worktree via hook: ${worktreeDir}`)
   } else {
     // Get main git repo root (resolves through worktrees)
@@ -1291,7 +1238,6 @@ export async function execIntoTmuxWorktree(args: string[]): Promise<{
         prNumber !== null ? { prNumber } : undefined,
       )
       if (!result.existed) {
-        // biome-ignore lint/suspicious/noConsole: intentional console output
         console.log(
           `Created worktree: ${worktreeDir} (based on ${result.baseBranch})`,
         )
@@ -1383,7 +1329,6 @@ export async function execIntoTmuxWorktree(args: string[]): Promise<{
   // Print hint about iTerm2 preferences when using control mode
   if (useControlMode && !sessionExists) {
     const y = chalk.yellow
-    // biome-ignore lint/suspicious/noConsole: intentional user guidance
     console.log(
       `\n${y('╭─ iTerm2 Tip ────────────────────────────────────────────────────────╮')}\n` +
         `${y('│')} To open as a tab instead of a new window:                           ${y('│')}\n` +

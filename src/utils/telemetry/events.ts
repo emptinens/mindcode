@@ -1,11 +1,12 @@
-import { isEnvTruthy } from '../envUtils.js'
+/**
+ * Compatibility surface for former event call sites.
+ *
+ * Event payloads are never exported. Prompt/tool content is always redacted,
+ * and the event sink intentionally performs no I/O.
+ */
 
-function isUserPromptLoggingEnabled() {
-  return isEnvTruthy(process.env.OTEL_LOG_USER_PROMPTS)
-}
-
-export function redactIfDisabled(content: string): string {
-  return isUserPromptLoggingEnabled() ? content : '<REDACTED>'
+export function redactIfDisabled(_content: string): string {
+  return '<REDACTED>'
 }
 
 export async function logOTelEvent(

@@ -1,7 +1,7 @@
 import type {
   McpbManifest,
   McpbUserConfigurationOption,
-} from '@anthropic-ai/mcpb'
+} from '../dxt/manifest.js'
 import axios from 'axios'
 import { createHash } from 'crypto'
 import { chmod, writeFile } from 'fs/promises'
@@ -19,7 +19,6 @@ import {
   updateSettingsForSource,
 } from '../settings/settings.js'
 import { jsonParse, jsonStringify } from '../slowOperations.js'
-import { getSystemDirectories } from '../systemDirectories.js'
 import { classifyFetchError, logPluginFetch } from './fetchTelemetry.js'
 /**
  * User configuration values for MCPB
@@ -415,16 +414,61 @@ async function generateMcpConfig(
   extractedPath: string,
   userConfig: UserConfigValues = {},
 ): Promise<McpServerConfig> {
-  // Lazy import: @anthropic-ai/mcpb barrel pulls in zod v3 schemas (~700KB of
-  // bound closures). See dxt/helpers.ts for details.
-  const { getMcpConfigForManifest } = await import('@anthropic-ai/mcpb')
-  const mcpConfig = await getMcpConfigForManifest({
-    manifest,
-    extensionPath: extractedPath,
-    systemDirs: getSystemDirectories(),
-    userConfig,
-    pathSeparator: '/',
-  })
+  const server = manifest.server
+  if (!server) {
+    const error = new Error(
+      `Failed to generate MCP server configuration from manifest "${manifest.name}"`,
+    )
+    logError(error)
+    throw error
+  }
+
+  const substitute = (value: string): string =>
+    value.replace(/\$\{user_config\.([^}]+)\}/g, (_match, key: string) => {
+      const configured = userConfig[key]
+      return configured === undefined ? '' : String(configured)
+    })
+
+  const args = (server.args ?? []).map(substitute)
+  const env = Object.fromEntries(
+    Object.entries(server.env ?? {}).map(([key, value]) => [
+      key,
+      substitute(value),
+    ]),
+  )
+  const entryPoint = server.entry_point
+    ? join(extractedPath, server.entry_point)
+    : undefined
+  const command =
+    server.command ??
+    (server.type === 'python'
+      ? 'python'
+      : server.type === 'uv'
+        ? 'uv'
+        : server.type === 'node'
+          ? 'node'
+          : entryPoint)
+
+  if (!command) {
+    const error = new Error(
+      `Failed to generate MCP server configuration from manifest "${manifest.name}": server.command or server.entry_point is required`,
+    )
+    logError(error)
+    throw error
+  }
+
+  const commandArgs =
+    server.type === 'uv' && entryPoint
+      ? ['run', entryPoint, ...args]
+      : entryPoint && !server.command
+        ? [entryPoint, ...args]
+        : args
+  const mcpConfig: McpServerConfig = {
+    type: 'stdio',
+    command: substitute(command),
+    args: commandArgs.map(substitute),
+    ...(Object.keys(env).length > 0 ? { env } : {}),
+  }
 
   if (!mcpConfig) {
     const error = new Error(

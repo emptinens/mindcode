@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
+import malformedEvent from './fixtures/malformed-event.json'
 import messageText from './fixtures/message-text.json'
 import messageToolUse from './fixtures/message-tool-use.json'
-import malformedEvent from './fixtures/malformed-event.json'
 import reasoningEffortLowObservation from './fixtures/reasoning-effort-low-observation.json'
 import streamText from './fixtures/stream-text.json'
 import streamToolUse from './fixtures/stream-tool-use.json'
@@ -40,6 +40,149 @@ describe('Vexzy Messages-compatible protocol', () => {
       input: { city: 'sanitized_city' },
     })
     expect(message.stop_reason).toBe('tool_use')
+  })
+
+  test('validates reasoning, redacted reasoning, server tool, and citation shapes', () => {
+    const message = parseVexzyMessage({
+      ...messageText,
+      content: [
+        {
+          type: 'text',
+          text: 'cited text',
+          citations: [
+            {
+              type: 'char_location',
+              cited_text: 'source text',
+              document_index: 0,
+              document_title: 'source',
+              start_char_index: 0,
+              end_char_index: 6,
+            },
+          ],
+        },
+        {
+          type: 'thinking',
+          thinking: 'reasoning',
+          signature: 'signature',
+        },
+        { type: 'redacted_thinking', data: 'redacted' },
+        {
+          type: 'server_tool_use',
+          id: 'server_tool_fixture',
+          name: 'web_search',
+          input: { query: 'sanitized_query' },
+          provider_block_field: true,
+        },
+      ],
+    })
+
+    expect(message.content).toMatchObject([
+      { type: 'text', citations: [{ type: 'char_location' }] },
+      { type: 'thinking', thinking: 'reasoning', signature: 'signature' },
+      { type: 'redacted_thinking', data: 'redacted' },
+      {
+        type: 'server_tool_use',
+        id: 'server_tool_fixture',
+        name: 'web_search',
+        input: { query: 'sanitized_query' },
+        provider_block_field: true,
+      },
+    ])
+  })
+
+  test('validates reasoning, signature, citation, and server-tool stream deltas', () => {
+    const records: FixtureRecord[] = [
+      {
+        event: 'content_block_start',
+        data: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: {
+            type: 'thinking',
+            thinking: '',
+            signature: '',
+          },
+        },
+      },
+      {
+        event: 'content_block_delta',
+        data: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'thinking_delta', thinking: 'reasoning' },
+        },
+      },
+      {
+        event: 'content_block_delta',
+        data: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'signature_delta', signature: 'signature' },
+        },
+      },
+      {
+        event: 'content_block_start',
+        data: {
+          type: 'content_block_start',
+          index: 1,
+          content_block: {
+            type: 'server_tool_use',
+            id: 'server_tool_fixture',
+            name: 'web_search',
+            input: {},
+          },
+        },
+      },
+      {
+        event: 'content_block_delta',
+        data: {
+          type: 'content_block_delta',
+          index: 1,
+          delta: {
+            type: 'input_json_delta',
+            partial_json: '{"query":"sanitized_query"}',
+          },
+        },
+      },
+      {
+        event: 'content_block_delta',
+        data: {
+          type: 'content_block_delta',
+          index: 2,
+          delta: {
+            type: 'citations_delta',
+            citation: {
+              type: 'char_location',
+              cited_text: 'source text',
+              document_index: 0,
+              document_title: 'source',
+              start_char_index: 0,
+              end_char_index: 6,
+            },
+          },
+        },
+      },
+    ]
+
+    const events = records.map(record => parseVexzySseRecord(record))
+
+    expect(events.map(event => event.type)).toEqual([
+      'content_block_start',
+      'content_block_delta',
+      'content_block_delta',
+      'content_block_start',
+      'content_block_delta',
+      'content_block_delta',
+    ])
+    expect(events[1]).toMatchObject({
+      delta: { type: 'thinking_delta', thinking: 'reasoning' },
+    })
+    expect(events[2]).toMatchObject({
+      delta: { type: 'signature_delta', signature: 'signature' },
+    })
+    expect(events[5]).toMatchObject({
+      delta: { type: 'citations_delta', citation: { type: 'char_location' } },
+    })
   })
 
   test('preserves unknown provider fields on known messages, blocks, and events', () => {
@@ -135,6 +278,79 @@ describe('Vexzy Messages-compatible protocol', () => {
       parseVexzySseRecord({
         event: 'ping',
         data: JSON.stringify({ type: 'message_stop' }),
+      }),
+    ).toThrow()
+  })
+
+  test('passes through unknown future block and delta types', () => {
+    const message = parseVexzyMessage({
+      ...messageText,
+      content: [
+        {
+          type: 'future_provider_block',
+          provider_field: { preserved: true },
+        },
+      ],
+    })
+    const blockStart = parseVexzyStreamEvent({
+      type: 'content_block_start',
+      index: 3,
+      content_block: {
+        type: 'future_provider_block',
+        provider_field: { preserved: true },
+      },
+    })
+    const delta = parseVexzyStreamEvent({
+      type: 'content_block_delta',
+      index: 3,
+      delta: {
+        type: 'future_provider_delta',
+        provider_field: { preserved: true },
+      },
+    })
+
+    expect(message.content[0]).toEqual({
+      type: 'future_provider_block',
+      provider_field: { preserved: true },
+    })
+    expect(blockStart).toMatchObject({
+      index: 3,
+      content_block: { type: 'future_provider_block' },
+    })
+    expect(delta).toMatchObject({
+      index: 3,
+      delta: {
+        type: 'future_provider_delta',
+        provider_field: { preserved: true },
+      },
+    })
+  })
+
+  test('rejects malformed known and future block or delta types', () => {
+    expect(() =>
+      parseVexzyMessage({
+        ...messageText,
+        content: [{ type: 'thinking', thinking: 'missing signature' }],
+      }),
+    ).toThrow()
+    expect(() =>
+      parseVexzyStreamEvent({
+        type: 'content_block_start',
+        content_block: { type: 'future_provider_block' },
+      }),
+    ).toThrow()
+    expect(() =>
+      parseVexzyStreamEvent({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'thinking_delta' },
+      }),
+    ).toThrow()
+    expect(() =>
+      parseVexzyStreamEvent({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: '' },
       }),
     ).toThrow()
   })

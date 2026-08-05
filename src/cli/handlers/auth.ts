@@ -1,349 +1,58 @@
 /* eslint-disable custom-rules/no-process-exit -- CLI subcommand handler intentionally exits */
 
-import {
-  clearAuthRelatedCaches,
-  performLogout,
-} from '../../commands/logout/logout.js'
-import {
-  type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-  logEvent,
-} from '../../services/analytics/index.js'
-import { getSSLErrorHint } from '../../services/api/errorUtils.js'
-import { fetchAndStoreMindCodeFirstTokenDate } from '../../services/api/firstTokenDate.js'
-import {
-  createAndStoreApiKey,
-  fetchAndStoreUserRoles,
-  refreshOAuthToken,
-  shouldUseClaudeAIAuth,
-  storeOAuthAccountInfo,
-} from '../../services/oauth/client.js'
-import { getOauthProfileFromOauthToken } from '../../services/oauth/getOauthProfile.js'
-import { OAuthService } from '../../services/oauth/index.js'
-import type { OAuthTokens } from '../../services/oauth/types.js'
-import {
-  clearOAuthTokenCache,
-  getAnthropicApiKeyWithSource,
-  getAuthTokenSource,
-  getOauthAccountInfo,
-  getSubscriptionType,
-  isUsing3PServices,
-  saveOAuthTokensIfNeeded,
-  validateForceLoginOrg,
-} from '../../utils/auth.js'
-import { getGlobalConfig, saveGlobalConfig } from '../../utils/config.js'
-import { saveClaudeAccountForMultiAccount } from '../../utils/multiAccount.js'
-import { getSecureStorage } from '../../utils/secureStorage/index.js'
-import { logForDebugging } from '../../utils/debug.js'
-import { isRunningOnHomespace } from '../../utils/envUtils.js'
-import { errorMessage } from '../../utils/errors.js'
-import { logError } from '../../utils/log.js'
+import { performLogout } from '../../commands/logout/logout.js'
 import { getAPIProvider } from '../../utils/model/providers.js'
-import { getInitialSettings } from '../../utils/settings/settings.js'
-import { jsonStringify } from '../../utils/slowOperations.js'
-import {
-  buildAccountProperties,
-  buildAPIProviderProperties,
-} from '../../utils/status.js'
+import { isVexzyApiKey } from '../../services/api/vexzy/config.js'
 
 /**
- * Shared post-token-acquisition logic. Saves tokens, fetches profile/roles,
- * and sets up the local auth state.
+ * OAuth token installation is intentionally disabled. MindCode authenticates
+ * exclusively with VEXZY_API_KEY.
+ *
+ * This export remains as a compatibility guard for legacy internal callers;
+ * invoking it fails closed instead of starting a legacy OAuth flow.
  */
-export async function installOAuthTokens(tokens: OAuthTokens): Promise<void> {
-  // Clear the active session before saving new credentials, but preserve other
-  // saved accounts' tokens (and MCP/device/plugin secrets) so switching accounts
-  // via /login doesn't wipe the multi-account store.
-  await performLogout({ clearOnboarding: false, preserveSavedAccounts: true })
-
-  // Reuse pre-fetched profile if available, otherwise fetch fresh
-  const profile =
-    tokens.profile ?? (await getOauthProfileFromOauthToken(tokens.accessToken))
-  if (profile) {
-    storeOAuthAccountInfo({
-      accountUuid: profile.account.uuid,
-      emailAddress: profile.account.email,
-      organizationUuid: profile.organization.uuid,
-      displayName: profile.account.display_name || undefined,
-      hasExtraUsageEnabled:
-        profile.organization.has_extra_usage_enabled ?? undefined,
-      billingType: profile.organization.billing_type ?? undefined,
-      subscriptionCreatedAt:
-        profile.organization.subscription_created_at ?? undefined,
-      accountCreatedAt: profile.account.created_at,
-    })
-  } else if (tokens.tokenAccount) {
-    // Fallback to token exchange account data when profile endpoint fails
-    storeOAuthAccountInfo({
-      accountUuid: tokens.tokenAccount.uuid,
-      emailAddress: tokens.tokenAccount.emailAddress,
-      organizationUuid: tokens.tokenAccount.organizationUuid,
-    })
-  }
-
-  const storageResult = saveOAuthTokensIfNeeded(tokens)
-  clearOAuthTokenCache()
-
-  if (storageResult.warning) {
-    logEvent('tengu_oauth_storage_warning', {
-      warning:
-        storageResult.warning as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-    })
-  }
-
-  // Persist this account into the multi-account store so it appears in
-  // /account. Keyed by accountUuid, so re-logging into an already-saved
-  // account overwrites that entry in place rather than creating a duplicate,
-  // while logging into a new account adds it alongside the others.
-  if (shouldUseClaudeAIAuth(tokens.scopes)) {
-    // Read oauthAccount straight from config (storeOAuthAccountInfo wrote it
-    // above). Do NOT use getOauthAccountInfo() here: it's gated by
-    // isAnthropicAuthEnabled(), which returns false when an API config is the
-    // active entry — so logging in while an API config is active would
-    // otherwise skip this block and never save the account to /account.
-    const accountInfo = getGlobalConfig().oauthAccount
-    const savedTokens = getSecureStorage().read()?.claudeAiOauth
-    if (accountInfo && savedTokens) {
-      saveClaudeAccountForMultiAccount(accountInfo, savedTokens)
-      // Point activeEntry at the just-logged-in account so /account marks it
-      // active and the live token stays consistent with activeEntry.
-      // performLogout() doesn't clear activeEntry, so without this a stale
-      // entry from a prior session could linger and mismatch the live token.
-      saveGlobalConfig(current => ({
-        ...current,
-        activeEntry: { type: 'claude', id: accountInfo.accountUuid },
-      }))
-    }
-  }
-
-  // Roles and first-token-date may fail for limited-scope tokens (e.g.
-  // inference-only from setup-token). They're not required for core auth.
-  await fetchAndStoreUserRoles(tokens.accessToken).catch(err =>
-    logForDebugging(String(err), { level: 'error' }),
+export async function installOAuthTokens(_tokens: unknown): Promise<never> {
+  throw new Error(
+    'MindCode requires VEXZY_API_KEY authentication; OAuth is disabled.',
   )
-
-  if (shouldUseClaudeAIAuth(tokens.scopes)) {
-    await fetchAndStoreMindCodeFirstTokenDate().catch(err =>
-      logForDebugging(String(err), { level: 'error' }),
-    )
-  } else {
-    // API key creation is critical for Console users — let it throw.
-    const apiKey = await createAndStoreApiKey(tokens.accessToken)
-    if (!apiKey) {
-      throw new Error(
-        'Unable to create API key. The server accepted the request but did not return a key.',
-      )
-    }
-  }
-
-  await clearAuthRelatedCaches()
 }
 
-export async function authLogin({
-  email,
-  sso,
-  console: useConsole,
-  claudeai,
-}: {
-  email?: string
-  sso?: boolean
-  console?: boolean
-  claudeai?: boolean
-}): Promise<void> {
-  if (useConsole && claudeai) {
+export async function authLogin(_options: unknown): Promise<void> {
+  const apiKey = process.env.VEXZY_API_KEY
+  if (!isVexzyApiKey(apiKey)) {
     process.stderr.write(
-      'Error: --console and --claudeai cannot be used together.\n',
+      'VEXZY_API_KEY is not configured. Set it before starting MindCode.\n',
     )
     process.exit(1)
   }
 
-  const settings = getInitialSettings()
-  // forceLoginMethod is a hard constraint (enterprise setting) — matches ConsoleOAuthFlow behavior.
-  // Without it, --console selects Console; --claudeai (or no flag) selects claude.ai.
-  const loginWithClaudeAi = settings.forceLoginMethod
-    ? settings.forceLoginMethod === 'claudeai'
-    : !useConsole
-  const orgUUID = settings.forceLoginOrgUUID
-
-  // Fast path: if a refresh token is provided via env var, skip the browser
-  // OAuth flow and exchange it directly for tokens.
-  const envRefreshToken = process.env.MINDCODE_OAUTH_REFRESH_TOKEN
-  if (envRefreshToken) {
-    const envScopes = process.env.MINDCODE_OAUTH_SCOPES
-    if (!envScopes) {
-      process.stderr.write(
-        'MINDCODE_OAUTH_SCOPES is required when using MINDCODE_OAUTH_REFRESH_TOKEN.\n' +
-          'Set it to the space-separated scopes the refresh token was issued with\n' +
-          '(e.g. "user:inference" or "user:profile user:inference user:sessions:claude_code user:mcp_servers").\n',
-      )
-      process.exit(1)
-    }
-
-    const scopes = envScopes.split(/\s+/).filter(Boolean)
-
-    try {
-      logEvent('tengu_login_from_refresh_token', {})
-
-      const tokens = await refreshOAuthToken(envRefreshToken, { scopes })
-      await installOAuthTokens(tokens)
-
-      const orgResult = await validateForceLoginOrg()
-      if (!orgResult.valid) {
-        process.stderr.write(orgResult.message + '\n')
-        process.exit(1)
-      }
-
-      // Mark onboarding complete — interactive paths handle this via
-      // the Onboarding component, but the env var path skips it.
-      saveGlobalConfig(current => {
-        if (current.hasCompletedOnboarding) return current
-        return { ...current, hasCompletedOnboarding: true }
-      })
-
-      logEvent('tengu_oauth_success', {
-        loginWithClaudeAi: shouldUseClaudeAIAuth(tokens.scopes),
-      })
-      process.stdout.write('Login successful.\n')
-      process.exit(0)
-    } catch (err) {
-      logError(err)
-      const sslHint = getSSLErrorHint(err)
-      process.stderr.write(
-        `Login failed: ${errorMessage(err)}\n${sslHint ? sslHint + '\n' : ''}`,
-      )
-      process.exit(1)
-    }
-  }
-
-  const resolvedLoginMethod = sso ? 'sso' : undefined
-
-  const oauthService = new OAuthService()
-
-  try {
-    logEvent('tengu_oauth_flow_start', { loginWithClaudeAi })
-
-    const result = await oauthService.startOAuthFlow(
-      async url => {
-        process.stdout.write('Opening browser to sign in…\n')
-        process.stdout.write(`If the browser didn't open, visit: ${url}\n`)
-      },
-      {
-        loginWithClaudeAi,
-        loginHint: email,
-        loginMethod: resolvedLoginMethod,
-        orgUUID,
-      },
-    )
-
-    await installOAuthTokens(result)
-
-    const orgResult = await validateForceLoginOrg()
-    if (!orgResult.valid) {
-      process.stderr.write(orgResult.message + '\n')
-      process.exit(1)
-    }
-
-    logEvent('tengu_oauth_success', { loginWithClaudeAi })
-
-    process.stdout.write('Login successful.\n')
-    process.exit(0)
-  } catch (err) {
-    logError(err)
-    const sslHint = getSSLErrorHint(err)
-    process.stderr.write(
-      `Login failed: ${errorMessage(err)}\n${sslHint ? sslHint + '\n' : ''}`,
-    )
-    process.exit(1)
-  } finally {
-    oauthService.cleanup()
-  }
+  process.stdout.write('VEXZY_API_KEY is configured. MindCode is ready.\n')
+  process.exit(0)
 }
 
 export async function authStatus(opts: {
   json?: boolean
   text?: boolean
 }): Promise<void> {
-  const { source: authTokenSource, hasToken } = getAuthTokenSource()
-  const { source: apiKeySource } = getAnthropicApiKeyWithSource()
-  const hasApiKeyEnvVar =
-    !!process.env.ANTHROPIC_API_KEY && !isRunningOnHomespace()
-  const oauthAccount = getOauthAccountInfo()
-  const subscriptionType = getSubscriptionType()
-  const using3P = isUsing3PServices()
-  const loggedIn =
-    hasToken || apiKeySource !== 'none' || hasApiKeyEnvVar || using3P
-
-  // Determine auth method
-  let authMethod: string = 'none'
-  if (using3P) {
-    authMethod = 'third_party'
-  } else if (authTokenSource === 'claude.ai') {
-    authMethod = 'claude.ai'
-  } else if (authTokenSource === 'apiKeyHelper') {
-    authMethod = 'api_key_helper'
-  } else if (authTokenSource !== 'none') {
-    authMethod = 'oauth_token'
-  } else if (apiKeySource === 'ANTHROPIC_API_KEY' || hasApiKeyEnvVar) {
-    authMethod = 'api_key'
-  } else if (apiKeySource === '/login managed key') {
-    authMethod = 'claude.ai'
-  }
+  const apiKey = process.env.VEXZY_API_KEY
+  const loggedIn = isVexzyApiKey(apiKey)
 
   if (opts.text) {
-    const properties = [
-      ...buildAccountProperties(),
-      ...buildAPIProviderProperties(),
-    ]
-    let hasAuthProperty = false
-    for (const prop of properties) {
-      const value =
-        typeof prop.value === 'string'
-          ? prop.value
-          : Array.isArray(prop.value)
-            ? prop.value.join(', ')
-            : null
-      if (value === null || value === 'none') {
-        continue
-      }
-      hasAuthProperty = true
-      if (prop.label) {
-        process.stdout.write(`${prop.label}: ${value}\n`)
-      } else {
-        process.stdout.write(`${value}\n`)
-      }
-    }
-    if (!hasAuthProperty && hasApiKeyEnvVar) {
-      process.stdout.write('API key: ANTHROPIC_API_KEY\n')
-    }
-    if (!loggedIn) {
-      process.stdout.write(
-        'Not logged in. Run mindcode auth login to authenticate.\n',
-      )
-    }
+    process.stdout.write(
+      loggedIn
+        ? 'VEXZY_API_KEY: configured\n'
+        : 'Not authenticated. Set VEXZY_API_KEY before starting MindCode.\n',
+    )
   } else {
-    const apiProvider = getAPIProvider()
-    const resolvedApiKeySource =
-      apiKeySource !== 'none'
-        ? apiKeySource
-        : hasApiKeyEnvVar
-          ? 'ANTHROPIC_API_KEY'
-          : null
-    const output: Record<string, string | boolean | null> = {
+    const output: Record<string, string | boolean> = {
       loggedIn,
-      authMethod,
-      apiProvider,
+      authMethod: loggedIn ? 'vexzy_api_key' : 'none',
+      apiProvider: loggedIn ? getAPIProvider() : 'vexzy',
     }
-    if (resolvedApiKeySource) {
-      output.apiKeySource = resolvedApiKeySource
-    }
-    if (authMethod === 'claude.ai') {
-      output.email = oauthAccount?.emailAddress ?? null
-      output.orgId = oauthAccount?.organizationUuid ?? null
-      output.orgName = oauthAccount?.organizationName ?? null
-      output.subscriptionType = subscriptionType ?? null
-    }
-
-    process.stdout.write(jsonStringify(output, null, 2) + '\n')
+    if (loggedIn) output.apiKeySource = 'VEXZY_API_KEY'
+    process.stdout.write(`${JSON.stringify(output, null, 2)}\n`)
   }
+
   process.exit(loggedIn ? 0 : 1)
 }
 
@@ -351,9 +60,14 @@ export async function authLogout(): Promise<void> {
   try {
     await performLogout({ clearOnboarding: false })
   } catch {
-    process.stderr.write('Failed to log out.\n')
+    process.stderr.write('Failed to clear MindCode authentication state.\n')
     process.exit(1)
   }
-  process.stdout.write('Successfully logged out from your Anthropic account.\n')
+
+  process.stdout.write(
+    process.env.VEXZY_API_KEY
+      ? 'Local MindCode credentials cleared. VEXZY_API_KEY remains active in the environment.\n'
+      : 'MindCode VEXZY authentication state cleared.\n',
+  )
   process.exit(0)
 }

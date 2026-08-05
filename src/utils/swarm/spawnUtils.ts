@@ -3,7 +3,6 @@
  */
 
 import {
-  getChromeFlagOverride,
   getFlagSettingsPath,
   getInlinePlugins,
   getMainLoopModelOverride,
@@ -11,6 +10,13 @@ import {
 } from '../../bootstrap/state.js'
 import { quote } from '../bash/shellQuote.js'
 import { isInBundledMode } from '../bundledMode.js'
+import {
+  JAILBREAK_LEVEL_ENV_VAR,
+  type JailbreakLevel,
+  getJailbreakLevel,
+  parseJailbreakLevel,
+} from '../jailbreak.js'
+import { FIXED_SUBAGENT_MODEL } from '../model/subagentModel.js'
 import type { PermissionMode } from '../permissions/PermissionMode.js'
 import { getTeammateModeFromSnapshot } from './backends/teammateModeSnapshot.js'
 import { TEAMMATE_COMMAND_ENV_VAR } from './constants.js'
@@ -77,13 +83,6 @@ export function buildInheritedCliFlags(options?: {
   const sessionMode = getTeammateModeFromSnapshot()
   flags.push(`--teammate-mode ${sessionMode}`)
 
-  // Propagate --chrome / --no-chrome if explicitly set on the CLI
-  const chromeFlagOverride = getChromeFlagOverride()
-  if (chromeFlagOverride === true) {
-    flags.push('--chrome')
-  } else if (chromeFlagOverride === false) {
-    flags.push('--no-chrome')
-  }
 
   return flags.join(' ')
 }
@@ -96,19 +95,12 @@ export function buildInheritedCliFlags(options?: {
 const TEAMMATE_ENV_VARS = [
   // VEXZY credentials/model selection and subagent behavior. tmux may start
   // a fresh login shell, so these must be forwarded explicitly.
-  'ANTHROPIC_API_KEY',
   'VEXZY_API_KEY',
-  'ANTHROPIC_MODEL',
+  'MINDCODE_MODEL',
   'MINDCODE_SUBAGENT_MODEL',
   'MINDCODE_COMPACT_MODEL',
+  'MINDCODE_WORKER_EFFORT',
   'MINDCODE_DISABLE_COMPACT_CACHE_SHARING',
-  // API provider selection — without these, teammates default to firstParty
-  // and send requests to the wrong endpoint (GitHub issue #23561)
-  'MINDCODE_USE_BEDROCK',
-  'MINDCODE_USE_VERTEX',
-  'MINDCODE_USE_FOUNDRY',
-  // Custom API endpoint
-  'ANTHROPIC_BASE_URL',
   // Config directory override
   'MINDCODE_CONFIG_DIR',
   // CCR marker — teammates need this for CCR-aware code paths. Auth finds
@@ -136,19 +128,34 @@ const TEAMMATE_ENV_VARS = [
 ] as const
 
 export function isTeammateEnvVarForwarded(name: string): boolean {
-  return (TEAMMATE_ENV_VARS as readonly string[]).includes(name)
+  return (
+    name === JAILBREAK_LEVEL_ENV_VAR ||
+    (TEAMMATE_ENV_VARS as readonly string[]).includes(name)
+  )
 }
 
 /**
  * Builds the `env KEY=VALUE ...` string for teammate spawn commands.
  * Always includes MINDCODE=1 and MINDCODE_EXPERIMENTAL_AGENT_TEAMS=1,
- * plus any provider/config env vars that are set in the current process.
+ * plus any runtime/config env vars that are set in the current process.
  */
-export function buildInheritedEnvVars(): string {
-  const envVars = ['MINDCODE=1', 'MINDCODE_EXPERIMENTAL_AGENT_TEAMS=1']
+export function buildInheritedEnvVars(
+  jailbreakLevel: JailbreakLevel = getJailbreakLevel(),
+): string {
+  // Always derive this value from the validated enum, never from the raw
+  // parent environment. This makes pane-worker propagation deterministic and
+  // prevents shell metacharacters or secrets from entering the spawn command.
+  const normalizedJailbreakLevel =
+    parseJailbreakLevel(String(jailbreakLevel)) ?? getJailbreakLevel()
+  const envVars = [
+    'MINDCODE=1',
+    'MINDCODE_EXPERIMENTAL_AGENT_TEAMS=1',
+    `${JAILBREAK_LEVEL_ENV_VAR}=${quote([normalizedJailbreakLevel])}`,
+  ]
 
   for (const key of TEAMMATE_ENV_VARS) {
-    const value = process.env[key]
+    const value =
+      key === 'MINDCODE_MODEL' ? FIXED_SUBAGENT_MODEL : process.env[key]
     if (value !== undefined && value !== '') {
       envVars.push(`${key}=${quote([value])}`)
     }

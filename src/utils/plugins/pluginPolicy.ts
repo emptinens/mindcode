@@ -1,3 +1,12 @@
+export {
+  evaluateMindCodeMcpPolicy,
+  evaluateMindCodePluginPolicy,
+  getMindCodePluginPolicyDiagnostic,
+  MINDCODE_ALLOWED_PLUGIN_ALIASES,
+  normalizeMindCodePolicyName,
+  resolveMindCodeAllowedAlias,
+} from './mindcodePluginPolicy.js'
+
 /**
  * Plugin policy checks backed by managed settings (policySettings).
  *
@@ -6,7 +15,9 @@
  * reaches most of the plugin subsystem.
  */
 
-import { getSettingsForSource } from '../settings/settings.js'
+import { createRequire } from 'node:module'
+
+const require = createRequire(import.meta.url)
 
 /**
  * Check if a plugin is force-disabled by org policy (managed-settings.json).
@@ -15,6 +26,7 @@ import { getSettingsForSource } from '../settings/settings.js'
  * install chokepoint, enable op, and UI filters.
  */
 export function isPluginBlockedByPolicy(pluginId: string): boolean {
+  const { getSettingsForSource } = require('../settings/settings.js') as typeof import('../settings/settings.js')
   const policyEnabled = getSettingsForSource('policySettings')?.enabledPlugins
   return policyEnabled?.[pluginId] === false
 }

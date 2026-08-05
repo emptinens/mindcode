@@ -9,6 +9,11 @@
 
 import { z } from 'zod/v4'
 import { lazySchema } from '../../utils/lazySchema.js'
+import type {
+  BetaMessage,
+  MessageParam,
+  VexzyStreamEvent,
+} from '../../services/api/vexzy/protocolTypes.js'
 
 // ============================================================================
 // Usage & Model Types
@@ -148,21 +153,8 @@ export const McpServerConfigForProcessTransportSchema = lazySchema(() =>
   ]),
 )
 
-export const McpClaudeAIProxyServerConfigSchema = lazySchema(() =>
-  z.object({
-    type: z.literal('claudeai-proxy'),
-    url: z.string(),
-    id: z.string(),
-  }),
-)
-
-// Broader config type for status responses (includes claudeai-proxy which is output-only)
-export const McpServerStatusConfigSchema = lazySchema(() =>
-  z.union([
-    McpServerConfigForProcessTransportSchema(),
-    McpClaudeAIProxyServerConfigSchema(),
-  ]),
-)
+export const McpServerStatusConfigSchema =
+  McpServerConfigForProcessTransportSchema
 
 export const McpServerStatusSchema = lazySchema(() =>
   z
@@ -1057,7 +1049,7 @@ export const ModelInfoSchema = lazySchema(() =>
         .optional()
         .describe('Whether this model supports effort levels'),
       supportedEffortLevels: z
-        .array(z.enum(['low', 'medium', 'high', 'xhigh', 'max']))
+        .array(z.enum(['none', 'low', 'medium', 'high', 'xhigh', 'max']))
         .optional()
         .describe('Available effort levels for this model'),
       supportsAdaptiveThinking: z
@@ -1087,10 +1079,10 @@ export const AccountInfoSchema = lazySchema(() =>
       tokenSource: z.string().optional(),
       apiKeySource: z.string().optional(),
       apiProvider: z
-        .enum(['firstParty', 'bedrock', 'vertex', 'foundry'])
+        .literal('vexzy')
         .optional()
         .describe(
-          'Active API backend. Anthropic OAuth login only applies when "firstParty"; for 3P providers the other fields are absent and auth is external (AWS creds, gcloud ADC, etc.).',
+          'Active API backend. MindCode uses the VEXZY API and VEXZY_API_KEY.',
         ),
     })
     .describe("Information about the logged in user's account."),
@@ -1167,7 +1159,7 @@ export const AgentDefinitionSchema = lazySchema(() =>
         ),
       effort: z
         .union([
-          z.enum(['low', 'medium', 'high', 'xhigh', 'max']),
+          z.enum(['none', 'low', 'medium', 'high', 'xhigh', 'max']),
           z.number().int(),
         ])
         .optional()
@@ -1233,18 +1225,24 @@ export const RewindFilesResultSchema = lazySchema(() =>
 // External Type Placeholders
 // ============================================================================
 //
-// These schemas use z.unknown() as placeholders for external types.
+// These schemas use z.custom() as placeholders for protocol types.
 // The generation script uses TypeOverrideMap to output the correct TS type references.
 // This allows us to define SDK message types in Zod while maintaining proper typing.
 
-/** Placeholder for APIUserMessage from @anthropic-ai/sdk */
-export const APIUserMessagePlaceholder = lazySchema(() => z.unknown())
+/** Placeholder for MessageParam from the VEXZY protocolTypes module */
+export const VexzyUserMessagePlaceholder = lazySchema(() =>
+  z.custom<MessageParam>(),
+)
 
-/** Placeholder for APIAssistantMessage from @anthropic-ai/sdk */
-export const APIAssistantMessagePlaceholder = lazySchema(() => z.unknown())
+/** Placeholder for BetaMessage from the VEXZY protocolTypes module */
+export const VexzyAssistantMessagePlaceholder = lazySchema(() =>
+  z.custom<BetaMessage>(),
+)
 
-/** Placeholder for RawMessageStreamEvent from @anthropic-ai/sdk */
-export const RawMessageStreamEventPlaceholder = lazySchema(() => z.unknown())
+/** Placeholder for VexzyStreamEvent from the VEXZY protocolTypes module */
+export const VexzyStreamEventPlaceholder = lazySchema(() =>
+  z.custom<VexzyStreamEvent>(),
+)
 
 /** Placeholder for UUID from crypto */
 export const UUIDPlaceholder = lazySchema(() => z.string())
@@ -1276,7 +1274,7 @@ export const SDKStatusSchema = lazySchema(() =>
 const SDKUserMessageContentSchema = lazySchema(() =>
   z.object({
     type: z.literal('user'),
-    message: APIUserMessagePlaceholder(),
+    message: VexzyUserMessagePlaceholder(),
     parent_tool_use_id: z.string().nullable(),
     isSynthetic: z.boolean().optional(),
     tool_use_result: z.unknown().optional(),
@@ -1344,13 +1342,13 @@ export const SDKRateLimitInfoSchema = lazySchema(() =>
       isUsingOverage: z.boolean().optional(),
       surpassedThreshold: z.number().optional(),
     })
-    .describe('Rate limit information for claude.ai subscription users.'),
+    .describe('Rate limit information for the active MindCode API account.'),
 )
 
 export const SDKAssistantMessageSchema = lazySchema(() =>
   z.object({
     type: z.literal('assistant'),
-    message: APIAssistantMessagePlaceholder(),
+    message: VexzyAssistantMessagePlaceholder(),
     parent_tool_use_id: z.string().nullable(),
     error: SDKAssistantMessageErrorSchema().optional(),
     uuid: UUIDPlaceholder(),
@@ -1499,7 +1497,7 @@ export const SDKSystemMessageSchema = lazySchema(() =>
 export const SDKPartialAssistantMessageSchema = lazySchema(() =>
   z.object({
     type: z.literal('stream_event'),
-    event: RawMessageStreamEventPlaceholder(),
+    event: VexzyStreamEventPlaceholder(),
     parent_tool_use_id: z.string().nullable(),
     uuid: UUIDPlaceholder(),
     session_id: z.string(),

@@ -1,29 +1,21 @@
 /**
  * Plugin install counts data layer
  *
- * This module fetches and caches plugin install counts from the official
- * Claude plugins statistics repository. The cache is refreshed if older
- * than 24 hours.
+ * This module reads locally cached plugin install counts. It never contacts a
+ * marketplace or statistics endpoint; missing data is represented by zeroes.
  *
  * Cache location: ~/.mindcode/plugins/install-counts-cache.json
  */
 
-import axios from 'axios'
-import { randomBytes } from 'crypto'
-import { readFile, rename, unlink, writeFile } from 'fs/promises'
+import { readFile } from 'fs/promises'
 import { join } from 'path'
 import { logForDebugging } from '../debug.js'
 import { errorMessage, getErrnoCode } from '../errors.js'
-import { getFsImplementation } from '../fsOperations.js'
-import { logError } from '../log.js'
-import { jsonParse, jsonStringify } from '../slowOperations.js'
-import { classifyFetchError, logPluginFetch } from './fetchTelemetry.js'
+import { jsonParse } from '../slowOperations.js'
 import { getPluginsDirectory } from './pluginDirectories.js'
 
 const INSTALL_COUNTS_CACHE_VERSION = 1
 const INSTALL_COUNTS_CACHE_FILENAME = 'install-counts-cache.json'
-const INSTALL_COUNTS_URL =
-  'https://raw.githubusercontent.com/anthropics/claude-plugins-official/refs/heads/stats/stats/plugin-installs.json'
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours in milliseconds
 
 /**
@@ -34,16 +26,6 @@ type InstallCountsCache = {
   fetchedAt: string // ISO timestamp
   counts: Array<{
     plugin: string // "pluginName@marketplace"
-    unique_installs: number
-  }>
-}
-
-/**
- * Expected structure of the GitHub stats response
- */
-type GitHubStatsResponse = {
-  plugins: Array<{
-    plugin: string
     unique_installs: number
   }>
 }
@@ -143,122 +125,26 @@ async function loadInstallCountsCache(): Promise<InstallCountsCache | null> {
 }
 
 /**
- * Save the install counts cache to disk atomically.
- * Uses a temp file + rename pattern to prevent corruption.
- */
-async function saveInstallCountsCache(
-  cache: InstallCountsCache,
-): Promise<void> {
-  const cachePath = getInstallCountsCachePath()
-  const tempPath = `${cachePath}.${randomBytes(8).toString('hex')}.tmp`
-
-  try {
-    // Ensure the plugins directory exists
-    const pluginsDir = getPluginsDirectory()
-    await getFsImplementation().mkdir(pluginsDir)
-
-    // Write to temp file
-    const content = jsonStringify(cache, null, 2)
-    await writeFile(tempPath, content, {
-      encoding: 'utf-8',
-      mode: 0o600,
-    })
-
-    // Atomic rename
-    await rename(tempPath, cachePath)
-    logForDebugging('Install counts cache saved successfully')
-  } catch (error) {
-    logError(error)
-    // Clean up temp file if it exists
-    try {
-      await unlink(tempPath)
-    } catch {
-      // Ignore cleanup errors
-    }
-  }
-}
-
-/**
- * Fetch install counts from GitHub stats repository
- */
-async function fetchInstallCountsFromGitHub(): Promise<
-  Array<{ plugin: string; unique_installs: number }>
-> {
-  logForDebugging(`Fetching install counts from ${INSTALL_COUNTS_URL}`)
-
-  const started = performance.now()
-  try {
-    const response = await axios.get<GitHubStatsResponse>(INSTALL_COUNTS_URL, {
-      timeout: 10000,
-    })
-
-    if (!response.data?.plugins || !Array.isArray(response.data.plugins)) {
-      throw new Error('Invalid response format from install counts API')
-    }
-
-    logPluginFetch(
-      'install_counts',
-      INSTALL_COUNTS_URL,
-      'success',
-      performance.now() - started,
-    )
-    return response.data.plugins
-  } catch (error) {
-    logPluginFetch(
-      'install_counts',
-      INSTALL_COUNTS_URL,
-      'failure',
-      performance.now() - started,
-      classifyFetchError(error),
-    )
-    throw error
-  }
-}
-
-/**
  * Get plugin install counts as a Map.
- * Uses cached data if available and less than 24 hours old.
- * Returns null on errors so UI can hide counts rather than show misleading zeros.
+ * Uses a local cache if available and less than 24 hours old. There is no
+ * remote fallback; a cache miss returns an empty map so the UI displays zero
+ * counts and remains usable offline.
  *
- * @returns Map of plugin ID (name@marketplace) to install count, or null if unavailable
+ * @returns Map of plugin ID (name@marketplace) to install count
  */
-export async function getInstallCounts(): Promise<Map<string, number> | null> {
-  // Try to load from cache first
+export async function getInstallCounts(): Promise<Map<string, number>> {
   const cache = await loadInstallCountsCache()
-  if (cache) {
-    logForDebugging('Using cached install counts')
-    logPluginFetch('install_counts', INSTALL_COUNTS_URL, 'cache_hit', 0)
-    const map = new Map<string, number>()
-    for (const entry of cache.counts) {
-      map.set(entry.plugin, entry.unique_installs)
-    }
-    return map
+  if (!cache) {
+    logForDebugging('No local install counts cache; using zero counts')
+    return new Map()
   }
 
-  // Cache miss or stale - fetch from GitHub
-  try {
-    const counts = await fetchInstallCountsFromGitHub()
-
-    // Save to cache
-    const newCache: InstallCountsCache = {
-      version: INSTALL_COUNTS_CACHE_VERSION,
-      fetchedAt: new Date().toISOString(),
-      counts,
-    }
-    await saveInstallCountsCache(newCache)
-
-    // Convert to Map
-    const map = new Map<string, number>()
-    for (const entry of counts) {
-      map.set(entry.plugin, entry.unique_installs)
-    }
-    return map
-  } catch (error) {
-    // Log error and return null so UI can hide counts
-    logError(error)
-    logForDebugging(`Failed to fetch install counts: ${errorMessage(error)}`)
-    return null
+  logForDebugging('Using local install counts cache')
+  const map = new Map<string, number>()
+  for (const entry of cache.counts) {
+    map.set(entry.plugin, entry.unique_installs)
   }
+  return map
 }
 
 /**

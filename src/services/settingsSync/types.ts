@@ -1,8 +1,7 @@
 /**
  * Settings Sync Types
  *
- * Zod schemas and types for the user settings sync API.
- * Based on the backend API contract from anthropic/anthropic#218817.
+ * Compatibility types for the local settings-sync boundary.
  */
 
 import { z } from 'zod/v4'
@@ -20,7 +19,7 @@ export const UserSyncContentSchema = lazySchema(() =>
 )
 
 /**
- * Full response from GET /api/claude_code/user_settings
+ * Historical response shape retained for source compatibility.
  */
 export const UserSyncDataSchema = lazySchema(() =>
   z.object({

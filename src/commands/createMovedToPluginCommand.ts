@@ -1,4 +1,4 @@
-import type { ContentBlockParam } from '@anthropic-ai/sdk/resources/messages.js'
+import type { ContentBlockParam } from 'src/services/api/vexzy/protocolTypes.js'
 import type { Command } from '../commands.js'
 import type { ToolUseContext } from '../Tool.js'
 

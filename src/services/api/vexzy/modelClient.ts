@@ -5,8 +5,10 @@ import {
 } from "./config.js";
 import { createVexzyRequestInit } from "./auth.js";
 import {
+  APIError,
   createVexzyError,
   getVexzyRetryDelayMs,
+  markVexzyCompatibilityKind,
   shouldRetryVexzy,
   VexzyError,
 } from "./errors.js";
@@ -28,13 +30,27 @@ export type VexzyModelClientErrorCode =
   | "network"
   | "invalid_response";
 
-export class VexzyModelClientError extends Error {
+export class VexzyModelClientError extends APIError {
   readonly code: VexzyModelClientErrorCode;
 
-  constructor(code: VexzyModelClientErrorCode) {
-    super(getClientErrorMessage(code));
+  constructor(code: VexzyModelClientErrorCode, cause?: unknown) {
+    super(undefined, undefined, getClientErrorMessage(code), undefined);
     this.name = "VexzyModelClientError";
     this.code = code;
+    if (code === "aborted") markVexzyCompatibilityKind(this, "abort");
+    if (code === "timeout") {
+      markVexzyCompatibilityKind(this, "timeout");
+      markVexzyCompatibilityKind(this, "connection");
+    }
+    if (code === "network") markVexzyCompatibilityKind(this, "connection");
+    if (cause instanceof Error) {
+      Object.defineProperty(this, "cause", {
+        configurable: true,
+        enumerable: false,
+        value: new Error("Vexzy model request failed"),
+        writable: true,
+      });
+    }
   }
 }
 
@@ -61,6 +77,8 @@ export interface VexzyModelLoadOptions extends VexzyModelRequestOptions {
 export interface VexzyModelSnapshot {
   readonly registry: VexzyModelRegistry;
   readonly fetchedAt: number;
+  /** Unconsumed clone of the provider response for SDK-compatible metadata. */
+  readonly response?: Response;
 }
 
 interface CombinedSignal {
@@ -166,6 +184,7 @@ export class VexzyModelClient {
       }
       if (error instanceof VexzyError) throw error;
       if (error instanceof VexzyModelClientError) throw error;
+      if (error instanceof APIError) throw error;
       throw new VexzyModelClientError("network");
     } finally {
       combined.cleanup();
@@ -194,10 +213,11 @@ export class VexzyModelClient {
         );
       } catch (error) {
         if (signal.aborted) throw error;
-        throw new VexzyModelClientError("network");
+        throw new VexzyModelClientError("network", error);
       }
 
       if (response.ok) {
+        const rawResponse = response.clone();
         let payload: unknown;
         try {
           payload = await response.json();
@@ -215,6 +235,7 @@ export class VexzyModelClient {
         this.cachedSnapshot = {
           registry,
           fetchedAt: this.now(),
+          response: rawResponse,
         };
         return registry;
       }

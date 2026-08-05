@@ -1,66 +1,64 @@
-import { feature } from 'bun:bundle'
-import { APIError } from '@anthropic-ai/sdk'
+import { feature } from "bun:bundle";
+import { APIError } from "./vexzy/errors.js";
 import type {
   BetaStopReason,
   BetaUsage as Usage,
-} from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
+} from "src/services/api/vexzy/protocolTypes.js";
 import {
   addToTotalDurationState,
   consumePostCompaction,
   getIsNonInteractiveSession,
   getLastApiCompletionTimestamp,
-  getTeleportedSessionInfo,
-  markFirstTeleportMessageLogged,
   setLastApiCompletionTimestamp,
-} from 'src/bootstrap/state.js'
-import type { QueryChainTracking } from 'src/Tool.js'
-import { isConnectorTextBlock } from 'src/types/connectorText.js'
-import type { AssistantMessage } from 'src/types/message.js'
-import { logForDebugging } from 'src/utils/debug.js'
-import type { EffortLevel } from 'src/utils/effort.js'
-import { logError } from 'src/utils/log.js'
-import { getAPIProviderForStatsig } from 'src/utils/model/providers.js'
-import type { PermissionMode } from 'src/utils/permissions/PermissionMode.js'
-import { jsonStringify } from 'src/utils/slowOperations.js'
-import { logOTelEvent } from 'src/utils/telemetry/events.js'
+} from "src/bootstrap/state.js";
+import type { QueryChainTracking } from "src/Tool.js";
+import { isConnectorTextBlock } from "src/types/connectorText.js";
+import type { AssistantMessage } from "src/types/message.js";
+import { logForDebugging } from "src/utils/debug.js";
+import type { EffortLevel } from "src/utils/effort.js";
+import { logError } from "src/utils/log.js";
+import { getAPIProviderForStatsig } from "src/utils/model/providers.js";
+import type { PermissionMode } from "src/utils/permissions/PermissionMode.js";
+import { jsonStringify } from "src/utils/slowOperations.js";
+import { logOTelEvent } from "src/utils/telemetry/events.js";
 import {
   endLLMRequestSpan,
   isBetaTracingEnabled,
   type Span,
-} from 'src/utils/telemetry/sessionTracing.js'
-import type { NonNullableUsage } from '../../entrypoints/sdk/sdkUtilityTypes.js'
-import { consumeInvokingRequestId } from '../../utils/agentContext.js'
+} from "src/utils/telemetry/sessionTracing.js";
+import type { NonNullableUsage } from "../../entrypoints/sdk/sdkUtilityTypes.js";
+import { consumeInvokingRequestId } from "../../utils/agentContext.js";
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
-} from '../analytics/index.js'
-import { sanitizeToolNameForAnalytics } from '../analytics/metadata.js'
-import { EMPTY_USAGE } from './emptyUsage.js'
-import { classifyAPIError } from './errors.js'
-import { extractConnectionErrorDetails } from './errorUtils.js'
+} from "../analytics/index.js";
+import { sanitizeToolNameForAnalytics } from "../analytics/metadata.js";
+import { EMPTY_USAGE } from "./emptyUsage.js";
+import { classifyAPIError } from "./errors.js";
+import { extractConnectionErrorDetails } from "./errorUtils.js";
 
-export type { NonNullableUsage }
-export { EMPTY_USAGE }
+export type { NonNullableUsage };
+export { EMPTY_USAGE };
 
 // Strategy used for global prompt caching
-export type GlobalCacheStrategy = 'tool_based' | 'system_prompt' | 'none'
+export type GlobalCacheStrategy = "tool_based" | "system_prompt" | "none";
 
 function getErrorMessage(error: unknown): string {
   if (error instanceof APIError) {
-    const body = error.error as { error?: { message?: string } } | undefined
-    if (body?.error?.message) return body.error.message
+    const body = error.error as { error?: { message?: string } } | undefined;
+    if (body?.error?.message) return body.error.message;
   }
-  return error instanceof Error ? error.message : String(error)
+  return error instanceof Error ? error.message : String(error);
 }
 
 type KnownGateway =
-  | 'litellm'
-  | 'helicone'
-  | 'portkey'
-  | 'cloudflare-ai-gateway'
-  | 'kong'
-  | 'braintrust'
-  | 'databricks'
+  | "litellm"
+  | "helicone"
+  | "portkey"
+  | "cloudflare-ai-gateway"
+  | "kong"
+  | "braintrust"
+  | "databricks";
 
 // Gateway fingerprints for detecting AI gateways from response headers
 const GATEWAY_FINGERPRINTS: Partial<
@@ -68,108 +66,69 @@ const GATEWAY_FINGERPRINTS: Partial<
 > = {
   // https://docs.litellm.ai/docs/proxy/response_headers
   litellm: {
-    prefixes: ['x-litellm-'],
+    prefixes: ["x-litellm-"],
   },
   // https://docs.helicone.ai/helicone-headers/header-directory
   helicone: {
-    prefixes: ['helicone-'],
+    prefixes: ["helicone-"],
   },
   // https://portkey.ai/docs/api-reference/response-schema
   portkey: {
-    prefixes: ['x-portkey-'],
+    prefixes: ["x-portkey-"],
   },
   // https://developers.cloudflare.com/ai-gateway/evaluations/add-human-feedback-api/
-  'cloudflare-ai-gateway': {
-    prefixes: ['cf-aig-'],
+  "cloudflare-ai-gateway": {
+    prefixes: ["cf-aig-"],
   },
   // https://developer.konghq.com/ai-gateway/ — X-Kong-Upstream-Latency, X-Kong-Proxy-Latency
   kong: {
-    prefixes: ['x-kong-'],
+    prefixes: ["x-kong-"],
   },
   // https://www.braintrust.dev/docs/guides/proxy — x-bt-used-endpoint, x-bt-cached
   braintrust: {
-    prefixes: ['x-bt-'],
+    prefixes: ["x-bt-"],
   },
-}
-
-// Gateways that use provider-owned domains (not self-hosted), so the
-// ANTHROPIC_BASE_URL hostname is a reliable signal even without a
-// distinctive response header.
-const GATEWAY_HOST_SUFFIXES: Partial<Record<KnownGateway, string[]>> = {
-  // https://docs.databricks.com/aws/en/ai-gateway/
-  databricks: [
-    '.cloud.databricks.com',
-    '.azuredatabricks.net',
-    '.gcp.databricks.com',
-  ],
-}
+};
 
 function detectGateway({
   headers,
-  baseUrl,
 }: {
-  headers?: globalThis.Headers
-  baseUrl?: string
+  headers?: globalThis.Headers;
 }): KnownGateway | undefined {
   if (headers) {
     // Header names are already lowercase from the Headers API
-    const headerNames: string[] = []
-    if (typeof headers.forEach === 'function') {
-      headers.forEach((_, key) => headerNames.push(key))
+    const headerNames: string[] = [];
+    if (typeof headers.forEach === "function") {
+      headers.forEach((_, key) => headerNames.push(key));
     } else {
-      headerNames.push(...Object.keys(headers))
+      headerNames.push(...Object.keys(headers));
     }
     for (const [gw, { prefixes }] of Object.entries(GATEWAY_FINGERPRINTS)) {
-      if (prefixes.some(p => headerNames.some(h => h.startsWith(p)))) {
-        return gw as KnownGateway
+      if (prefixes.some((p) => headerNames.some((h) => h.startsWith(p)))) {
+        return gw as KnownGateway;
       }
     }
   }
 
-  if (baseUrl) {
-    try {
-      const host = new URL(baseUrl).hostname.toLowerCase()
-      for (const [gw, suffixes] of Object.entries(GATEWAY_HOST_SUFFIXES)) {
-        if (suffixes.some(s => host.endsWith(s))) {
-          return gw as KnownGateway
-        }
-      }
-    } catch {
-      // malformed URL — ignore
-    }
-  }
-
-  return undefined
+  return undefined;
 }
 
-function getAnthropicEnvMetadata() {
+export function getAnthropicEnvMetadata() {
   return {
-    ...(process.env.ANTHROPIC_BASE_URL
-      ? {
-          baseUrl: process.env
-            .ANTHROPIC_BASE_URL as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-        }
-      : {}),
-    ...(process.env.ANTHROPIC_MODEL
+    ...(process.env.MINDCODE_MODEL
       ? {
           envModel: process.env
-            .ANTHROPIC_MODEL as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+            .MINDCODE_MODEL as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
         }
       : {}),
-    ...(process.env.ANTHROPIC_SMALL_FAST_MODEL
-      ? {
-          envSmallFastModel: process.env
-            .ANTHROPIC_SMALL_FAST_MODEL as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-        }
-      : {}),
-  }
+  };
 }
 
 function getBuildAgeMinutes(): number | undefined {
-  if (!MACRO.BUILD_TIME) return undefined
-  const buildTime = new Date(MACRO.BUILD_TIME).getTime()
-  if (isNaN(buildTime)) return undefined
-  return Math.floor((Date.now() - buildTime) / 60000)
+  if (!MACRO.BUILD_TIME) return undefined;
+  const buildTime = new Date(MACRO.BUILD_TIME).getTime();
+  if (isNaN(buildTime)) return undefined;
+  return Math.floor((Date.now() - buildTime) / 60000);
 }
 
 export function logAPIQuery({
@@ -185,19 +144,19 @@ export function logAPIQuery({
   fastMode,
   previousRequestId,
 }: {
-  model: string
-  messagesLength: number
-  temperature: number
-  betas?: string[]
-  permissionMode?: PermissionMode
-  querySource: string
-  queryTracking?: QueryChainTracking
-  thinkingType?: 'adaptive' | 'enabled' | 'disabled'
-  effortValue?: EffortLevel | null
-  fastMode?: boolean
-  previousRequestId?: string | null
+  model: string;
+  messagesLength: number;
+  temperature: number;
+  betas?: string[];
+  permissionMode?: PermissionMode;
+  querySource: string;
+  queryTracking?: QueryChainTracking;
+  thinkingType?: "adaptive" | "enabled" | "disabled";
+  effortValue?: EffortLevel | null;
+  fastMode?: boolean;
+  previousRequestId?: string | null;
 }): void {
-  logEvent('tengu_api_query', {
+  logEvent("tengu_api_query", {
     model: model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
     messagesLength,
     temperature: temperature,
@@ -206,7 +165,7 @@ export function logAPIQuery({
     ...(betas?.length
       ? {
           betas: betas.join(
-            ',',
+            ",",
           ) as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
         }
       : {}),
@@ -233,7 +192,7 @@ export function logAPIQuery({
         }
       : {}),
     ...getAnthropicEnvMetadata(),
-  })
+  });
 }
 
 export function logAPIError({
@@ -255,57 +214,56 @@ export function logAPIError({
   fastMode,
   previousRequestId,
 }: {
-  error: unknown
-  model: string
-  messageCount: number
-  messageTokens?: number
-  durationMs: number
-  durationMsIncludingRetries: number
-  attempt: number
-  requestId?: string | null
+  error: unknown;
+  model: string;
+  messageCount: number;
+  messageTokens?: number;
+  durationMs: number;
+  durationMsIncludingRetries: number;
+  attempt: number;
+  requestId?: string | null;
   /** Client-generated ID sent as x-client-request-id header (survives timeouts) */
-  clientRequestId?: string
-  didFallBackToNonStreaming?: boolean
-  promptCategory?: string
-  headers?: globalThis.Headers
-  queryTracking?: QueryChainTracking
-  querySource?: string
+  clientRequestId?: string;
+  didFallBackToNonStreaming?: boolean;
+  promptCategory?: string;
+  headers?: globalThis.Headers;
+  queryTracking?: QueryChainTracking;
+  querySource?: string;
   /** The span from startLLMRequestSpan - pass this to correctly match responses to requests */
-  llmSpan?: Span
-  fastMode?: boolean
-  previousRequestId?: string | null
+  llmSpan?: Span;
+  fastMode?: boolean;
+  previousRequestId?: string | null;
 }): void {
   const gateway = detectGateway({
     headers:
       error instanceof APIError && error.headers ? error.headers : headers,
-    baseUrl: process.env.ANTHROPIC_BASE_URL,
-  })
+  });
 
-  const errStr = getErrorMessage(error)
-  const status = error instanceof APIError ? String(error.status) : undefined
-  const errorType = classifyAPIError(error)
+  const errStr = getErrorMessage(error);
+  const status = error instanceof APIError ? String(error.status) : undefined;
+  const errorType = classifyAPIError(error);
 
   // Log detailed connection error info to debug logs (visible via --debug)
-  const connectionDetails = extractConnectionErrorDetails(error)
+  const connectionDetails = extractConnectionErrorDetails(error);
   if (connectionDetails) {
-    const sslLabel = connectionDetails.isSSLError ? ' (SSL error)' : ''
+    const sslLabel = connectionDetails.isSSLError ? " (SSL error)" : "";
     logForDebugging(
       `Connection error details: code=${connectionDetails.code}${sslLabel}, message=${connectionDetails.message}`,
-      { level: 'error' },
-    )
+      { level: "error" },
+    );
   }
 
-  const invocation = consumeInvokingRequestId()
+  const invocation = consumeInvokingRequestId();
 
   if (clientRequestId) {
     logForDebugging(
       `API error x-client-request-id=${clientRequestId} (give this to the API team for server-log lookup)`,
-      { level: 'error' },
-    )
+      { level: "error" },
+    );
   }
 
-  logError(error as Error)
-  logEvent('tengu_api_error', {
+  logError(error as Error);
+  logEvent("tengu_api_error", {
     model: model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
     error: errStr as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
     status:
@@ -366,17 +324,17 @@ export function logAPIError({
         }
       : {}),
     ...getAnthropicEnvMetadata(),
-  })
+  });
 
   // Log API error event for OTLP
-  void logOTelEvent('api_error', {
+  void logOTelEvent("api_error", {
     model: model,
     error: errStr,
     status_code: String(status),
     duration_ms: String(durationMs),
     attempt: String(attempt),
-    speed: fastMode ? 'fast' : 'normal',
-  })
+    speed: fastMode ? "fast" : "normal",
+  });
 
   // Pass the span to correctly match responses to requests when beta tracing is enabled
   endLLMRequestSpan(llmSpan, {
@@ -384,19 +342,8 @@ export function logAPIError({
     statusCode: status ? parseInt(status) : undefined,
     error: errStr,
     attempt,
-  })
+  });
 
-  // Log first error for teleported sessions (reliability tracking)
-  const teleportInfo = getTeleportedSessionInfo()
-  if (teleportInfo?.isTeleported && !teleportInfo.hasLoggedFirstMessage) {
-    logEvent('tengu_teleport_first_message_error', {
-      session_id:
-        teleportInfo.sessionId as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-      error_type:
-        errorType as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-    })
-    markFirstTeleportMessageLogged()
-  }
 }
 
 function logAPISuccess({
@@ -426,45 +373,45 @@ function logAPISuccess({
   previousRequestId,
   betas,
 }: {
-  model: string
-  preNormalizedModel: string
-  messageCount: number
-  messageTokens: number
-  usage: Usage
-  durationMs: number
-  durationMsIncludingRetries: number
-  attempt: number
-  ttftMs: number | null
-  requestId: string | null
-  stopReason: BetaStopReason | null
-  costUSD: number
-  didFallBackToNonStreaming: boolean
-  querySource: string
-  gateway?: KnownGateway
-  queryTracking?: QueryChainTracking
-  permissionMode?: PermissionMode
-  globalCacheStrategy?: GlobalCacheStrategy
-  textContentLength?: number
-  thinkingContentLength?: number
-  toolUseContentLengths?: Record<string, number>
-  connectorTextBlockCount?: number
-  fastMode?: boolean
-  previousRequestId?: string | null
-  betas?: string[]
+  model: string;
+  preNormalizedModel: string;
+  messageCount: number;
+  messageTokens: number;
+  usage: Usage;
+  durationMs: number;
+  durationMsIncludingRetries: number;
+  attempt: number;
+  ttftMs: number | null;
+  requestId: string | null;
+  stopReason: BetaStopReason | null;
+  costUSD: number;
+  didFallBackToNonStreaming: boolean;
+  querySource: string;
+  gateway?: KnownGateway;
+  queryTracking?: QueryChainTracking;
+  permissionMode?: PermissionMode;
+  globalCacheStrategy?: GlobalCacheStrategy;
+  textContentLength?: number;
+  thinkingContentLength?: number;
+  toolUseContentLengths?: Record<string, number>;
+  connectorTextBlockCount?: number;
+  fastMode?: boolean;
+  previousRequestId?: string | null;
+  betas?: string[];
 }): void {
-  const isNonInteractiveSession = getIsNonInteractiveSession()
-  const isPostCompaction = consumePostCompaction()
+  const isNonInteractiveSession = getIsNonInteractiveSession();
+  const isPostCompaction = consumePostCompaction();
   const hasPrintFlag =
-    process.argv.includes('-p') || process.argv.includes('--print')
+    process.argv.includes("-p") || process.argv.includes("--print");
 
-  const now = Date.now()
-  const lastCompletion = getLastApiCompletionTimestamp()
+  const now = Date.now();
+  const lastCompletion = getLastApiCompletionTimestamp();
   const timeSinceLastApiCallMs =
-    lastCompletion !== null ? now - lastCompletion : undefined
+    lastCompletion !== null ? now - lastCompletion : undefined;
 
-  const invocation = consumeInvokingRequestId()
+  const invocation = consumeInvokingRequestId();
 
-  logEvent('tengu_api_success', {
+  logEvent("tengu_api_success", {
     model: model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
     ...(preNormalizedModel !== model
       ? {
@@ -475,7 +422,7 @@ function logAPISuccess({
     ...(betas?.length
       ? {
           betas: betas.join(
-            ',',
+            ",",
           ) as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
         }
       : {}),
@@ -559,7 +506,7 @@ function logAPISuccess({
     // Log cache_deleted_input_tokens for cache editing analysis. Casts needed
     // because the field is intentionally not on NonNullableUsage (excluded from
     // external builds). Set by updateUsage() when cache editing is active.
-    ...(feature('CACHED_MICROCOMPACT') &&
+    ...(feature("CACHED_MICROCOMPACT") &&
     ((usage as unknown as { cache_deleted_input_tokens?: number })
       .cache_deleted_input_tokens ?? 0) > 0
       ? {
@@ -577,9 +524,9 @@ function logAPISuccess({
     ...(isPostCompaction ? { isPostCompaction } : {}),
     ...getAnthropicEnvMetadata(),
     timeSinceLastApiCallMs,
-  })
+  });
 
-  setLastApiCompletionTimestamp(now)
+  setLastApiCompletionTimestamp(now);
 }
 
 export function logAPISuccessAndDuration({
@@ -609,87 +556,86 @@ export function logAPISuccessAndDuration({
   previousRequestId,
   betas,
 }: {
-  model: string
-  preNormalizedModel: string
-  start: number
-  startIncludingRetries: number
-  ttftMs: number | null
-  usage: NonNullableUsage
-  attempt: number
-  messageCount: number
-  messageTokens: number
-  requestId: string | null
-  stopReason: BetaStopReason | null
-  didFallBackToNonStreaming: boolean
-  querySource: string
-  headers?: globalThis.Headers
-  costUSD: number
-  queryTracking?: QueryChainTracking
-  permissionMode?: PermissionMode
+  model: string;
+  preNormalizedModel: string;
+  start: number;
+  startIncludingRetries: number;
+  ttftMs: number | null;
+  usage: NonNullableUsage;
+  attempt: number;
+  messageCount: number;
+  messageTokens: number;
+  requestId: string | null;
+  stopReason: BetaStopReason | null;
+  didFallBackToNonStreaming: boolean;
+  querySource: string;
+  headers?: globalThis.Headers;
+  costUSD: number;
+  queryTracking?: QueryChainTracking;
+  permissionMode?: PermissionMode;
   /** Assistant messages from the response - used to extract model_output and thinking_output
    *  when beta tracing is enabled */
-  newMessages?: AssistantMessage[]
+  newMessages?: AssistantMessage[];
   /** The span from startLLMRequestSpan - pass this to correctly match responses to requests */
-  llmSpan?: Span
+  llmSpan?: Span;
   /** Strategy used for global prompt caching: 'tool_based', 'system_prompt', or 'none' */
-  globalCacheStrategy?: GlobalCacheStrategy
+  globalCacheStrategy?: GlobalCacheStrategy;
   /** Time spent in pre-request setup before the successful attempt */
-  requestSetupMs?: number
+  requestSetupMs?: number;
   /** Timestamps (Date.now()) of each attempt start — used for retry sub-spans in Perfetto */
-  attemptStartTimes?: number[]
-  fastMode?: boolean
+  attemptStartTimes?: number[];
+  fastMode?: boolean;
   /** Request ID from the previous API call in this session */
-  previousRequestId?: string | null
-  betas?: string[]
+  previousRequestId?: string | null;
+  betas?: string[];
 }): void {
   const gateway = detectGateway({
     headers,
-    baseUrl: process.env.ANTHROPIC_BASE_URL,
-  })
+  });
 
-  let textContentLength: number | undefined
-  let thinkingContentLength: number | undefined
-  let toolUseContentLengths: Record<string, number> | undefined
-  let connectorTextBlockCount: number | undefined
+  let textContentLength: number | undefined;
+  let thinkingContentLength: number | undefined;
+  let toolUseContentLengths: Record<string, number> | undefined;
+  let connectorTextBlockCount: number | undefined;
 
   if (newMessages) {
-    let textLen = 0
-    let thinkingLen = 0
-    let hasToolUse = false
-    const toolLengths: Record<string, number> = {}
-    let connectorCount = 0
+    let textLen = 0;
+    let thinkingLen = 0;
+    let hasToolUse = false;
+    const toolLengths: Record<string, number> = {};
+    let connectorCount = 0;
 
     for (const msg of newMessages) {
       for (const block of msg.message.content) {
-        if (block.type === 'text') {
-          textLen += block.text.length
-        } else if (feature('CONNECTOR_TEXT') && isConnectorTextBlock(block)) {
-          connectorCount++
-        } else if (block.type === 'thinking') {
-          thinkingLen += block.thinking.length
+        if (block.type === "text") {
+          textLen += block.text.length;
+        } else if (feature("CONNECTOR_TEXT") && isConnectorTextBlock(block)) {
+          connectorCount++;
+        } else if (block.type === "thinking") {
+          thinkingLen += block.thinking.length;
         } else if (
-          block.type === 'tool_use' ||
-          block.type === 'server_tool_use' ||
-          block.type === 'mcp_tool_use'
+          block.type === "tool_use" ||
+          block.type === "server_tool_use" ||
+          block.type === "mcp_tool_use"
         ) {
-          const inputLen = jsonStringify(block.input).length
-          const sanitizedName = sanitizeToolNameForAnalytics(block.name)
+          const inputLen = jsonStringify(block.input).length;
+          const sanitizedName = sanitizeToolNameForAnalytics(block.name);
           toolLengths[sanitizedName] =
-            (toolLengths[sanitizedName] ?? 0) + inputLen
-          hasToolUse = true
+            (toolLengths[sanitizedName] ?? 0) + inputLen;
+          hasToolUse = true;
         }
       }
     }
 
-    textContentLength = textLen
-    thinkingContentLength = thinkingLen > 0 ? thinkingLen : undefined
-    toolUseContentLengths = hasToolUse ? toolLengths : undefined
-    connectorTextBlockCount = connectorCount > 0 ? connectorCount : undefined
+    textContentLength = textLen;
+    thinkingContentLength = thinkingLen > 0 ? thinkingLen : undefined;
+    toolUseContentLengths = hasToolUse ? toolLengths : undefined;
+    connectorTextBlockCount = connectorCount > 0 ? connectorCount : undefined;
   }
 
-  const durationMs = Date.now() - start
-  const durationMsIncludingRetries = Date.now() - startIncludingRetries
-  addToTotalDurationState(durationMsIncludingRetries, durationMs)
+  const durationMs = Date.now() - start;
+  const durationMsIncludingRetries = Date.now() - startIncludingRetries;
+  addToTotalDurationState(durationMsIncludingRetries, durationMs);
 
   logAPISuccess({
     model,
@@ -717,9 +663,9 @@ export function logAPISuccessAndDuration({
     fastMode,
     previousRequestId,
     betas,
-  })
+  });
   // Log API request event for OTLP
-  void logOTelEvent('api_request', {
+  void logOTelEvent("api_request", {
     model,
     input_tokens: String(usage.input_tokens),
     output_tokens: String(usage.output_tokens),
@@ -727,41 +673,43 @@ export function logAPISuccessAndDuration({
     cache_creation_tokens: String(usage.cache_creation_input_tokens),
     cost_usd: String(costUSD),
     duration_ms: String(durationMs),
-    speed: fastMode ? 'fast' : 'normal',
-  })
+    speed: fastMode ? "fast" : "normal",
+  });
 
   // Extract model output, thinking output, and tool call flag when beta tracing is enabled
-  let modelOutput: string | undefined
-  let thinkingOutput: string | undefined
-  let hasToolCall: boolean | undefined
+  let modelOutput: string | undefined;
+  let thinkingOutput: string | undefined;
+  let hasToolCall: boolean | undefined;
 
   if (isBetaTracingEnabled() && newMessages) {
     // Model output - visible to all users
     modelOutput =
       newMessages
-        .flatMap(m =>
+        .flatMap((m) =>
           m.message.content
-            .filter(c => c.type === 'text')
-            .map(c => (c as { type: 'text'; text: string }).text),
+            .filter((c) => c.type === "text")
+            .map((c) => (c as { type: "text"; text: string }).text),
         )
-        .join('\n') || undefined
+        .join("\n") || undefined;
 
     // Thinking output - Ant-only (build-time gated)
-    if (process.env.USER_TYPE === 'ant') {
+    if (process.env.USER_TYPE === "ant") {
       thinkingOutput =
         newMessages
-          .flatMap(m =>
+          .flatMap((m) =>
             m.message.content
-              .filter(c => c.type === 'thinking')
-              .map(c => (c as { type: 'thinking'; thinking: string }).thinking),
+              .filter((c) => c.type === "thinking")
+              .map(
+                (c) => (c as { type: "thinking"; thinking: string }).thinking,
+              ),
           )
-          .join('\n') || undefined
+          .join("\n") || undefined;
     }
 
     // Check if any tool_use blocks were in the output
-    hasToolCall = newMessages.some(m =>
-      m.message.content.some(c => c.type === 'tool_use'),
-    )
+    hasToolCall = newMessages.some((m) =>
+      m.message.content.some((c) => c.type === "tool_use"),
+    );
   }
 
   // Pass the span to correctly match responses to requests when beta tracing is enabled
@@ -778,15 +726,6 @@ export function logAPISuccessAndDuration({
     ttftMs: ttftMs ?? undefined,
     requestSetupMs,
     attemptStartTimes,
-  })
+  });
 
-  // Log first successful message for teleported sessions (reliability tracking)
-  const teleportInfo = getTeleportedSessionInfo()
-  if (teleportInfo?.isTeleported && !teleportInfo.hasLoggedFirstMessage) {
-    logEvent('tengu_teleport_first_message_success', {
-      session_id:
-        teleportInfo.sessionId as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-    })
-    markFirstTeleportMessageLogged()
-  }
 }

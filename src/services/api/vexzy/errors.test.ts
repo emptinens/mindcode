@@ -1,7 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  APIConnectionError,
+  APIConnectionTimeoutError,
+  APIError,
+  APIUserAbortError,
   VEXZY_MAX_503_RETRIES,
   VexzyError,
+  VexzyStreamError,
   classifyVexzyResponse,
   classifyVexzyStatus,
   createVexzyError,
@@ -12,6 +17,42 @@ import {
 } from './errors.js'
 
 describe('Vexzy error policy', () => {
+  test('exposes the native APIError fields without importing the SDK', () => {
+    const error = createVexzyError(
+      new Response(null, {
+        status: 429,
+        headers: {
+          'request-id': 'req_native',
+          'retry-after': '2',
+        },
+      }),
+    )
+
+    expect(error).toBeInstanceOf(APIError)
+    expect(error.status).toBe(429)
+    expect(error.headers).toBeInstanceOf(Headers)
+    expect(error.error).toBeUndefined()
+    expect(error.request_id).toBe('req_native')
+    expect(error.requestID).toBe('req_native')
+    expect(error.requestId).toBe('req_native')
+  })
+
+  test('marks native abort, timeout, and stream error categories', () => {
+    const abort = new APIUserAbortError()
+    const timeout = new APIConnectionTimeoutError()
+    const connection = new APIConnectionError({ message: 'connection' })
+    const stream = new VexzyStreamError()
+
+    expect(abort).toBeInstanceOf(APIError)
+    expect(abort).toBeInstanceOf(APIUserAbortError)
+    expect(abort.name).toBe('APIUserAbortError')
+    expect(timeout).toBeInstanceOf(APIConnectionError)
+    expect(timeout).toBeInstanceOf(APIConnectionTimeoutError)
+    expect(connection).toBeInstanceOf(APIConnectionError)
+    expect(stream).toBeInstanceOf(APIError)
+    expect(stream.code).toBe('stream')
+  })
+
   test('classifies auth and credits failures as terminal', () => {
     expect(classifyVexzyStatus(401)).toMatchObject({
       kind: 'auth',

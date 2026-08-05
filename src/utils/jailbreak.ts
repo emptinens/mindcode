@@ -4,6 +4,8 @@ import { getCurrentSessionSidecarPath } from './sessionSidecar.js'
 
 export type JailbreakLevel = 'disabled' | 'lowered' | 'full'
 
+export const JAILBREAK_LEVEL_ENV_VAR = 'MINDCODE_JAILBREAK_LEVEL'
+
 const DEFAULT_LEVEL: JailbreakLevel = 'lowered'
 const SIDECAR_SUFFIX = '.jailbreak'
 
@@ -28,6 +30,20 @@ export function parseJailbreakLevel(
   return undefined
 }
 
+/**
+ * Reads the canonical jailbreak level forwarded to a worker process.
+ *
+ * Only the three enum values (plus the legacy boolean spellings accepted by
+ * parseJailbreakLevel) are allowed through. Invalid values are ignored rather
+ * than copied into a shell command or used as prompt configuration.
+ */
+export function getJailbreakLevelFromEnvironment(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): JailbreakLevel | undefined {
+  const rawLevel = environment[JAILBREAK_LEVEL_ENV_VAR]
+  return rawLevel === undefined ? undefined : parseJailbreakLevel(rawLevel)
+}
+
 export function readJailbreakLevelFromPath(
   path: string,
 ): JailbreakLevel | undefined {
@@ -43,6 +59,9 @@ function getStatePath(): string {
 }
 
 export function getJailbreakLevel(): JailbreakLevel {
+  const inheritedLevel = getJailbreakLevelFromEnvironment()
+  if (inheritedLevel !== undefined) return inheritedLevel
+
   const path = getStatePath()
   if (path !== cachedPath) {
     cachedPath = path

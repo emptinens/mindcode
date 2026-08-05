@@ -1,5 +1,3 @@
-import axios from 'axios'
-import { getOauthConfig, OAUTH_BETA_HEADER } from 'src/constants/oauth.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from 'src/services/analytics/growthbook.js'
 import {
   getIsNonInteractiveSession,
@@ -10,25 +8,16 @@ import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
 } from '../services/analytics/index.js'
-import {
-  getAnthropicApiKey,
-  getClaudeAIOAuthTokens,
-  handleOAuth401Error,
-  hasProfileScope,
-} from './auth.js'
-import { isInBundledMode } from './bundledMode.js'
 import { getGlobalConfig, saveGlobalConfig } from './config.js'
 import { logForDebugging } from './debug.js'
 import { isEnvTruthy } from './envUtils.js'
 import {
+  type ModelSetting,
   getDefaultMainLoopModelSetting,
   isOpus1mMergeEnabled,
-  type ModelSetting,
   parseUserSpecifiedModel,
 } from './model/model.js'
 import { getModelStrings } from './model/modelStrings.js'
-import { getAPIProvider } from './model/providers.js'
-import { isEssentialTrafficOnly } from './privacyLevel.js'
 import {
   getInitialSettings,
   getSettingsForSource,
@@ -85,15 +74,6 @@ export function getFastModeUnavailableReason(): string | null {
     return statigReason
   }
 
-  // Previously, fast mode required the native binary (bun build). This is no
-  // longer necessary, but we keep this option behind a flag just in case.
-  if (
-    !isInBundledMode() &&
-    getFeatureValue_CACHED_MAY_BE_STALE('tengu_marble_sandcastle', false)
-  ) {
-    return 'Fast mode requires the native binary · Install from: https://claude.com/product/claude-code'
-  }
-
   // Not available in the SDK unless explicitly opted in via --settings.
   // Assistant daemon mode is exempt — it's first-party orchestration, and
   // kairosActive is set before this check runs (main.tsx:~1626 vs ~3249).
@@ -110,13 +90,6 @@ export function getFastModeUnavailableReason(): string | null {
     }
   }
 
-  // Only available for 1P (not Bedrock/Vertex/Foundry)
-  if (getAPIProvider() !== 'firstParty') {
-    const reason = 'Fast mode is not available on Bedrock, Vertex, or Foundry'
-    logForDebugging(`Fast mode unavailable: ${reason}`)
-    return reason
-  }
-
   if (orgStatus.status === 'disabled') {
     if (
       orgStatus.reason === 'network_error' ||
@@ -130,9 +103,7 @@ export function getFastModeUnavailableReason(): string | null {
         return null
       }
     }
-    const authType: AuthType =
-      getClaudeAIOAuthTokens() !== null ? 'oauth' : 'api-key'
-    const reason = getDisabledReasonMessage(orgStatus.reason, authType)
+    const reason = getDisabledReasonMessage(orgStatus.reason, 'api-key')
     logForDebugging(`Fast mode unavailable: ${reason}`)
     return reason
   }
@@ -144,7 +115,7 @@ export function getFastModeUnavailableReason(): string | null {
 export const FAST_MODE_MODEL_DISPLAY = 'Opus 5'
 
 export function getFastModeModel(): string {
-  return getModelStrings().opus5 + '[1m]'
+  return `${getModelStrings().opus5}[1m]`
 }
 
 export function getInitialFastModeSetting(model: ModelSetting): boolean {
@@ -360,35 +331,8 @@ let orgStatus: FastModeOrgStatus = { status: 'pending' }
 const orgFastModeChange = createSignal<[orgEnabled: boolean]>()
 export const onOrgFastModeChanged = orgFastModeChange.subscribe
 
-type FastModeResponse = {
-  enabled: boolean
-  disabled_reason: FastModeDisabledReason | null
-}
-
-async function fetchFastModeStatus(
-  auth: { accessToken: string } | { apiKey: string },
-): Promise<FastModeResponse> {
-  const endpoint = `${getOauthConfig().BASE_API_URL}/api/claude_code_penguin_mode`
-  const headers: Record<string, string> =
-    'accessToken' in auth
-      ? {
-          Authorization: `Bearer ${auth.accessToken}`,
-          'anthropic-beta': OAUTH_BETA_HEADER,
-        }
-      : { 'x-api-key': auth.apiKey }
-
-  const response = await axios.get<FastModeResponse>(endpoint, { headers })
-  return response.data
-}
-
-const PREFETCH_MIN_INTERVAL_MS = 30_000
-let lastPrefetchAt = 0
-let inflightPrefetch: Promise<void> | null = null
-
 /**
- * Resolve orgStatus from the persisted cache without making any API calls.
- * Used when startup prefetches are throttled to avoid hitting the network
- * while still making fast mode availability checks work.
+ * Resolve the local fast-mode compatibility state without making an API call.
  */
 export function resolveFastModeStatusFromCache(): void {
   if (!isFastModeEnabled()) {
@@ -401,113 +345,8 @@ export function resolveFastModeStatusFromCache(): void {
 }
 
 export async function prefetchFastModeStatus(): Promise<void> {
-  // Skip network requests if nonessential traffic is disabled
-  if (isEssentialTrafficOnly()) {
-    return
-  }
-
   if (!isFastModeEnabled()) {
     return
   }
-
-  if (inflightPrefetch) {
-    logForDebugging(
-      'Fast mode prefetch in progress, returning in-flight promise',
-    )
-    return inflightPrefetch
-  }
-
-  // Service key OAuth sessions lack user:profile scope → endpoint 403s.
-  // Resolve orgStatus from cache and bail before burning the throttle window.
-  // API key auth is unaffected.
-  const apiKey = getAnthropicApiKey()
-  const hasUsableOAuth =
-    getClaudeAIOAuthTokens()?.accessToken && hasProfileScope()
-  if (!hasUsableOAuth && !apiKey) {
-    orgStatus = { status: 'enabled' }
-    return
-  }
-
-  const now = Date.now()
-  if (now - lastPrefetchAt < PREFETCH_MIN_INTERVAL_MS) {
-    logForDebugging('Skipping fast mode prefetch, fetched recently')
-    return
-  }
-  lastPrefetchAt = now
-
-  const fetchWithCurrentAuth = async (): Promise<FastModeResponse> => {
-    const currentTokens = getClaudeAIOAuthTokens()
-    const auth =
-      currentTokens?.accessToken && hasProfileScope()
-        ? { accessToken: currentTokens.accessToken }
-        : apiKey
-          ? { apiKey }
-          : null
-    if (!auth) {
-      throw new Error('No auth available')
-    }
-    return fetchFastModeStatus(auth)
-  }
-
-  async function doFetch(): Promise<void> {
-    try {
-      let status: FastModeResponse
-      try {
-        status = await fetchWithCurrentAuth()
-      } catch (err) {
-        const isAuthError =
-          axios.isAxiosError(err) &&
-          (err.response?.status === 401 ||
-            (err.response?.status === 403 &&
-              typeof err.response?.data === 'string' &&
-              err.response.data.includes('OAuth token has been revoked')))
-        if (isAuthError) {
-          const failedAccessToken = getClaudeAIOAuthTokens()?.accessToken
-          if (failedAccessToken) {
-            await handleOAuth401Error(failedAccessToken)
-            status = await fetchWithCurrentAuth()
-          } else {
-            throw err
-          }
-        } else {
-          throw err
-        }
-      }
-
-      const previousEnabled =
-        orgStatus.status !== 'pending'
-          ? orgStatus.status === 'enabled'
-          : getGlobalConfig().penguinModeOrgEnabled
-      orgStatus = { status: 'enabled' }
-      if (previousEnabled !== status.enabled) {
-        // When org disables fast mode, permanently turn off the user's fast mode setting
-        if (!status.enabled) {
-          updateSettingsForSource('userSettings', { fastMode: undefined })
-        }
-        saveGlobalConfig(current => ({
-          ...current,
-          penguinModeOrgEnabled: status.enabled,
-        }))
-        orgFastModeChange.emit(status.enabled)
-      }
-      logForDebugging(
-        `Org fast mode: ${status.enabled ? 'enabled' : `disabled (${status.disabled_reason ?? 'preference'})`}`,
-      )
-    } catch (err) {
-      // On failure: ants default to enabled (don't block internal users).
-      // External users: fall back to the cached penguinModeOrgEnabled value;
-      // if no positive cache, disable with network_error reason.
-      orgStatus = { status: 'enabled' }
-      logForDebugging(
-        `Failed to fetch org fast mode status, defaulting to ${orgStatus.status === 'enabled' ? 'enabled (cached)' : 'disabled (network_error)'}: ${err}`,
-        { level: 'error' },
-      )
-      logEvent('tengu_org_penguin_mode_fetch_failed', {})
-    } finally {
-      inflightPrefetch = null
-    }
-  }
-
-  inflightPrefetch = doFetch()
-  return inflightPrefetch
+  resolveFastModeStatusFromCache()
 }

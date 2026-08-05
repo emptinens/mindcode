@@ -12,6 +12,7 @@ import {
   type EffortLevel,
   type EffortValue,
   getDisplayedEffortLevel,
+  getSupportedEffortLevels,
   modelSupportsXhighEffort,
 } from '../utils/effort.js'
 
@@ -20,6 +21,7 @@ type SliderValue = EffortLevel | 'ultracode'
 // Per-level rendering style. Standard tiers use semantic theme keys; xhigh and
 // max get animated treatments, and ultracode rides the violet ripple.
 type LevelColor =
+  | 'subtle'
   | 'warning'
   | 'success'
   | 'permission'
@@ -56,21 +58,12 @@ type Props = {
 
 // ---- Geometry constants -------------------------------------------------
 const BASE_WIDTH = 42
-const BASE_TRIANGLES = [1, 10, 20, 30, 40]
-const BASE_SPACERS = [5, 5, 5, 6]
-const BASE_LEVELS: SliderLevel[] = [
-  { value: 'low', label: 'low', color: 'warning' },
-  { value: 'medium', label: 'medium', color: 'success' },
-  { value: 'high', label: 'high', color: 'permission' },
-  { value: 'xhigh', label: 'xhigh', color: 'autoAccept-shimmer' },
-  { value: 'max', label: 'max', color: 'rainbow-animated' },
-]
 const ULTRACODE_LEVEL: SliderLevel = {
   value: 'ultracode',
   label: 'ultracode',
   color: 'violet-ripple',
 }
-const DEFAULT_INDEX = 3 // high
+const DEFAULT_INDEX = 0
 
 // Left gutter the REPL pads command output by; the ripple band uses a negative
 // margin of this size to bleed out to the true terminal edge.
@@ -130,28 +123,65 @@ function ultracodeAvailable(model: string): boolean {
   return isWorkflowsEnabled() && modelSupportsXhighEffort(model)
 }
 
+function effortLevelColor(level: EffortLevel): LevelColor {
+  switch (level) {
+    case 'max':
+      return 'rainbow-animated'
+    case 'xhigh':
+      return 'autoAccept-shimmer'
+    case 'high':
+      return 'permission'
+    case 'medium':
+      return 'success'
+    case 'low':
+      return 'warning'
+    case 'none':
+    case 'minimal':
+    case 'auto':
+      return 'subtle'
+  }
+}
+
 function getSliderGeometry(model: string): Geometry {
+  const advertised = getSupportedEffortLevels(model)
+  const baseLevels: SliderLevel[] = (advertised.length > 0 ? advertised : ['auto']).map(
+    value => ({ value, label: value, color: effortLevelColor(value) }),
+  )
+  const spacers = Array.from(
+    { length: Math.max(0, baseLevels.length - 1) },
+    () => 5,
+  )
+  const labelsWidth = baseLevels.reduce(
+    (total, level) => total + level.label.length,
+    0,
+  )
+  const width = Math.max(BASE_WIDTH, labelsWidth + spacers.reduce((a, b) => a + b, 0))
+  const trianglePositions = baseLevels.map((_, index) =>
+    baseLevels.length === 1
+      ? Math.floor(width / 2)
+      : Math.round((index * (width - 1)) / (baseLevels.length - 1)),
+  )
   const base: Geometry = {
-    levels: BASE_LEVELS,
-    width: BASE_WIDTH,
-    trianglePositions: BASE_TRIANGLES,
-    labelStarts: computeLabelStarts(BASE_LEVELS, BASE_SPACERS),
-    spacers: BASE_SPACERS,
-    trackChars: '─'.repeat(BASE_WIDTH),
+    levels: baseLevels,
+    width,
+    trianglePositions,
+    labelStarts: computeLabelStarts(baseLevels, spacers),
+    spacers,
+    trackChars: '─'.repeat(width),
   }
   if (!ultracodeAvailable(model)) return base
 
-  const ultraStart = BASE_WIDTH + 3
-  const levels = [...BASE_LEVELS, ULTRACODE_LEVEL]
-  const spacers = [...BASE_SPACERS, ultraStart + 4 - BASE_WIDTH]
+  const ultraStart = width + 3
+  const levels = [...baseLevels, ULTRACODE_LEVEL]
+  const ultraSpacers = [...spacers, ultraStart + 4 - width]
   return {
     levels,
     width: ultraStart + 17,
-    trianglePositions: [...BASE_TRIANGLES, ultraStart + 8],
-    labelStarts: computeLabelStarts(levels, spacers),
-    spacers,
-    trackChars: '─'.repeat(BASE_WIDTH + 1) + '┆' + '─'.repeat(18),
-    accentStart: BASE_WIDTH + 2,
+    trianglePositions: [...trianglePositions, ultraStart + 8],
+    labelStarts: computeLabelStarts(levels, ultraSpacers),
+    spacers: ultraSpacers,
+    trackChars: `${'─'.repeat(width + 1)}┆${'─'.repeat(18)}`,
+    accentStart: width + 2,
     sublabel: { text: 'xhigh + workflows', start: ultraStart },
   }
 }

@@ -2,7 +2,7 @@ import { LRUCache } from 'lru-cache'
 import { fetch as wreqFetch } from 'wreq-js'
 import type { BrowserProfile, EmulationOS } from 'wreq-js'
 import { getContentHandlingSection, getInjectionHandlingSection } from '../../constants/prompts.js'
-import { queryHaiku } from '../../services/api/claude.js'
+import { queryHaiku } from '../../services/api/modelRuntime.js'
 import { AbortError } from '../../utils/errors.js'
 import { logError } from '../../utils/log.js'
 import {

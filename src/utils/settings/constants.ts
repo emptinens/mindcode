@@ -194,9 +194,6 @@ export const SOURCES = [
   'userSettings',
 ] as const satisfies readonly EditableSettingSource[]
 
-/**
- * The JSON Schema URL for MindCode settings
- * You can edit the contents at https://github.com/SchemaStore/schemastore/blob/master/src/schemas/json/claude-code-settings.json
- */
+/** Local editor schema identifier for MindCode settings. */
 export const MINDCODE_SETTINGS_SCHEMA_URL =
-  'https://json.schemastore.org/claude-code-settings.json'
+  'mindcode://schemas/settings.json'

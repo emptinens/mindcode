@@ -1,7 +1,6 @@
 import memoize from 'lodash-es/memoize.js'
 import { homedir } from 'os'
 import { join } from 'path'
-import { fileSuffixForOauthConfig } from '../constants/oauth.js'
 import { isRunningWithBun } from './bundledMode.js'
 import { getMindCodeConfigHomeDir, isEnvTruthy } from './envUtils.js'
 import { findExecutable } from './findExecutable.js'
@@ -21,20 +20,8 @@ export const getGlobalMindCodeFile = memoize((): string => {
     return join(getMindCodeConfigHomeDir(), '.config.json')
   }
 
-  const filename = `.mindcode${fileSuffixForOauthConfig()}.json`
+  const filename = '.mindcode.json'
   return join(process.env.MINDCODE_CONFIG_DIR || homedir(), filename)
-})
-
-const hasInternetAccess = memoize(async (): Promise<boolean> => {
-  try {
-    const { default: axiosClient } = await import('axios')
-    await axiosClient.head('http://1.1.1.1', {
-      signal: AbortSignal.timeout(1000),
-    })
-    return true
-  } catch {
-    return false
-  }
 })
 
 async function isCommandAvailable(command: string): Promise<boolean> {
@@ -314,7 +301,6 @@ function isSSHSession(): boolean {
 }
 
 export const env = {
-  hasInternetAccess,
   isCI: isEnvTruthy(process.env.CI),
   platform: (['win32', 'darwin'].includes(process.platform)
     ? process.platform

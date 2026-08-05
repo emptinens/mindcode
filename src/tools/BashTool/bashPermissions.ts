@@ -1,5 +1,5 @@
 import { feature } from 'bun:bundle'
-import { APIUserAbortError } from '@anthropic-ai/sdk'
+import { APIUserAbortError } from '../../services/api/vexzy/errors.js'
 import type { z } from 'zod/v4'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
 import {
@@ -398,8 +398,9 @@ const SAFE_ENV_VARS = new Set([
   'PYTEST_DISABLE_PLUGIN_AUTOLOAD', // disable plugin loading
   'PYTEST_DEBUG', // debug output
 
-  // API keys and authentication
-  'ANTHROPIC_API_KEY', // API authentication
+  // Runtime credential assignment is normalized before permission matching.
+  // subprocessEnv() still scrubs credential-shaped variables from children.
+  'VEXZY_API_KEY',
 
   // Locale and character encoding
   'LANG', // default locale
@@ -449,12 +450,9 @@ const ANT_ONLY_SAFE_ENV_VARS = new Set([
   'KUBECONFIG', // kubectl config file path — controls which cluster kubectl uses
   'DOCKER_HOST', // Docker daemon socket/endpoint — controls which daemon docker talks to
 
-  // Cloud provider project/profile selection (just names/identifiers)
-  'AWS_PROFILE', // AWS profile name selection
-  'CLOUDSDK_CORE_PROJECT', // GCP project ID
   'CLUSTER', // generic cluster name
 
-  // Anthropic internal cluster selection (just names/identifiers)
+  // Internal cluster selection (just names/identifiers)
   'COO_CLUSTER', // coo cluster name
   'COO_CLUSTER_NAME', // coo cluster name (alternate)
   'COO_NAMESPACE', // coo namespace
@@ -476,7 +474,6 @@ const ANT_ONLY_SAFE_ENV_VARS = new Set([
 
   // Test/debug configuration
   'POSTGRESQL_VERSION', // postgres version string
-  'FIRESTORE_EMULATOR_HOST', // emulator host:port
   'HARNESS_QUIET', // quiet mode flag
   'TEST_CROSSCHECK_LISTS_MATCH_UPDATE', // test update flag
   'DBT_PER_DEVELOPER_ENVIRONMENTS', // DBT config

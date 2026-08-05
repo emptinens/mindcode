@@ -1,37 +1,15 @@
 /**
- * Beta Session Tracing for MindCode
+ * Local context helpers used by the tracing-compatible call sites.
  *
- * This module contains beta tracing features enabled when
- * ENABLE_BETA_TRACING_DETAILED=1 and BETA_TRACING_ENDPOINT are set.
- *
- * For external users, tracing is enabled in SDK/headless mode, or in
- * interactive mode when the org is allowlisted via the
- * tengu_trace_lantern GrowthBook gate.
- * For ant users, tracing is enabled in all modes.
- *
- * Visibility Rules:
- * | Content          | External | Ant  |
- * |------------------|----------|------|
- * | System prompts   | ✅                  | ✅   |
- * | Model output     | ✅                  | ✅   |
- * | Thinking output  | ❌                  | ✅   |
- * | Tools            | ✅                  | ✅   |
- * | new_context      | ✅                  | ✅   |
- *
- * Features:
- * - Per-agent message tracking with hash-based deduplication
- * - System prompt logging (once per unique hash)
- * - Hook execution spans
- * - Detailed new_context attributes for LLM requests
+ * Remote beta tracing is intentionally disabled. This module may still build
+ * bounded, in-memory attributes for local no-op spans, but it never reads a
+ * remote tracing configuration or sends an event outside the process.
  */
 
 import type { Span } from '@opentelemetry/api'
 import { createHash } from 'crypto'
-import { getIsNonInteractiveSession } from '../../bootstrap/state.js'
-import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
 import { sanitizeToolNameForAnalytics } from '../../services/analytics/metadata.js'
 import type { AssistantMessage, UserMessage } from '../../types/message.js'
-import { isEnvTruthy } from '../envUtils.js'
 import { jsonParse, jsonStringify } from '../slowOperations.js'
 import { logOTelEvent } from './events.js'
 
@@ -67,38 +45,17 @@ export function clearBetaTracingState(): void {
   lastReportedMessageHash.clear()
 }
 
-const MAX_CONTENT_SIZE = 60 * 1024 // 60KB (Honeycomb limit is 64KB, staying safe)
+const MAX_CONTENT_SIZE = 60 * 1024 // 60KB (bounded local attribute size)
 
 /**
- * Check if beta detailed tracing is enabled.
- * - Requires ENABLE_BETA_TRACING_DETAILED=1 and BETA_TRACING_ENDPOINT
- * - For external users, enabled in SDK/headless mode OR when org is
- *   allowlisted via the tengu_trace_lantern GrowthBook gate
+ * Remote beta tracing is permanently disabled in MindCode.
  */
 export function isBetaTracingEnabled(): boolean {
-  const baseEnabled =
-    isEnvTruthy(process.env.ENABLE_BETA_TRACING_DETAILED) &&
-    Boolean(process.env.BETA_TRACING_ENDPOINT)
-
-  if (!baseEnabled) {
-    return false
-  }
-
-  // For external users, enable in SDK/headless mode OR when org is allowlisted.
-  // Gate reads from disk cache, so first run after allowlisting returns false;
-  // works from second run onward (same behavior as enhanced_telemetry_beta).
-  if (process.env.USER_TYPE !== 'ant') {
-    return (
-      getIsNonInteractiveSession() ||
-      getFeatureValue_CACHED_MAY_BE_STALE('tengu_trace_lantern', false)
-    )
-  }
-
-  return true
+  return false
 }
 
 /**
- * Truncate content to fit within Honeycomb limits.
+ * Truncate content to fit within local attribute limits.
  */
 export function truncateContent(
   content: string,

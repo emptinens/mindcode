@@ -1,89 +1,42 @@
 /**
- * Environment variables that control inference routing: which provider to use,
- * which endpoint to hit, and which model IDs to send.
+ * Environment variables that control host-owned inference routing and runtime
+ * model selection.
  *
  * When MINDCODE_PROVIDER_MANAGED_BY_HOST is truthy in the spawn env, these
  * are stripped from settings-sourced env so the host's routing config isn't
- * overridden by a user's ~/.mindcode/settings.json — e.g. a Bedrock setup for
- * terminal CLI that would break a host that only supports first-party auth.
+ * overridden by a user's ~/.mindcode/settings.json.
  *
- * @[MODEL LAUNCH]: New models usually don't need changes here —
- * VERTEX_REGION_CLAUDE_* is prefix-matched. New providers or new routing
- * config vars (endpoint, project, region, auth) do.
+ * New MINDCODE runtime controls should be added here when the host must own
+ * their value.
  */
 const PROVIDER_MANAGED_ENV_VARS = new Set([
   // The flag itself — settings can't unset it once the host set it
   'MINDCODE_PROVIDER_MANAGED_BY_HOST',
-  // Provider selection
-  'MINDCODE_USE_BEDROCK',
-  'MINDCODE_USE_VERTEX',
-  'MINDCODE_USE_FOUNDRY',
-  // Endpoint config (base URLs, project/resource identifiers)
-  'ANTHROPIC_BASE_URL',
-  'ANTHROPIC_BEDROCK_BASE_URL',
-  'ANTHROPIC_VERTEX_BASE_URL',
-  'ANTHROPIC_FOUNDRY_BASE_URL',
-  'ANTHROPIC_FOUNDRY_RESOURCE',
-  'ANTHROPIC_VERTEX_PROJECT_ID',
-  // Region routing (per-model VERTEX_REGION_CLAUDE_* handled by prefix below)
-  'CLOUD_ML_REGION',
-  // Auth
-  'ANTHROPIC_API_KEY',
-  'ANTHROPIC_AUTH_TOKEN',
-  'MINDCODE_OAUTH_TOKEN',
-  'AWS_BEARER_TOKEN_BEDROCK',
-  'ANTHROPIC_FOUNDRY_API_KEY',
-  'MINDCODE_SKIP_BEDROCK_AUTH',
-  'MINDCODE_SKIP_VERTEX_AUTH',
-  'MINDCODE_SKIP_FOUNDRY_AUTH',
-  // Model defaults — often set to provider-specific ID formats
-  'ANTHROPIC_MODEL',
-  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-  'ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION',
-  'ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME',
-  'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES',
-  'ANTHROPIC_DEFAULT_OPUS_MODEL',
-  'ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION',
-  'ANTHROPIC_DEFAULT_OPUS_MODEL_NAME',
-  'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES',
-  'ANTHROPIC_DEFAULT_SONNET_MODEL',
-  'ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION',
-  'ANTHROPIC_DEFAULT_SONNET_MODEL_NAME',
-  'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES',
-  'ANTHROPIC_SMALL_FAST_MODEL',
-  'ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION',
+  // Host-owned runtime credentials and model/task controls.
+  'VEXZY_API_KEY',
+  'MINDCODE_MODEL',
   'MINDCODE_SUBAGENT_MODEL',
+  'MINDCODE_COMPACT_MODEL',
+  'MINDCODE_EFFORT_LEVEL',
+  'MINDCODE_WORKER_EFFORT',
 ])
-
-const PROVIDER_MANAGED_ENV_PREFIXES = [
-  // Per-model Vertex region overrides — scales with model releases, so
-  // prefix-matched to avoid drift on each launch.
-  'VERTEX_REGION_CLAUDE_',
-]
 
 export function isProviderManagedEnvVar(key: string): boolean {
   const upper = key.toUpperCase()
-  return (
-    PROVIDER_MANAGED_ENV_VARS.has(upper) ||
-    PROVIDER_MANAGED_ENV_PREFIXES.some(p => upper.startsWith(p))
-  )
+  return PROVIDER_MANAGED_ENV_VARS.has(upper)
 }
 
 /**
  * Dangerous shell settings that can execute arbitrary shell code
  */
 export const DANGEROUS_SHELL_SETTINGS = [
-  'apiKeyHelper',
-  'awsAuthRefresh',
-  'awsCredentialExport',
-  'gcpAuthRefresh',
   'otelHeadersHelper',
   'statusLine',
 ] as const
 
 /**
  * Safe environment variables that can be applied before trust dialog.
- * These are MindCode specific settings that don't pose security risks.
+ * These are runtime settings that don't pose security risks.
  *
  * IMPORTANT: This is the source of truth for which env vars are safe.
  * Any env var NOT in this list is considered dangerous and will trigger
@@ -92,7 +45,6 @@ export const DANGEROUS_SHELL_SETTINGS = [
  * Dangerous env vars (NOT in this list):
  *
  * === REDIRECT TO ATTACKER-CONTROLLED SERVER ===
- * - ANTHROPIC_BASE_URL, ANTHROPIC_BEDROCK_BASE_URL, ANTHROPIC_FOUNDRY_BASE_URL, ANTHROPIC_VERTEX_BASE_URL
  * - HTTP_PROXY, HTTPS_PROXY, NO_PROXY, http_proxy, https_proxy, no_proxy
  * - OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_LOGS_ENDPOINT, OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
  *
@@ -101,34 +53,10 @@ export const DANGEROUS_SHELL_SETTINGS = [
  * - NODE_EXTRA_CA_CERTS
  *
  * === SWITCH TO ATTACKER-CONTROLLED PROJECT ===
- * - ANTHROPIC_FOUNDRY_RESOURCE
- * - ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN
- * - AWS_BEARER_TOKEN_BEDROCK
+ * - VEXZY_API_KEY and other credential-shaped variables
  */
 export const SAFE_ENV_VARS = new Set([
-  'ANTHROPIC_CUSTOM_HEADERS',
-  'ANTHROPIC_CUSTOM_MODEL_OPTION',
-  'ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION',
-  'ANTHROPIC_CUSTOM_MODEL_OPTION_NAME',
-  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-  'ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION',
-  'ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME',
-  'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES',
-  'ANTHROPIC_DEFAULT_OPUS_MODEL',
-  'ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION',
-  'ANTHROPIC_DEFAULT_OPUS_MODEL_NAME',
-  'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES',
-  'ANTHROPIC_DEFAULT_SONNET_MODEL',
-  'ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION',
-  'ANTHROPIC_DEFAULT_SONNET_MODEL_NAME',
-  'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES',
-  'ANTHROPIC_FOUNDRY_API_KEY',
-  'ANTHROPIC_MODEL',
-  'ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION',
-  'ANTHROPIC_SMALL_FAST_MODEL',
-  'AWS_DEFAULT_REGION',
-  'AWS_PROFILE',
-  'AWS_REGION',
+  'MINDCODE_MODEL',
   'BASH_DEFAULT_TIMEOUT_MS',
   'BASH_MAX_OUTPUT_LENGTH',
   'BASH_MAX_TIMEOUT_MS',
@@ -141,13 +69,10 @@ export const SAFE_ENV_VARS = new Set([
   'MINDCODE_EXPERIMENTAL_AGENT_TEAMS',
   'MINDCODE_IDE_SKIP_AUTO_INSTALL',
   'MINDCODE_MAX_OUTPUT_TOKENS',
-  'MINDCODE_SKIP_BEDROCK_AUTH',
-  'MINDCODE_SKIP_FOUNDRY_AUTH',
-  'MINDCODE_SKIP_VERTEX_AUTH',
+  'MINDCODE_COMPACT_MODEL',
+  'MINDCODE_EFFORT_LEVEL',
+  'MINDCODE_WORKER_EFFORT',
   'MINDCODE_SUBAGENT_MODEL',
-  'MINDCODE_USE_BEDROCK',
-  'MINDCODE_USE_FOUNDRY',
-  'MINDCODE_USE_VERTEX',
   'DISABLE_AUTOUPDATER',
   'DISABLE_BUG_COMMAND',
   'DISABLE_COST_WARNINGS',
@@ -179,13 +104,4 @@ export const SAFE_ENV_VARS = new Set([
   'OTEL_METRICS_INCLUDE_VERSION',
   'OTEL_RESOURCE_ATTRIBUTES',
   'USE_BUILTIN_RIPGREP',
-  'VERTEX_REGION_CLAUDE_3_5_HAIKU',
-  'VERTEX_REGION_CLAUDE_3_5_SONNET',
-  'VERTEX_REGION_CLAUDE_3_7_SONNET',
-  'VERTEX_REGION_CLAUDE_4_0_OPUS',
-  'VERTEX_REGION_CLAUDE_4_0_SONNET',
-  'VERTEX_REGION_CLAUDE_4_1_OPUS',
-  'VERTEX_REGION_CLAUDE_4_5_SONNET',
-  'VERTEX_REGION_CLAUDE_4_6_SONNET',
-  'VERTEX_REGION_CLAUDE_HAIKU_4_5',
 ])

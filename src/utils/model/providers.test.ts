@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import {
   VEXZY_BASE_URL,
+  getAPIProvider,
+  getAPIProviderForStatsig,
   getVexzyRuntimeApiKey,
   isVexzyMode,
 } from './providers.js'
@@ -13,7 +15,7 @@ describe('Vexzy runtime provider wiring', () => {
     )
     expect(isVexzyMode({ VEXZY_API_KEY: 'forge-test-key' })).toBe(true)
     expect(getVexzyRuntimeApiKey({})).toBeUndefined()
-    expect(isVexzyMode({})).toBe(false)
+    expect(isVexzyMode({})).toBe(true)
   })
 
   test.each(['', 'legacy-key', 'forge-', 'forge-key with-space'])(
@@ -31,4 +33,32 @@ describe('Vexzy runtime provider wiring', () => {
   test('uses the fixed Vexzy messages base URL', () => {
     expect(VEXZY_BASE_URL).toBe('https://api.echogate.one')
   })
+
+  test('resolves only the Vexzy runtime provider', () => {
+    const env = {
+      VEXZY_API_KEY: 'forge-test-key',
+      MINDCODE_USE_BEDROCK: '1',
+      MINDCODE_USE_VERTEX: '1',
+      MINDCODE_USE_FOUNDRY: '1',
+    }
+
+    expect(getAPIProvider(env)).toBe('vexzy')
+    expect(getAPIProviderForStatsig(env)).toBe('vexzy')
+  })
+
+  test('fails closed when the runtime credential is missing', () => {
+    expect(() => getAPIProvider({})).toThrow(VexzyConfigurationError)
+    expect(() => getAPIProviderForStatsig({})).toThrow(
+      VexzyConfigurationError,
+    )
+  })
+
+  test.each([
+    { MINDCODE_USE_BEDROCK: '1' },
+    { MINDCODE_USE_VERTEX: '1' },
+    { MINDCODE_USE_FOUNDRY: '1' },
+  ])('does not fall back to a legacy provider: %j', env => {
+    expect(() => getAPIProvider(env)).toThrow(VexzyConfigurationError)
+  })
+
 })

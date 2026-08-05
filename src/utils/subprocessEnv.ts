@@ -3,37 +3,22 @@ import { isEnvTruthy } from './envUtils.js'
 /**
  * Env vars to strip from subprocess environments when running inside GitHub
  * Actions. This prevents prompt-injection attacks from exfiltrating secrets
- * via shell expansion (e.g., ${ANTHROPIC_API_KEY}) in Bash tool commands.
+ * via shell expansion in Bash tool commands.
  *
- * The parent mindcode process keeps these vars (needed for API calls, lazy
- * credential reads). Only child processes (bash, shell snapshot, MCP stdio, LSP, hooks) are scrubbed.
+ * The parent process keeps its runtime credential for API calls. Only child
+ * processes (bash, shell snapshot, MCP stdio, LSP, hooks) are scrubbed.
  *
  * GITHUB_TOKEN / GH_TOKEN are intentionally NOT scrubbed — wrapper scripts
  * (gh.sh) need them to call the GitHub API. That token is job-scoped and
  * expires when the workflow ends.
  */
-const GHA_SUBPROCESS_SCRUB = [
-  // Anthropic auth — claude re-reads these per-request, subprocesses don't need them
-  'ANTHROPIC_API_KEY',
-  'MINDCODE_OAUTH_TOKEN',
-  'ANTHROPIC_AUTH_TOKEN',
-  'ANTHROPIC_FOUNDRY_API_KEY',
-  'ANTHROPIC_CUSTOM_HEADERS',
-
+const EXPLICIT_SUBPROCESS_SCRUB = new Set([
   // OTLP exporter headers — documented to carry Authorization=Bearer tokens
   // for monitoring backends; read in-process by OTEL SDK, subprocesses never need them
   'OTEL_EXPORTER_OTLP_HEADERS',
   'OTEL_EXPORTER_OTLP_LOGS_HEADERS',
   'OTEL_EXPORTER_OTLP_METRICS_HEADERS',
   'OTEL_EXPORTER_OTLP_TRACES_HEADERS',
-
-  // Cloud provider creds — same pattern (lazy SDK reads)
-  'AWS_SECRET_ACCESS_KEY',
-  'AWS_SESSION_TOKEN',
-  'AWS_BEARER_TOKEN_BEDROCK',
-  'GOOGLE_APPLICATION_CREDENTIALS',
-  'AZURE_CLIENT_SECRET',
-  'AZURE_CLIENT_CERTIFICATE_PATH',
 
   // GitHub Actions OIDC — consumed by the action's JS before claude spawns;
   // leaking these allows minting an App installation token → repo takeover
@@ -44,13 +29,33 @@ const GHA_SUBPROCESS_SCRUB = [
   'ACTIONS_RUNTIME_TOKEN',
   'ACTIONS_RUNTIME_URL',
 
-  // mindcode-action-specific duplicates — action JS consumes these during
-  // prepare, before spawning claude. ALL_INPUTS contains anthropic_api_key as JSON.
+  // Action-specific duplicates — action JS consumes these during prepare,
+  // before spawning the runtime.
   'ALL_INPUTS',
   'OVERRIDE_GITHUB_TOKEN',
   'DEFAULT_WORKFLOW_TOKEN',
   'SSH_SIGNING_KEY',
-] as const
+])
+
+/**
+ * Credential-shaped names are scrubbed without maintaining a provider list.
+ * This covers newly introduced provider credentials and GitHub Actions'
+ * INPUT_<NAME> copies while allowing the VEXZY runtime credential through to
+ * workers explicitly below.
+ */
+const SENSITIVE_ENV_NAME =
+  /(?:^|_)(?:API_KEY|AUTH_TOKEN|OAUTH_TOKEN|ACCESS_TOKEN|ACCESS_KEY|BEARER_TOKEN|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|CREDENTIALS?|CERTIFICATE|AUTHORIZATION|CUSTOM_HEADERS)(?:$|_)/i
+
+const PRESERVED_RUNTIME_ENV = new Set([
+  'VEXZY_API_KEY',
+  'GITHUB_TOKEN',
+  'GH_TOKEN',
+])
+
+function shouldScrubSubprocessEnvKey(key: string): boolean {
+  if (PRESERVED_RUNTIME_ENV.has(key)) return false
+  return EXPLICIT_SUBPROCESS_SCRUB.has(key) || SENSITIVE_ENV_NAME.test(key)
+}
 
 /**
  * Returns a copy of process.env with sensitive secrets stripped, for use when
@@ -63,7 +68,7 @@ const GHA_SUBPROCESS_SCRUB = [
  */
 // Registered by init.ts after the upstreamproxy module is dynamically imported
 // in CCR sessions. Stays undefined in non-CCR startups so we never pull in the
-// upstreamproxy module graph (upstreamproxy.ts + relay.ts) via a static import.
+// upstreamproxy module graph via a static import.
 let _getUpstreamProxyEnv: (() => Record<string, string>) | undefined
 
 /**
@@ -89,13 +94,17 @@ export function subprocessEnv(): NodeJS.ProcessEnv {
       : process.env
   }
   const env = { ...process.env, ...proxyEnv }
-  for (const k of GHA_SUBPROCESS_SCRUB) {
-    delete env[k]
-    // GitHub Actions auto-creates INPUT_<NAME> for `with:` inputs, duplicating
-    // secrets like INPUT_ANTHROPIC_API_KEY. No-op for vars that aren't action inputs.
-    delete env[`INPUT_${k}`]
+  for (const key of Object.keys(env)) {
+    if (shouldScrubSubprocessEnvKey(key)) {
+      delete env[key]
+    }
   }
-  // Vexzy workers require the runtime credential to reach the fixed base URL.
+  for (const key of EXPLICIT_SUBPROCESS_SCRUB) {
+    // GitHub Actions auto-creates INPUT_<NAME> for `with:` inputs. No-op for
+    // vars that are not action inputs.
+    delete env[`INPUT_${key}`]
+  }
+  // VEXZY workers require the runtime credential to reach the fixed endpoint.
   // Preserve the value explicitly without ever formatting or logging it.
   if (process.env.VEXZY_API_KEY !== undefined) {
     env.VEXZY_API_KEY = process.env.VEXZY_API_KEY

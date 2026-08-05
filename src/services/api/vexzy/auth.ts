@@ -24,7 +24,8 @@ export function createVexzyHeaders(
   // the required Bearer scheme with a different Authorization value.
   const result: VexzyHeaders = {}
   merged.forEach((value, name) => {
-    if (name.toLowerCase() !== 'authorization') {
+    const normalizedName = name.toLowerCase()
+    if (normalizedName !== 'authorization' && normalizedName !== 'x-api-key') {
       result[name] = value
     }
   })

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { createVexzyStreamError } from './errors.js'
 
 const nonNegativeInteger = z.number().int().nonnegative()
 const nullableString = z.string().nullable()
@@ -28,9 +29,50 @@ export const vexzyToolUseBlockSchema = z.object({
   input: z.record(z.unknown()),
 }).passthrough()
 
-export const vexzyContentBlockSchema = z.discriminatedUnion('type', [
+export const vexzyThinkingBlockSchema = z.object({
+  type: z.literal('thinking'),
+  thinking: z.string(),
+  signature: z.string(),
+}).passthrough()
+
+export const vexzyRedactedThinkingBlockSchema = z.object({
+  type: z.literal('redacted_thinking'),
+  data: z.string(),
+}).passthrough()
+
+export const vexzyServerToolUseBlockSchema = z.object({
+  type: z.literal('server_tool_use'),
+  id: z.string().min(1),
+  name: z.string().min(1),
+  input: z.record(z.unknown()),
+}).passthrough()
+
+const knownContentBlockTypes = [
+  'text',
+  'tool_use',
+  'thinking',
+  'redacted_thinking',
+  'server_tool_use',
+] as const
+
+export const vexzyFutureContentBlockSchema = z
+  .object({ type: z.string().min(1) })
+  .passthrough()
+  .refine(
+    block =>
+      !knownContentBlockTypes.includes(
+        block.type as (typeof knownContentBlockTypes)[number],
+      ),
+    { message: 'Known Vexzy content block types require their known fields' },
+  )
+
+export const vexzyContentBlockSchema = z.union([
   vexzyTextBlockSchema,
   vexzyToolUseBlockSchema,
+  vexzyThinkingBlockSchema,
+  vexzyRedactedThinkingBlockSchema,
+  vexzyServerToolUseBlockSchema,
+  vexzyFutureContentBlockSchema,
 ])
 
 export const vexzyMessageSchema = z
@@ -81,13 +123,59 @@ export const vexzyInputJsonDeltaSchema = z
   })
   .passthrough()
 
+export const vexzyThinkingDeltaSchema = z
+  .object({
+    type: z.literal('thinking_delta'),
+    thinking: z.string(),
+  })
+  .passthrough()
+
+export const vexzySignatureDeltaSchema = z
+  .object({
+    type: z.literal('signature_delta'),
+    signature: z.string(),
+  })
+  .passthrough()
+
+const vexzyCitationSchema = z
+  .object({ type: z.string().min(1) })
+  .passthrough()
+
+export const vexzyCitationsDeltaSchema = z
+  .object({
+    type: z.literal('citations_delta'),
+    citation: vexzyCitationSchema,
+  })
+  .passthrough()
+
+const knownDeltaTypes = [
+  'text_delta',
+  'input_json_delta',
+  'thinking_delta',
+  'signature_delta',
+  'citations_delta',
+] as const
+
+export const vexzyFutureDeltaSchema = z
+  .object({ type: z.string().min(1) })
+  .passthrough()
+  .refine(
+    delta =>
+      !knownDeltaTypes.includes(delta.type as (typeof knownDeltaTypes)[number]),
+    { message: 'Known Vexzy delta types require their known fields' },
+  )
+
 export const vexzyContentBlockDeltaEventSchema = z
   .object({
     type: z.literal('content_block_delta'),
     index: nonNegativeInteger,
-    delta: z.discriminatedUnion('type', [
+    delta: z.union([
       vexzyTextDeltaSchema,
       vexzyInputJsonDeltaSchema,
+      vexzyThinkingDeltaSchema,
+      vexzySignatureDeltaSchema,
+      vexzyCitationsDeltaSchema,
+      vexzyFutureDeltaSchema,
     ]),
   })
   .passthrough()
@@ -141,10 +229,20 @@ export type VexzyUsage = z.infer<typeof vexzyUsageSchema>
 export type VexzyStreamUsage = z.infer<typeof vexzyStreamUsageSchema>
 export type VexzyTextBlock = z.infer<typeof vexzyTextBlockSchema>
 export type VexzyToolUseBlock = z.infer<typeof vexzyToolUseBlockSchema>
+export type VexzyThinkingBlock = z.infer<typeof vexzyThinkingBlockSchema>
+export type VexzyRedactedThinkingBlock = z.infer<
+  typeof vexzyRedactedThinkingBlockSchema
+>
+export type VexzyServerToolUseBlock = z.infer<
+  typeof vexzyServerToolUseBlockSchema
+>
 export type VexzyContentBlock = z.infer<typeof vexzyContentBlockSchema>
 export type VexzyMessage = z.infer<typeof vexzyMessageSchema>
 export type VexzyTextDelta = z.infer<typeof vexzyTextDeltaSchema>
 export type VexzyInputJsonDelta = z.infer<typeof vexzyInputJsonDeltaSchema>
+export type VexzyThinkingDelta = z.infer<typeof vexzyThinkingDeltaSchema>
+export type VexzySignatureDelta = z.infer<typeof vexzySignatureDeltaSchema>
+export type VexzyCitationsDelta = z.infer<typeof vexzyCitationsDeltaSchema>
 export type VexzyStreamEvent = z.infer<typeof vexzyStreamEventSchema>
 export type VexzySseRecord = z.infer<typeof vexzySseRecordSchema>
 
@@ -165,6 +263,17 @@ export function parseVexzySseRecord(input: unknown): VexzyStreamEvent {
   const record = vexzySseRecordSchema.parse(input)
   const payload =
     typeof record.data === 'string' ? parseJsonData(record.data) : record.data
+
+  // Anthropic-compatible SSE streams report provider failures as an `error`
+  // event rather than a yielded message event. Keep the payload out of the
+  // thrown error and expose the native API-error-compatible stream type.
+  if (record.event === 'error') {
+    if (!isRecord(payload) || payload.type !== 'error') {
+      throw new Error('Vexzy SSE event name does not match payload type')
+    }
+    throw createVexzyStreamError()
+  }
+
   const event = parseVexzyStreamEvent(payload)
 
   if (record.event !== event.type) {
@@ -297,4 +406,8 @@ function parseJsonData(data: string): unknown {
   } catch {
     throw new Error('Vexzy SSE data is not valid JSON')
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
 }

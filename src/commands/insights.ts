@@ -1,4 +1,3 @@
-import { execFileSync } from 'child_process'
 import { diffLines } from 'diff'
 import { constants as fsConstants } from 'fs'
 import {
@@ -14,7 +13,7 @@ import {
 import { tmpdir } from 'os'
 import { extname, join } from 'path'
 import type { Command } from '../commands.js'
-import { queryWithModel } from '../services/api/claude.js'
+import { queryWithModel } from '../services/api/modelRuntime.js'
 import {
   AGENT_TOOL_NAME,
   LEGACY_AGENT_TOOL_NAME,
@@ -2271,7 +2270,7 @@ function generateHtmlReport(
 
   const css = `
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; background: #f8fafc; color: #334155; line-height: 1.65; padding: 48px 24px; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f8fafc; color: #334155; line-height: 1.65; padding: 48px 24px; }
     .container { max-width: 800px; margin: 0 auto; }
     h1 { font-size: 32px; font-weight: 700; color: #0f172a; margin-bottom: 8px; }
     h2 { font-size: 20px; font-weight: 600; color: #0f172a; margin-top: 48px; margin-bottom: 16px; }
@@ -2486,7 +2485,6 @@ function generateHtmlReport(
 <head>
   <meta charset="utf-8">
   <title>MindCode Insights</title>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>${css}</style>
 </head>
 <body>
@@ -2674,7 +2672,7 @@ export type InsightsExport = {
 
 /**
  * Build export data from already-computed values.
- * Used by background upload to S3.
+ * Used by the local HTML report renderer.
  */
 export function buildExportData(
   data: AggregatedData,
@@ -3069,35 +3067,7 @@ const usageReport: Command = {
       { collectRemote },
     )
 
-    let reportUrl = `file://${htmlPath}`
-    let uploadHint = ''
-
-    if (process.env.USER_TYPE === 'ant') {
-      // Try to upload to S3
-      const timestamp = new Date()
-        .toISOString()
-        .replace(/[-:]/g, '')
-        .replace('T', '_')
-        .slice(0, 15)
-      const username = process.env.SAFEUSER || process.env.USER || 'unknown'
-      const filename = `${username}_insights_${timestamp}.html`
-      const s3Path = `s3://anthropic-serve/atamkin/cc-user-reports/${filename}`
-      const s3Url = `https://s3-frontend.infra.ant.dev/anthropic-serve/atamkin/cc-user-reports/${filename}`
-
-      reportUrl = s3Url
-      try {
-        execFileSync('ff', ['cp', htmlPath, s3Path], {
-          timeout: 60000,
-          stdio: 'pipe', // Suppress output
-        })
-      } catch {
-        // Upload failed - fall back to local file and show upload command
-        reportUrl = `file://${htmlPath}`
-        uploadHint = `\nAutomatic upload failed. Are you on the boron namespace? Try \`use-bo\` and ensure you've run \`sso\`.
-To share, run: ff cp ${htmlPath} ${s3Path}
-Then access at: ${s3Url}`
-      }
-    }
+    const reportUrl = `file://${htmlPath}`
 
     // Build header with stats
     const sessionLabel =
@@ -3150,7 +3120,7 @@ ${remoteInfo}
 
     const userSummary = `${header}${summaryText}
 
-Your full shareable insights report is ready: ${reportUrl}${uploadHint}`
+Your local insights report is ready: ${reportUrl}`
 
     // Return prompt for MindCode to respond to
     return [
@@ -3171,8 +3141,8 @@ ${userSummary}
 Now output the following message exactly:
 
 <message>
-Your shareable insights report is ready:
-${reportUrl}${uploadHint}
+Your local insights report is ready:
+${reportUrl}
 
 Want to dig into any section or try one of the suggestions?
 </message>`,

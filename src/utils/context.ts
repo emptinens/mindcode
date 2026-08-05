@@ -1,169 +1,72 @@
 import { CONTEXT_1M_BETA_HEADER } from '../constants/betas.js'
-import { getGlobalConfig } from './config.js'
+import { getVexzyModelCatalogState } from '../services/api/vexzy/modelCatalog.js'
 import { isEnvTruthy } from './envUtils.js'
-import { getCanonicalName } from './model/model.js'
-import { getModelCapability } from './model/modelCapabilities.js'
 
-// Baseline model context window size for models without an explicit override.
 export const MODEL_CONTEXT_WINDOW_DEFAULT = 200_000
-export const VEXZY_LUNA_CONTEXT_WINDOW = 1_050_000
-
-// Maximum output tokens for compact operations
 export const COMPACT_MAX_OUTPUT_TOKENS = 20_000
-
-// Default max output tokens
 const MAX_OUTPUT_TOKENS_DEFAULT = 32_000
 const MAX_OUTPUT_TOKENS_UPPER_LIMIT = 64_000
-
-// Capped default for slot-reservation optimization. BQ p99 output = 4,911
-// tokens, so 32k/64k defaults over-reserve 8-16× slot capacity. With the cap
-// enabled, <1% of requests hit the limit; those get one clean retry at 64k
-// (see query.ts max_output_tokens_escalate). Cap is applied in
-// claude.ts:getMaxOutputTokensForModel to avoid the growthbook→betas→context
-// import cycle.
 export const CAPPED_DEFAULT_MAX_TOKENS = 8_000
 export const ESCALATED_MAX_TOKENS = 64_000
 
-/**
- * Check if 1M context is disabled via environment variable.
- * Used by C4E admins to disable 1M context for HIPAA compliance.
- */
 export function is1mContextDisabled(): boolean {
   return isEnvTruthy(process.env.MINDCODE_DISABLE_1M_CONTEXT)
 }
 
-export function has1mContext(model: string): boolean {
-  if (!/\[1m\]/i.test(model)) return false
-  return !is1mContextDisabled() || !isLegacyClaudeModel(model)
+function stripContextSuffix(model: string): string {
+  return model.replace(/\[(?:1|2)m\]$/i, '')
 }
 
-function isLegacyClaudeModel(model: string): boolean {
-  return getCanonicalName(model).includes('claude-')
-}
-
-function getNativeVexzyContextWindow(model: string): number | undefined {
-  const canonical = getCanonicalName(model)
-  if (canonical.includes('gpt-5.6-luna')) {
-    return VEXZY_LUNA_CONTEXT_WINDOW
+function requireVexzyModelLimits(model: string): {
+  contextLength: number
+  outputLimit: number
+} {
+  const state = getVexzyModelCatalogState()
+  if (state.state !== 'ready' || state.registry === undefined) {
+    throw new Error(`Vexzy model catalog is not ready (state: ${state.state})`)
   }
-  return undefined
-}
 
-function getLegacyClaude1mContextWindow(model: string): number | undefined {
-  const canonical = getCanonicalName(model)
+  const modelId = stripContextSuffix(model)
+  const catalogModel = state.registry.get(modelId)
+  if (catalogModel === undefined) {
+    throw new Error(`Vexzy model '${modelId}' is not in the dynamic catalog`)
+  }
+  if (!catalogModel.available) {
+    throw new Error(`Vexzy model '${modelId}' is unavailable`)
+  }
   if (
-    canonical.includes('claude-sonnet-4-6') ||
-    canonical.includes('claude-opus-4-6') ||
-    canonical.includes('claude-opus-4-7') ||
-    canonical.includes('claude-opus-4-8') ||
-    canonical.includes('claude-opus-5')
+    !Number.isSafeInteger(catalogModel.contextLength) ||
+    catalogModel.contextLength <= 0 ||
+    !Number.isSafeInteger(catalogModel.outputLimit) ||
+    catalogModel.outputLimit <= 0
   ) {
-    return 1_000_000
+    throw new Error(`Vexzy model '${modelId}' has invalid runtime limits`)
   }
-  return undefined
+  return {
+    contextLength: catalogModel.contextLength,
+    outputLimit: catalogModel.outputLimit,
+  }
 }
 
-// @[MODEL LAUNCH]: Update this pattern if the new model supports 1M context
+export function has1mContext(model: string): boolean {
+  return /\[1m\]/i.test(model) && !is1mContextDisabled()
+}
+
 export function modelSupports1M(model: string): boolean {
-  const canonical = getCanonicalName(model)
-  if (canonical.includes('gpt-5.6-luna')) {
-    return true
-  }
-  if (is1mContextDisabled()) {
-    return false
-  }
-  return (
-    canonical.includes('claude-sonnet-4') ||
-    canonical.includes('claude-opus-4-6') ||
-    canonical.includes('claude-opus-4-7') ||
-    canonical.includes('claude-opus-4-8') ||
-    canonical.includes('claude-opus-5')
-  )
+  return requireVexzyModelLimits(model).contextLength >= 1_000_000
 }
 
 export function getContextWindowForModel(
   model: string,
-  betas?: string[],
+  _betas?: string[],
 ): number {
-  // Allow override via environment variable (ant-only)
-  // This takes precedence over all other context window resolution, including 1M detection,
-  // so users can cap the effective context window for local decisions (auto-compact, etc.)
-  // while still using a 1M-capable endpoint.
-  if (
-    process.env.USER_TYPE === 'ant' &&
-    process.env.MINDCODE_MAX_CONTEXT_TOKENS
-  ) {
-    const override = Number.parseInt(process.env.MINDCODE_MAX_CONTEXT_TOKENS, 10)
-    if (!Number.isNaN(override) && override > 0) {
-      return override
-    }
-  }
-
-  // Vexzy Luna has a provider-native context size. The legacy Claude 1M
-  // disable switch controls beta/legacy Claude windows only and must not
-  // downgrade this model.
-  const nativeVexzyContextWindow = getNativeVexzyContextWindow(model)
-  if (nativeVexzyContextWindow !== undefined) {
-    return nativeVexzyContextWindow
-  }
-
-  const legacyClaude1mContextWindow = is1mContextDisabled()
-    ? undefined
-    : getLegacyClaude1mContextWindow(model)
-  if (legacyClaude1mContextWindow !== undefined) {
-    return legacyClaude1mContextWindow
-  }
-
-  // [1m] suffix — explicit client-side opt-in, respected over all detection
-  if (has1mContext(model)) {
-    return 1_000_000
-  }
-
-  const cap = getModelCapability(model)
-  if (cap?.max_input_tokens && cap.max_input_tokens >= 100_000) {
-    if (
-      cap.max_input_tokens > MODEL_CONTEXT_WINDOW_DEFAULT &&
-      is1mContextDisabled() &&
-      isLegacyClaudeModel(model)
-    ) {
-      return MODEL_CONTEXT_WINDOW_DEFAULT
-    }
-    return cap.max_input_tokens
-  }
-
-  if (betas?.includes(CONTEXT_1M_BETA_HEADER) && modelSupports1M(model)) {
-    return 1_000_000
-  }
-  if (getSonnet1mExpTreatmentEnabled(model)) {
-    return 1_000_000
-  }
-  if (process.env.USER_TYPE === 'ant') {
-    const antModel = resolveAntModel(model)
-    if (antModel?.contextWindow) {
-      return antModel.contextWindow
-    }
-  }
-  return MODEL_CONTEXT_WINDOW_DEFAULT
+  return requireVexzyModelLimits(model).contextLength
 }
 
-export function getSonnet1mExpTreatmentEnabled(model: string): boolean {
-  if (is1mContextDisabled()) {
-    return false
-  }
-  // Only applies to sonnet 4.6 without an explicit [1m] suffix
-  if (has1mContext(model)) {
-    return false
-  }
-  if (!getCanonicalName(model).includes('sonnet-4-6')) {
-    return false
-  }
-  return getGlobalConfig().clientDataCache?.coral_reef_sonnet === 'true'
+export function getSonnet1mExpTreatmentEnabled(_model: string): boolean {
+  return false
 }
 
-/**
- * Calculate context window usage percentage from token usage data.
- * Returns used and remaining percentages, or null values if no usage data.
- */
 export function calculateContextPercentages(
   currentUsage: {
     input_tokens: number
@@ -172,103 +75,39 @@ export function calculateContextPercentages(
   } | null,
   contextWindowSize: number,
 ): { used: number | null; remaining: number | null } {
-  if (!currentUsage) {
-    return { used: null, remaining: null }
-  }
+  if (!currentUsage) return { used: null, remaining: null }
 
   const totalInputTokens =
     currentUsage.input_tokens +
     currentUsage.cache_creation_input_tokens +
     currentUsage.cache_read_input_tokens
-
   const usedPercentage = Math.round(
     (totalInputTokens / contextWindowSize) * 100,
   )
   const clampedUsed = Math.min(100, Math.max(0, usedPercentage))
-
-  return {
-    used: clampedUsed,
-    remaining: 100 - clampedUsed,
-  }
+  return { used: clampedUsed, remaining: 100 - clampedUsed }
 }
 
-/**
- * Returns the model's default and upper limit for max output tokens.
- */
 export function getModelMaxOutputTokens(model: string): {
   default: number
   upperLimit: number
 } {
-  let defaultTokens: number
-  let upperLimit: number
-
-  if (process.env.USER_TYPE === 'ant') {
-    const antModel = resolveAntModel(model.toLowerCase())
-    if (antModel) {
-      defaultTokens = antModel.defaultMaxTokens ?? MAX_OUTPUT_TOKENS_DEFAULT
-      upperLimit = antModel.upperMaxTokensLimit ?? MAX_OUTPUT_TOKENS_UPPER_LIMIT
-      return { default: defaultTokens, upperLimit }
-    }
-  }
-
-  const m = getCanonicalName(model)
-
-  if (
-    m.includes('opus-5') ||
-    m.includes('opus-4-8') ||
-    m.includes('opus-4-6')
-  ) {
-    defaultTokens = 64_000
-    upperLimit = 128_000
-  } else if (m.includes('sonnet-4-6')) {
-    defaultTokens = 32_000
-    upperLimit = 128_000
-  } else if (
-    m.includes('opus-4-5') ||
-    m.includes('sonnet-4') ||
-    m.includes('haiku-4')
-  ) {
-    defaultTokens = 32_000
-    upperLimit = 64_000
-  } else if (m.includes('opus-4-1') || m.includes('opus-4')) {
-    defaultTokens = 32_000
-    upperLimit = 32_000
-  } else if (m.includes('claude-3-opus')) {
-    defaultTokens = 4_096
-    upperLimit = 4_096
-  } else if (m.includes('claude-3-sonnet')) {
-    defaultTokens = 8_192
-    upperLimit = 8_192
-  } else if (m.includes('claude-3-haiku')) {
-    defaultTokens = 4_096
-    upperLimit = 4_096
-  } else if (m.includes('3-5-sonnet') || m.includes('3-5-haiku')) {
-    defaultTokens = 8_192
-    upperLimit = 8_192
-  } else if (m.includes('3-7-sonnet')) {
-    defaultTokens = 32_000
-    upperLimit = 64_000
-  } else {
-    defaultTokens = MAX_OUTPUT_TOKENS_DEFAULT
-    upperLimit = MAX_OUTPUT_TOKENS_UPPER_LIMIT
-  }
-
-  const cap = getModelCapability(model)
-  if (cap?.max_tokens && cap.max_tokens >= 4_096) {
-    upperLimit = cap.max_tokens
-    defaultTokens = Math.min(defaultTokens, upperLimit)
-  }
-
-  return { default: defaultTokens, upperLimit }
+  const outputLimit = requireVexzyModelLimits(model).outputLimit
+  return { default: outputLimit, upperLimit: outputLimit }
 }
 
-/**
- * Returns the max thinking budget tokens for a given model. The max
- * thinking tokens should be strictly less than the max output tokens.
- *
- * Deprecated since newer models use adaptive thinking rather than a
- * strict thinking token budget.
- */
 export function getMaxThinkingTokensForModel(model: string): number {
   return getModelMaxOutputTokens(model).upperLimit - 1
 }
+
+// Keep these constants referenced so external callers importing them retain a
+// stable local fallback contract; all runtime VEXZY paths use catalog limits.
+export const __LOCAL_CONTEXT_DEFAULTS = {
+  defaultOutput: MAX_OUTPUT_TOKENS_DEFAULT,
+  upperOutput: MAX_OUTPUT_TOKENS_UPPER_LIMIT,
+  defaultContext: MODEL_CONTEXT_WINDOW_DEFAULT,
+  compactOutput: COMPACT_MAX_OUTPUT_TOKENS,
+  cappedOutput: CAPPED_DEFAULT_MAX_TOKENS,
+  escalatedOutput: ESCALATED_MAX_TOKENS,
+  contextBeta: CONTEXT_1M_BETA_HEADER,
+} as const

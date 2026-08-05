@@ -2,14 +2,7 @@
  * HTTP utility constants and helpers
  */
 
-import axios from 'axios'
-import { OAUTH_BETA_HEADER } from '../constants/oauth.js'
-import {
-  getAnthropicApiKey,
-  getClaudeAIOAuthTokens,
-  handleOAuth401Error,
-  isClaudeAISubscriber,
-} from './auth.js'
+import { getAnthropicApiKey } from './auth.js'
 import { getMindCodeUserAgent } from './userAgent.js'
 import { getWorkload } from './workloadContext.js'
 
@@ -27,7 +20,7 @@ export function getUserAgent(): string {
   // Turn-/process-scoped workload tag for cron-initiated requests. 1P-only
   // observability — proxies strip HTTP headers; QoS routing uses cc_workload
   // in the billing-header attribution block instead (see constants/system.ts).
-  // getAnthropicClient (client.ts:98) calls this per-request inside withRetry,
+  // getVexzyClient (client.ts:98) calls this per-request inside withRetry,
   // so the read picks up the same setWorkload() value as getAttributionHeader.
   const workload = getWorkload()
   const workloadSuffix = workload ? `, workload/${workload}` : ''
@@ -49,12 +42,8 @@ export function getMCPUserAgent(): string {
   return `mindcode/${MACRO.VERSION}${suffix}`
 }
 
-// User-Agent for WebFetch requests to arbitrary sites. `Claude-User` is
-// Anthropic's publicly documented agent for user-initiated fetches (what site
-// operators match in robots.txt); the mindcode suffix lets them distinguish
-// local CLI traffic from claude.ai server-side fetches.
 export function getWebFetchUserAgent(): string {
-  return `Claude-User (${getMindCodeUserAgent()}; +https://support.anthropic.com/)`
+  return `MindCode-User (${getMindCodeUserAgent()})`
 }
 
 export type AuthHeaders = {
@@ -63,27 +52,9 @@ export type AuthHeaders = {
 }
 
 /**
- * Get authentication headers for API requests
- * Returns either OAuth headers for Max/Pro users or API key headers for regular users
+ * Compatibility helper for auxiliary VEXZY requests.
  */
 export function getAuthHeaders(): AuthHeaders {
-  if (isClaudeAISubscriber()) {
-    const oauthTokens = getClaudeAIOAuthTokens()
-    if (!oauthTokens?.accessToken) {
-      return {
-        headers: {},
-        error: 'No OAuth token available',
-      }
-    }
-    return {
-      headers: {
-        Authorization: `Bearer ${oauthTokens.accessToken}`,
-        'anthropic-beta': OAUTH_BETA_HEADER,
-      },
-    }
-  }
-  // TODO: this will fail if the API key is being set to an LLM Gateway key
-  // should we try to query keychain / credentials for a valid Anthropic key?
   const apiKey = getAnthropicApiKey()
   if (!apiKey) {
     return {
@@ -93,7 +64,7 @@ export function getAuthHeaders(): AuthHeaders {
   }
   return {
     headers: {
-      'x-api-key': apiKey,
+      Authorization: `Bearer ${apiKey}`,
     },
   }
 }
@@ -114,23 +85,7 @@ export function getAuthHeaders(): AuthHeaders {
  */
 export async function withOAuth401Retry<T>(
   request: () => Promise<T>,
-  opts?: { also403Revoked?: boolean },
+  _opts?: { also403Revoked?: boolean },
 ): Promise<T> {
-  try {
-    return await request()
-  } catch (err) {
-    if (!axios.isAxiosError(err)) throw err
-    const status = err.response?.status
-    const isAuthError =
-      status === 401 ||
-      (opts?.also403Revoked &&
-        status === 403 &&
-        typeof err.response?.data === 'string' &&
-        err.response.data.includes('OAuth token has been revoked'))
-    if (!isAuthError) throw err
-    const failedAccessToken = getClaudeAIOAuthTokens()?.accessToken
-    if (!failedAccessToken) throw err
-    await handleOAuth401Error(failedAccessToken)
-    return await request()
-  }
+  return request()
 }

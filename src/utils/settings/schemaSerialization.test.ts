@@ -6,7 +6,7 @@ test('settings JSON Schema tolerates optional undefined branches', () => {
   const schema = toSettingsJSONSchema(
     z.object({
       effortLevel: z
-        .enum(['low', 'medium', 'high', 'xhigh', 'max'])
+        .enum(['none', 'low', 'medium', 'high', 'xhigh', 'max'])
         .optional()
         .catch(undefined),
       enabledPlugins: z.record(
@@ -22,6 +22,6 @@ test('settings JSON Schema tolerates optional undefined branches', () => {
 
   expect(schema.properties?.effortLevel).toMatchObject({
     type: 'string',
-    enum: ['low', 'medium', 'high', 'xhigh', 'max'],
+    enum: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
   })
 })

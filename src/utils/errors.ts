@@ -1,4 +1,4 @@
-import { APIUserAbortError } from '@anthropic-ai/sdk'
+import { APIUserAbortError } from '../services/api/vexzy/errors.js'
 
 export class ClaudeError extends Error {
   constructor(message: string) {
@@ -57,16 +57,6 @@ export class ShellError extends Error {
   ) {
     super('Shell command failed')
     this.name = 'ShellError'
-  }
-}
-
-export class TeleportOperationError extends Error {
-  constructor(
-    message: string,
-    public readonly formattedMessage: string,
-  ) {
-    super(message)
-    this.name = 'TeleportOperationError'
   }
 }
 
@@ -204,8 +194,7 @@ export type AxiosErrorKind =
 /**
  * Classify a caught error from an axios request into one of a few buckets.
  * Replaces the ~20-line isAxiosError → 401/403 → ECONNABORTED → ECONNREFUSED
- * chain duplicated across sync-style services (settingsSync, policyLimits,
- * remoteManagedSettings, teamMemorySync).
+ * chain duplicated across sync-style services (settingsSync, policyLimits).
  *
  * Checks the `.isAxiosError` marker property directly (same as
  * axios.isAxiosError()) to keep this module dependency-free.

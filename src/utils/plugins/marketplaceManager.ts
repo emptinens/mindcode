@@ -23,7 +23,6 @@ import { writeFile } from 'fs/promises'
 import isEqual from 'lodash-es/isEqual.js'
 import memoize from 'lodash-es/memoize.js'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'path'
-import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
 import { logForDebugging } from '../debug.js'
 import { isEnvTruthy } from '../envUtils.js'
 import {
@@ -48,10 +47,7 @@ import {
   jsonStringify,
   writeFileSync_DEPRECATED,
 } from '../slowOperations.js'
-import {
-  getAddDirEnabledPlugins,
-  getAddDirExtraMarketplaces,
-} from './addDirPluginSettings.js'
+import { getAddDirExtraMarketplaces } from './addDirPluginSettings.js'
 import { markPluginVersionOrphaned } from './cacheUtils.js'
 import { classifyFetchError, logPluginFetch } from './fetchTelemetry.js'
 import { removeAllPluginsForMarketplace } from './installedPluginsManager.js'
@@ -63,11 +59,6 @@ import {
   isSourceAllowedByPolicy,
   isSourceInBlocklist,
 } from './marketplaceHelpers.js'
-import {
-  OFFICIAL_MARKETPLACE_NAME,
-  OFFICIAL_MARKETPLACE_SOURCE,
-} from './officialMarketplace.js'
-import { fetchOfficialMarketplaceFromGcs } from './officialMarketplaceGcs.js'
 import {
   deletePluginDataDir,
   getPluginSeedDirs,
@@ -131,61 +122,20 @@ export type KnownMarketplacesConfig = KnownMarketplacesFile
 /**
  * Declared marketplace entry (intent layer).
  *
- * Structurally compatible with settings `extraKnownMarketplaces` entries, but
- * adds `sourceIsFallback` for implicit built-in declarations. This is NOT a
- * settings-schema field — it's only ever set in code (never parsed from JSON).
+ * Structurally compatible with settings `extraKnownMarketplaces` entries.
  */
 export type DeclaredMarketplace = {
   source: MarketplaceSource
   installLocation?: string
   autoUpdate?: boolean
-  /**
-   * Presence suffices. When set, diffMarketplaces treats an already-materialized
-   * entry as upToDate regardless of source shape — never reports sourceChanged.
-   *
-   * Used for the implicit official-marketplace declaration: we want "clone from
-   * GitHub if missing", not "replace with GitHub if present under a different
-   * source". Without this, a seed dir that registers the official marketplace
-   * under e.g. an internal-mirror source would be stomped by a GitHub re-clone.
-   */
-  sourceIsFallback?: boolean
 }
 
 /**
  * Get declared marketplace intent from merged settings and --add-dir sources.
  * This is what SHOULD exist — used by the reconciler to find gaps.
- *
- * The official marketplace is implicitly declared with `sourceIsFallback: true`
- * when any enabled plugin references it.
  */
 export function getDeclaredMarketplaces(): Record<string, DeclaredMarketplace> {
-  const implicit: Record<string, DeclaredMarketplace> = {}
-
-  // Only the official marketplace can be implicitly declared — it's the one
-  // built-in source we know. Other marketplaces have no default source to inject.
-  // Explicitly-disabled entries (value: false) don't count.
-  const enabledPlugins = {
-    ...getAddDirEnabledPlugins(),
-    ...(getInitialSettings().enabledPlugins ?? {}),
-  }
-  for (const [pluginId, value] of Object.entries(enabledPlugins)) {
-    if (
-      value &&
-      parsePluginIdentifier(pluginId).marketplace === OFFICIAL_MARKETPLACE_NAME
-    ) {
-      implicit[OFFICIAL_MARKETPLACE_NAME] = {
-        source: OFFICIAL_MARKETPLACE_SOURCE,
-        sourceIsFallback: true,
-      }
-      break
-    }
-  }
-
-  // Lowest precedence: implicit < --add-dir < merged settings.
-  // An explicit extraKnownMarketplaces entry for claude-plugins-official
-  // in --add-dir or settings wins.
   return {
-    ...implicit,
     ...getAddDirExtraMarketplaces(),
     ...(getInitialSettings().extraKnownMarketplaces ?? {}),
   }
@@ -393,6 +343,12 @@ export async function registerSeedMarketplaces(): Promise<boolean> {
 
     for (const [name, seedEntry] of Object.entries(seedConfig)) {
       if (claimed.has(name)) continue
+      if (name.toLowerCase() === 'claude-plugins-official') {
+        logForDebugging(
+          `Skipping provider-owned marketplace '${name}' from seed registration`,
+        )
+        continue
+      }
 
       // Compute installLocation relative to THIS seedDir, not the build-time
       // path baked into the seed's JSON. Handles multi-stage Docker builds
@@ -2309,30 +2265,6 @@ export async function refreshAllMarketplaces(): Promise<void> {
     if (entry.source.source === 'settings') {
       continue
     }
-    // inc-5046: same GCS intercept as refreshMarketplace() — bulk update
-    // hits this path on `mindcode plugin marketplace update` (no name arg).
-    if (name === OFFICIAL_MARKETPLACE_NAME) {
-      const sha = await fetchOfficialMarketplaceFromGcs(
-        entry.installLocation,
-        getMarketplacesCacheDir(),
-      )
-      if (sha !== null) {
-        config[name]!.lastUpdated = new Date().toISOString()
-        continue
-      }
-      if (
-        !getFeatureValue_CACHED_MAY_BE_STALE(
-          'tengu_plugin_official_mkt_git_fallback',
-          true,
-        )
-      ) {
-        logForDebugging(
-          `Skipping official marketplace bulk refresh: GCS failed, git fallback disabled`,
-        )
-        continue
-      }
-      // fall through to git
-    }
     try {
       const { cachePath } = await loadAndCacheMarketplace(entry.source)
       config[name]!.lastUpdated = new Date().toISOString()
@@ -2423,44 +2355,6 @@ export async function refreshMarketplace(
             `Run: mindcode plugin marketplace remove "${name}" and re-add it.`,
         )
       }
-    }
-
-    // inc-5046: official marketplace fetches from a GCS mirror instead of
-    // git-cloning GitHub. Special-cased by NAME (not a new source type) so
-    // no data migration is needed — existing known_marketplaces.json entries
-    // still say source:'github', which is true (GCS is a mirror).
-    if (name === OFFICIAL_MARKETPLACE_NAME) {
-      const sha = await fetchOfficialMarketplaceFromGcs(
-        installLocation,
-        getMarketplacesCacheDir(),
-      )
-      if (sha !== null) {
-        config[name] = { ...entry, lastUpdated: new Date().toISOString() }
-        await saveKnownMarketplacesConfig(config)
-        return
-      }
-      // GCS failed — fall through to git ONLY if the kill-switch allows.
-      // Default true (backend write perms are pending as of inc-5046); flip
-      // to false via GrowthBook once the backend is confirmed live so new
-      // clients NEVER hit GitHub for the official marketplace.
-      if (
-        !getFeatureValue_CACHED_MAY_BE_STALE(
-          'tengu_plugin_official_mkt_git_fallback',
-          true,
-        )
-      ) {
-        // Throw, don't return — every other failure path in this function
-        // throws, and callers like ManageMarketplaces.tsx:259 increment
-        // updatedCount on any non-throwing return. A silent return would
-        // report "Updated 1 marketplace" when nothing was refreshed.
-        throw new Error(
-          'Official marketplace GCS fetch failed and git fallback is disabled',
-        )
-      }
-      logForDebugging('Official marketplace GCS failed; falling back to git', {
-        level: 'warn',
-      })
-      // ...falls through to source.source === 'github' branch below
     }
 
     // Update based on source type

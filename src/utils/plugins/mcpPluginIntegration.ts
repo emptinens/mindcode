@@ -26,6 +26,7 @@ import {
   substitutePluginVariables,
   substituteUserConfigVariables,
 } from './pluginOptionsStorage.js'
+import { evaluateMindCodePluginPolicy } from './mindcodePluginPolicy.js'
 
 /**
  * Load MCP servers from an MCPB file
@@ -547,11 +548,10 @@ export function resolvePluginMcpEnvironment(
       break
     }
 
-    // For other types (sse-ide, ws-ide, sdk, claudeai-proxy), pass through unchanged
+    // For other internal types (sse-ide, ws-ide, sdk), pass through unchanged
     case 'sse-ide':
     case 'ws-ide':
     case 'sdk':
-    case 'claudeai-proxy':
       resolved = config
       break
   }
@@ -591,6 +591,17 @@ export async function getPluginMcpServers(
   errors: PluginError[] = [],
 ): Promise<Record<string, ScopedMcpServerConfig> | undefined> {
   if (!plugin.enabled) {
+    return undefined
+  }
+
+  // Defense in depth for callers that obtain a LoadedPlugin without going
+  // through pluginLoader's startup filter.
+  const policy = evaluateMindCodePluginPolicy(plugin.name)
+  if (!policy.allowed) {
+    logForDebugging(
+      `MindCode MCP policy blocked plugin "${plugin.name}": ${policy.reason}`,
+      { level: 'warn' },
+    )
     return undefined
   }
 

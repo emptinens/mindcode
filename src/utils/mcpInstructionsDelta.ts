@@ -18,8 +18,7 @@ export type McpInstructionsDelta = {
 /**
  * Client-authored instruction block to announce when a server connects,
  * in addition to (or instead of) the server's own `InitializeResult.instructions`.
- * Lets first-party servers (e.g., claude-in-chrome) carry client-side
- * context the server itself doesn't know about.
+ * Lets first-party servers carry client-side context the server itself doesn't know about.
  */
 export type ClientSideInstruction = {
   serverName: string
@@ -55,7 +54,7 @@ export function isMcpInstructionsDeltaEnabled(): boolean {
 export function getMcpInstructionsDelta(
   mcpClients: MCPServerConnection[],
   messages: Message[],
-  clientSideInstructions: ClientSideInstruction[],
+  clientSideInstructions: ClientSideInstruction[] = [],
 ): McpInstructionsDelta | null {
   const announced = new Set<string>()
   let attachmentCount = 0

@@ -704,11 +704,11 @@ export const SettingsSchema = lazySchema(() =>
             'enabled automatically for supported models.',
         ),
       effortLevel: z
-        .enum(['low', 'medium', 'high', 'xhigh', 'max'])
+        .enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'auto'])
         .optional()
         .catch(undefined)
         .describe(
-          'Persisted effort level for supported models, including VEXZY max effort.',
+          'Persisted VEXZY Leader reasoning override.',
         ),
       advisorModel: z
         .string()
@@ -882,7 +882,7 @@ export const SettingsSchema = lazySchema(() =>
               .string()
               .optional()
               .describe(
-                'Display name for the assistant, shown in the claude.ai session list',
+                'Display name for the assistant, shown in the MindCode session list',
               ),
           }
         : {}),

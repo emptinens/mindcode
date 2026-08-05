@@ -1,5 +1,5 @@
 import { feature } from 'bun:bundle'
-import type { BetaMessageStreamParams } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
+import type { BetaMessageStreamParams } from '../services/api/vexzy/protocolTypes.js'
 import { readdir, readFile, stat } from 'fs/promises'
 import memoize from 'lodash-es/memoize.js'
 import { join } from 'path'
@@ -16,7 +16,6 @@ import {
 } from '../types/logs.js'
 import { CACHE_PATHS } from './cachePaths.js'
 import { stripDisplayTags, stripDisplayTagsAllowEmpty } from './displayTags.js'
-import { isEnvTruthy } from './envUtils.js'
 import { toError } from './errors.js'
 import { isEssentialTrafficOnly } from './privacyLevel.js'
 import { jsonParse } from './slowOperations.js'
@@ -165,14 +164,7 @@ export function logError(error: unknown): void {
   }
   try {
     // Check if error reporting should be disabled
-    if (
-      // Cloud providers (Bedrock/Vertex/Foundry) always disable features
-      isEnvTruthy(process.env.MINDCODE_USE_BEDROCK) ||
-      isEnvTruthy(process.env.MINDCODE_USE_VERTEX) ||
-      isEnvTruthy(process.env.MINDCODE_USE_FOUNDRY) ||
-      process.env.DISABLE_ERROR_REPORTING ||
-      isEssentialTrafficOnly()
-    ) {
+    if (process.env.DISABLE_ERROR_REPORTING || isEssentialTrafficOnly()) {
       return
     }
 

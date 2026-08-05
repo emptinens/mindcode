@@ -12,7 +12,6 @@ import {
   getContextWindowForModel,
 } from '../../utils/context.js'
 import { formatResetTime, formatTokens } from '../../utils/format.js'
-import { getActiveEntry } from '../../utils/multiAccount.js'
 import { getCurrentUsage } from '../../utils/tokens.js'
 import { ProgressBar } from '../design-system/ProgressBar.js'
 
@@ -78,9 +77,7 @@ function PromptInputUsageBarsInner({
 
   const rawUtilization = getRawUtilization()
   const fiveHourLimit = rawUtilization.five_hour
-  const activeEntry = getActiveEntry()
-  const shouldShowFiveHourLimit =
-    !activeEntry || activeEntry.type === 'claude'
+  const shouldShowFiveHourLimit = true
 
   const barWidth = Math.max(10, Math.min(columns >= 120 ? 24 : 18, columns - 48))
   const contextUsedPercentage = contextPercentages.used ?? 0

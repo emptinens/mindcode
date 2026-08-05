@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import suppliedModels from './fixtures/models-supplied.json' with { type: 'json' }
 import {
   VEXZY_FIXED_WORKER_MODEL,
   VEXZY_OUTPUT_LIMIT_OVERRIDES,
@@ -38,7 +39,83 @@ const liveMaintenanceOpus = {
   maintenance_metadata: { reason: 'scheduled' },
 }
 
+
+
+const suppliedModelIds = [
+  'claude-fable-5',
+  'claude-opus-4-6',
+  'claude-opus-4-7',
+  'claude-opus-4-8',
+  'claude-opus-5',
+  'claude-sonnet-4-6',
+  'claude-sonnet-5',
+  'deepseek-v3.1',
+  'deepseek-v4-flash',
+  'deepseek-v4-pro',
+  'gemini-2.5-flash',
+  'gemini-2.5-pro',
+  'gemini-3.1-pro-preview',
+  'gemini-3.5-flash',
+  'gemini-3.5-flash-lite',
+  'gemini-3.6-flash',
+  'glm-5.1',
+  'glm-5.2',
+  'gpt-5.5',
+  'gpt-5.5-pro',
+  'gpt-5.6-luna',
+  'gpt-5.6-sol',
+  'gpt-5.6-terra',
+  'grok-4.5',
+  'grok-build-0.1',
+  'kimi-k2.6',
+  'kimi-k2.7-code',
+  'kimi-k3',
+  'minimax-m2.5',
+  'minimax-m2.7',
+  'minimax-m3',
+  'qwen-3.6-plus',
+  'qwen-3.7-plus',
+] as const
+
+const suppliedRegistry = createVexzyModelRegistry(suppliedModels)
+
 describe('Vexzy model registry', () => {
+  test('matches all exact supplied VEXZY model IDs and provider availability', () => {
+    expect(suppliedModels.data).toHaveLength(33)
+    expect(suppliedModels.data.map(model => model.id)).toEqual([...suppliedModelIds])
+    expect(suppliedRegistry.models.map(model => model.id)).toEqual([...suppliedModelIds])
+
+    for (const model of suppliedModels.data) {
+      const normalized = suppliedRegistry.get(model.id)
+      expect(normalized).toBeDefined()
+      expect(normalized?.available).toBe(model.available)
+      expect(normalized?.status).toBe(model.status)
+      expect(normalized?.contextLength).toBe(model.context_length)
+      expect(normalized?.reasoningEfforts).toEqual(model.supported_reasoning_efforts)
+      expect(normalized?.inputModalities).toEqual(model.input_modalities)
+      expect(normalized?.outputModalities).toEqual(model.output_modalities)
+      expect(normalized?.capabilities).toEqual(model.capabilities)
+    }
+  })
+
+  test('keeps fixed Luna resolution and output limits from the supplied contract', () => {
+    const luna = getVexzyWorkerModel(suppliedRegistry)
+    expect(luna).toMatchObject({
+      id: 'gpt-5.6-luna',
+      available: true,
+      status: 'available',
+      context: 1_050_000,
+      contextLength: 1_050_000,
+      outputLimit: 128_000,
+      reasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      inputModalities: ['text', 'image', 'file'],
+      outputModalities: ['text'],
+    })
+    expect(luna?.raw.capabilities).toEqual({ reasoning: true, tools: true, vision: true })
+    expect(getVexzyModel(suppliedRegistry, 'claude-opus-5')?.availability).toBe('unavailable')
+    expect(getVexzyModel(suppliedRegistry, 'grok-build-0.1')?.reasoningEfforts).toEqual(['auto'])
+  })
+
   test('parses the verified live Luna and maintenance Opus wire entries', () => {
     const registry = createVexzyModelRegistry({
       object: 'list',

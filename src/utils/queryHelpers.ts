@@ -1,4 +1,4 @@
-import type { ToolUseBlock } from '@anthropic-ai/sdk/resources/index.mjs'
+import type { ToolUseBlock } from '../services/api/vexzy/protocolTypes.js'
 import last from 'lodash-es/last.js'
 import {
   getSessionId,

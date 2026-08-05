@@ -5,7 +5,6 @@
 
 import React from 'react'
 import {
-  getChromeFlagOverride,
   getFlagSettingsPath,
   getInlinePlugins,
   getMainLoopModelOverride,
@@ -24,7 +23,6 @@ import { logForDebugging } from '../../utils/debug.js'
 import { errorMessage } from '../../utils/errors.js'
 import { execFileNoThrow } from '../../utils/execFileNoThrow.js'
 import type { PermissionMode } from '../../utils/permissions/PermissionMode.js'
-import type { EffortValue } from '../../utils/effort.js'
 import { isTmuxAvailable } from '../../utils/swarm/backends/detection.js'
 import {
   detectAndGetBackend,
@@ -35,7 +33,11 @@ import {
 } from '../../utils/swarm/backends/registry.js'
 import { createPaneBackendExecutor } from '../../utils/swarm/backends/PaneBackendExecutor.js'
 import { getTeammateModeFromSnapshot } from '../../utils/swarm/backends/teammateModeSnapshot.js'
-import type { BackendType } from '../../utils/swarm/backends/types.js'
+import {
+  resolveWorkerEffort,
+  type BackendType,
+  type WorkerEffortInput,
+} from '../../utils/swarm/backends/types.js'
 import { isPaneBackend } from '../../utils/swarm/backends/types.js'
 import {
   getSwarmSocketName,
@@ -111,8 +113,8 @@ export type SpawnTeammateConfig = {
   use_splitpane?: boolean
   plan_mode_required?: boolean
   model?: string
-  /** Per-worker effort; omitted values inherit the leader's current effort. */
-  effort?: EffortValue
+  /** Per-worker effort; omitted values resolve to medium, never Leader effort. */
+  effort?: WorkerEffortInput
   agent_type?: string
   description?: string
   /** request_id of the API call whose response contained the tool_use that
@@ -130,7 +132,7 @@ type SpawnInput = {
   use_splitpane?: boolean
   plan_mode_required?: boolean
   model?: string
-  effort?: EffortValue
+  effort?: WorkerEffortInput
   agent_type?: string
   description?: string
   invokingRequestId?: string
@@ -242,13 +244,6 @@ function buildInheritedCliFlags(options?: {
     flags.push(`--plugin-dir ${quote([pluginDir])}`)
   }
 
-  // Propagate --chrome / --no-chrome if explicitly set on the CLI
-  const chromeFlagOverride = getChromeFlagOverride()
-  if (chromeFlagOverride === true) {
-    flags.push('--chrome')
-  } else if (chromeFlagOverride === false) {
-    flags.push('--no-chrome')
-  }
 
   return flags.join(' ')
 }
@@ -305,7 +300,7 @@ async function handleSpawnSplitPane(
   // Resolve model: 'inherit' → leader's model; undefined → default Opus
   const appState = getAppState()
   const model = resolveTeammateModel(input.model, appState.mainLoopModel)
-  const effort = input.effort ?? appState.effortValue
+  const effort = resolveWorkerEffort(input.effort)
 
   if (!name || !prompt) {
     throw new Error('name and prompt are required for spawn operation')
@@ -500,7 +495,7 @@ async function handleSpawnSeparateWindow(
   // Resolve model: 'inherit' → leader's model; undefined → default Opus
   const appState = getAppState()
   const model = resolveTeammateModel(input.model, appState.mainLoopModel)
-  const effort = input.effort ?? appState.effortValue
+  const effort = resolveWorkerEffort(input.effort)
 
   if (!name || !prompt) {
     throw new Error('name and prompt are required for spawn operation')
@@ -535,10 +530,10 @@ async function handleSpawnSeparateWindow(
 
   // Acquire before creating the external window. The executor then owns the
   // lease after tracking and releases it on pane/process termination.
-  const workerLease = await acquireSwarmWorkerSlot(
-    teamName,
-    context.abortController.signal,
-  )
+  const workerLease = await acquireSwarmWorkerSlot(teamName, {
+    effort,
+    signal: context.abortController.signal,
+  })
   const paneExecutor = createPaneBackendExecutor(getBackendByType('tmux'))
   paneExecutor.setContext(context)
   let paneId = ''
@@ -834,7 +829,7 @@ async function handleSpawnInProcess(
   // Resolve model: 'inherit' → leader's model; undefined → default Opus
   const appState = getAppState()
   const model = resolveTeammateModel(input.model, appState.mainLoopModel)
-  const effort = input.effort ?? appState.effortValue
+  const effort = resolveWorkerEffort(input.effort)
 
   if (!name || !prompt) {
     throw new Error('name and prompt are required for spawn operation')

@@ -1,17 +1,15 @@
-export type CoreEffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export type CoreEffortLevel =
+  | 'none'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max'
+  | 'auto'
 export type CoreEffortValue = CoreEffortLevel | number
 
-function isVexzyModel(model: string): boolean {
-  const normalized = model.trim().toLowerCase().replace(/\[1m\]$/i, '')
-  return (
-    normalized.startsWith('gpt-5.6-') ||
-    normalized === 'claude-opus-5' ||
-    normalized === 'claude-sonnet-5'
-  )
-}
-
 export function modelSupportsMaxEffortCore(model: string): boolean {
-  if (isVexzyModel(model)) return true
   const normalized = model.toLowerCase()
   return (
     normalized.includes('opus-5') ||
@@ -22,7 +20,6 @@ export function modelSupportsMaxEffortCore(model: string): boolean {
 }
 
 export function modelSupportsXhighEffortCore(model: string): boolean {
-  if (isVexzyModel(model)) return true
   const normalized = model.toLowerCase()
   return (
     normalized.includes('opus-4-7') ||
@@ -44,10 +41,13 @@ export function resolveAppliedEffort(
 
 export function isPersistableEffort(value: unknown): value is CoreEffortLevel {
   return (
+    value === 'none' ||
+    value === 'minimal' ||
     value === 'low' ||
     value === 'medium' ||
     value === 'high' ||
     value === 'xhigh' ||
-    value === 'max'
+    value === 'max' ||
+    value === 'auto'
   )
 }

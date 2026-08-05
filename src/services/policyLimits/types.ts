@@ -2,8 +2,7 @@ import { z } from 'zod/v4'
 import { lazySchema } from '../../utils/lazySchema.js'
 
 /**
- * Schema for the policy limits API response
- * Only blocked policies are included. If a policy key is absent, it's allowed.
+ * Historical policy shape retained for local compatibility callers.
  */
 export const PolicyLimitsResponseSchema = lazySchema(() =>
   z.object({

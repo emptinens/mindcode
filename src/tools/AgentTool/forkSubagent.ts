@@ -1,5 +1,5 @@
 import { feature } from 'bun:bundle'
-import type { BetaToolUseBlock } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
+import type { BetaToolUseBlock } from 'src/services/api/vexzy/protocolTypes.js'
 import { randomUUID } from 'crypto'
 import { getIsNonInteractiveSession } from '../../bootstrap/state.js'
 import {
@@ -51,8 +51,8 @@ export const FORK_SUBAGENT_TYPE = 'fork'
  * prefixes). `permissionMode: 'bubble'` surfaces permission prompts to the
  * parent terminal. The model field is explicit metadata; getAgentModel
  * enforces the same Luna route as every other non-swarm AgentTool worker.
- * Fork effort follows the same optional per-worker override and leader-state
- * fallback as ordinary AgentTool calls.
+ * Fork effort follows the same per-worker resolution as ordinary AgentTool
+ * calls; omitted effort defaults to medium and never inherits Leader state.
  *
  * The getSystemPrompt here is unused: the fork path passes
  * `override.systemPrompt` with the parent's already-rendered system prompt

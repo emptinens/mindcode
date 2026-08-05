@@ -89,6 +89,7 @@ import { classifyFetchError, logPluginFetch } from './fetchTelemetry.js'
 import { checkGitAvailable } from './gitAvailability.js'
 import { getInMemoryInstalledPlugins } from './installedPluginsManager.js'
 import { getManagedPluginNames } from './managedPlugins.js'
+import { evaluateMindCodePluginPolicy } from './mindcodePluginPolicy.js'
 import {
   formatSourceForDisplay,
   getBlockedMarketplaces,
@@ -1903,7 +1904,7 @@ async function loadPluginsFromMarketplaces({
   const errors: PluginError[] = []
 
   // Filter to plugin@marketplace format and validate
-  const marketplacePluginEntries = Object.entries(enabledPlugins).filter(
+  const configuredMarketplaceEntries = Object.entries(enabledPlugins).filter(
     ([key, value]) => {
       // Check if it's in plugin@marketplace format (includes both enabled and disabled)
       const isValidFormat = PluginIdSchema().safeParse(key).success
@@ -1911,6 +1912,27 @@ async function loadPluginsFromMarketplaces({
       // Skip built-in plugins — handled separately by getBuiltinPlugins()
       const { marketplace } = parsePluginIdentifier(key)
       return marketplace !== BUILTIN_MARKETPLACE_NAME
+    },
+  )
+
+  // MindCode is VEXZY-only and only these plugin families are loaded by
+  // default. Do this before marketplace catalog/cache work so disallowed
+  // plugins cannot trigger network or component loading.
+  const marketplacePluginEntries = configuredMarketplaceEntries.filter(
+    ([pluginId]) => {
+      const decision = evaluateMindCodePluginPolicy(pluginId)
+      if (decision.allowed) return true
+      errors.push({
+        type: 'generic-error',
+        source: pluginId,
+        plugin: pluginId.split('@')[0],
+        error: `MindCode plugin policy blocked "${pluginId}": ${decision.reason}`,
+      })
+      logForDebugging(
+        `MindCode plugin policy blocked "${pluginId}": ${decision.reason}`,
+        { level: 'warn' },
+      )
+      return false
     },
   )
 
@@ -3171,19 +3193,41 @@ async function assemblePluginLoadResult(
   // 3. Load built-in plugins that ship with the CLI
   const builtinResult = getBuiltinPlugins()
 
+  const policyErrors: PluginError[] = []
+  const applyMindCodePolicy = (plugins: LoadedPlugin[]): LoadedPlugin[] =>
+    plugins.filter(plugin => {
+      const decision = evaluateMindCodePluginPolicy(plugin.name)
+      if (decision.allowed) return true
+      policyErrors.push({
+        type: 'generic-error',
+        source: plugin.source,
+        plugin: plugin.name,
+        error: `MindCode plugin policy blocked "${plugin.name}" (${plugin.source}): ${decision.reason}`,
+      })
+      logForDebugging(
+        `MindCode plugin policy blocked "${plugin.name}" (${plugin.source}): ${decision.reason}`,
+        { level: 'warn' },
+      )
+      return false
+    })
+
   // Session plugins (--plugin-dir) override installed ones by name,
   // UNLESS the installed plugin is locked by managed settings
   // (policySettings). See mergePluginSources() for details.
   const { plugins: allPlugins, errors: mergeErrors } = mergePluginSources({
-    session: sessionResult.plugins,
-    marketplace: marketplaceResult.plugins,
-    builtin: [...builtinResult.enabled, ...builtinResult.disabled],
+    session: applyMindCodePolicy(sessionResult.plugins),
+    marketplace: applyMindCodePolicy(marketplaceResult.plugins),
+    builtin: applyMindCodePolicy([
+      ...builtinResult.enabled,
+      ...builtinResult.disabled,
+    ]),
     managedNames: getManagedPluginNames(),
   })
   const allErrors = [
     ...marketplaceResult.errors,
     ...sessionResult.errors,
     ...mergeErrors,
+    ...policyErrors,
   ]
 
   // Verify dependencies. Runs AFTER the parallel load — deps are presence

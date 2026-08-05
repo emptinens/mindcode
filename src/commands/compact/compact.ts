@@ -17,6 +17,10 @@ import { suppressCompactWarning } from '../../services/compact/compactWarningSta
 import { microcompactMessages } from '../../services/compact/microCompact.js'
 import { runPostCompactCleanup } from '../../services/compact/postCompactCleanup.js'
 import { trySessionMemoryCompaction } from '../../services/compact/sessionMemoryCompact.js'
+import {
+  CompactTimeoutError,
+  createCompactWatchdog,
+} from '../../services/compact/compactWatchdog.js'
 import { setLastSummarizedMessageId } from '../../services/SessionMemory/sessionMemoryUtils.js'
 import type { ToolUseContext } from '../../Tool.js'
 import type { LocalCommandCall } from '../../types/command.js'
@@ -37,9 +41,8 @@ const reactiveCompact = feature('REACTIVE_COMPACT')
   : null
 /* eslint-enable @typescript-eslint/no-require-imports */
 
-export const call: LocalCommandCall = async (args, context) => {
-  const { abortController } = context
-  let { messages } = context
+export const call: LocalCommandCall = async (args, parentContext) => {
+  let { messages } = parentContext
 
   // REPL keeps snipped messages for UI scrollback — project so the compact
   // model doesn't summarize content that was intentionally removed.
@@ -49,17 +52,44 @@ export const call: LocalCommandCall = async (args, context) => {
     throw new Error('No messages to compact')
   }
 
+  let watchdog = createCompactWatchdog(parentContext.abortController)
+  let context = {
+    ...parentContext,
+    abortController: watchdog.controller,
+  }
+
   const customInstructions = args.trim()
 
   try {
     // Try session memory compaction first if no custom instructions
     // (session memory compaction doesn't support custom instructions)
     if (!customInstructions) {
-      const sessionMemoryResult = await trySessionMemoryCompaction(
-        messages,
-        context.agentId,
-      )
+      let sessionMemoryResult: CompactionResult | null = null
+      try {
+        sessionMemoryResult = await watchdog.guard(
+          trySessionMemoryCompaction(messages, context.agentId),
+        )
+      } catch (error) {
+        // Session-memory compaction is an optimization. A failed or timed-out
+        // attempt must not make manual /compact unusable; continue through the
+        // traditional summarizer. A timed-out watchdog child is aborted, so
+        // create a fresh child scope for the fallback path.
+        if (parentContext.abortController.signal.aborted) throw error
+        logError(error)
+        if (watchdog.controller.signal.aborted) {
+          watchdog.dispose()
+          watchdog = createCompactWatchdog(parentContext.abortController)
+          context = {
+            ...parentContext,
+            abortController: watchdog.controller,
+          }
+        }
+      }
       if (sessionMemoryResult) {
+        // Session-memory compaction replaces the summarized message range.
+        // Clear the cursor just like the traditional and auto-compact paths;
+        // retaining it makes the next manual /compact target a stale UUID.
+        setLastSummarizedMessageId(undefined)
         getUserContext.cache.clear?.()
         runPostCompactCleanup()
         // Reset cache read baseline so the post-compact drop isn't flagged
@@ -85,26 +115,34 @@ export const call: LocalCommandCall = async (args, context) => {
     // Reactive-only mode: route /compact through the reactive path.
     // Checked after session-memory (that path is cheap and orthogonal).
     if (reactiveCompact?.isReactiveOnlyMode()) {
-      return await compactViaReactive(
-        messages,
-        context,
-        customInstructions,
-        reactiveCompact,
+      return await watchdog.guard(
+        compactViaReactive(
+          messages,
+          context,
+          customInstructions,
+          reactiveCompact,
+        ),
       )
     }
 
     // Fall back to traditional compaction
     // Run microcompact first to reduce tokens before summarization
-    const microcompactResult = await microcompactMessages(messages, context)
+    const microcompactResult = await watchdog.guard(
+      microcompactMessages(messages, context),
+    )
     const messagesForCompact = microcompactResult.messages
 
-    const result = await compactConversation(
-      messagesForCompact,
-      context,
-      await getCacheSharingParams(context, messagesForCompact),
-      false,
-      customInstructions,
-      false,
+    const result = await watchdog.guard(
+      compactConversation(
+        messagesForCompact,
+        context,
+        await watchdog.guard(
+          getCacheSharingParams(context, messagesForCompact),
+        ),
+        false,
+        customInstructions,
+        false,
+      ),
     )
 
     // Reset lastSummarizedMessageId since legacy compaction replaces all messages
@@ -123,7 +161,13 @@ export const call: LocalCommandCall = async (args, context) => {
       displayText: buildDisplayText(context, result.userDisplayMessage),
     }
   } catch (error) {
-    if (abortController.signal.aborted) {
+    if (error instanceof CompactTimeoutError) {
+      throw new Error(error.message)
+    }
+    if (
+      parentContext.abortController.signal.aborted ||
+      context.abortController.signal.aborted
+    ) {
       throw new Error('Compaction canceled.')
     }
     if (hasExactErrorMessage(error, ERROR_MESSAGE_NOT_ENOUGH_MESSAGES)) {
@@ -134,6 +178,8 @@ export const call: LocalCommandCall = async (args, context) => {
     }
     logError(error)
     throw new Error(`Error during compaction: ${error}`)
+  } finally {
+    watchdog.dispose()
   }
 }
 
