@@ -28,7 +28,7 @@ Use this tool proactively in these scenarios:
 - After receiving new instructions - Immediately capture user requirements as tasks
 - Independent workstreams - Create one task per independently executable research, implementation, or verification stream and delegate them to workers when available
 - Adaptive parallelism - Run independent tasks concurrently as needed, while preserving dependency order and avoiding concurrent writes to the same files
-- When you start working on a task - Mark it as in_progress BEFORE beginning work
+- When you start working on a task - mark it as claimed/running BEFORE beginning work
 - After completing a task - Mark it as completed and add any new follow-up tasks discovered during implementation
 
 ## When NOT to Use This Tool
@@ -45,7 +45,7 @@ NOTE that you should not use this tool if there is only one trivial task to do. 
 
 - **subject**: A brief, actionable title in imperative form (e.g., "Fix authentication bug in login flow")
 - **description**: What needs to be done
-- **activeForm** (optional): Present continuous form shown in the spinner when the task is in_progress (e.g., "Fixing authentication bug"). If omitted, the spinner shows the subject instead.
+- **activeForm** (optional): Present continuous form shown in the spinner when the task is running (e.g., "Fixing authentication bug"). If omitted, the spinner shows the subject instead.
 
 All tasks are created with status \`pending\`.
 

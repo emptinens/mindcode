@@ -5,6 +5,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import esbuild from 'esbuild'
+import { stripBareCommonJsEnvironmentProbes } from './bun-esm-compat.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const outdir = path.join(root, 'dist')
@@ -171,71 +172,13 @@ const nativeShimPlugin = {
     build.onResolve(
       {
         filter:
-          /^(?:@ant\/|@anthropic-ai\/(?:bedrock-sdk|foundry-sdk|vertex-sdk|mcpb|sandbox-runtime)$|audio-capture-napi$|modifiers-napi$|sharp$)/,
+          /^(?:@ant\/|@anthropic-ai\/(?:bedrock-sdk|foundry-sdk|vertex-sdk)$|audio-capture-napi$|modifiers-napi$|sharp$)/,
       },
       args => ({
         path: args.path,
-        namespace:
-          args.path === '@anthropic-ai/sandbox-runtime'
-            ? 'sandbox-runtime-shim'
-            : args.path === '@ant/claude-for-chrome-mcp'
-              ? 'chrome-mcp-shim'
-            : 'missing-package',
+        namespace: 'missing-package',
       }),
     )
-    build.onLoad({ filter: /.*/, namespace: 'sandbox-runtime-shim' }, () => ({
-      loader: 'js',
-      contents: `
-export class SandboxViolationStore {
-  getRecentViolations() { return [] }
-  getViolationCount() { return 0 }
-  getTotalCount() { return 0 }
-  subscribe(_cb) { return () => {} }
-  clear() {}
-}
-
-const emptyStore = new SandboxViolationStore()
-
-export const SandboxRuntimeConfigSchema = {
-  parse(value) { return value },
-  safeParse(value) { return { success: true, data: value } },
-}
-
-export const SandboxManager = {
-  checkDependencies() { return { errors: [], warnings: [] } },
-  isSupportedPlatform() { return false },
-  async initialize() {},
-  updateConfig() {},
-  async reset() {},
-  getFsReadConfig() { return { allowed: [], denied: [] } },
-  getFsWriteConfig() { return { allowOnly: [], denyWithinAllow: [] } },
-  getNetworkRestrictionConfig() { return { allowed: [], denied: [] } },
-  getIgnoreViolations() { return undefined },
-  getAllowUnixSockets() { return undefined },
-  getAllowLocalBinding() { return undefined },
-  getEnableWeakerNestedSandbox() { return undefined },
-  getProxyPort() { return undefined },
-  getSocksProxyPort() { return undefined },
-  getLinuxHttpSocketPath() { return undefined },
-  getLinuxSocksSocketPath() { return undefined },
-  async waitForNetworkInitialization() { return false },
-  getSandboxViolationStore() { return emptyStore },
-  annotateStderrWithSandboxFailures(_command, stderr) { return stderr },
-  cleanupAfterCommand() {},
-  async wrapWithSandbox(command) { return command },
-}
-`,
-    }))
-    build.onLoad({ filter: /.*/, namespace: 'chrome-mcp-shim' }, () => ({
-      loader: 'js',
-      contents: `
-export const BROWSER_TOOLS = []
-export function createClaudeForChromeMcpServer() {
-  return { async connect() {} }
-}
-export default { BROWSER_TOOLS, createClaudeForChromeMcpServer }
-`,
-    }))
     build.onLoad({ filter: /.*/, namespace: 'missing-package' }, () => ({
       loader: 'js',
       contents: `
@@ -272,7 +215,7 @@ const options = {
   minify,
   sourcemap: false,
   banner: {
-    js: `#!/usr/bin/env node
+    js: `#!/usr/bin/env bun
 import { createRequire as __createRequire } from "node:module";
 const require = __createRequire(import.meta.url);
 const MACRO = {
@@ -290,6 +233,7 @@ const MACRO = {
     'MACRO.BUILD_TIME': JSON.stringify(new Date().toISOString()),
   },
   external: [
+    'bun:sqlite',
     'node-pty',
     'bun-pty',
     'ssh2',
@@ -331,11 +275,12 @@ if (watch) {
   // Fix bun's CJS detection: bun scans for bare `module` and `exports` tokens
   // and treats the file as CJS regardless of .mjs or package.json type.
   // These come from lodash/UMD environment detection which is dead code in ESM.
-  // Replace `typeof exports == "object"` with `typeof undefined == "object"` (always false)
-  // and `typeof module == "object"` with `typeof undefined == "object"` (always false)
-  code = code.replace(/typeof exports == "object"/g, 'typeof undefined == "object"')
-  code = code.replace(/typeof exports === "object"/g, 'typeof undefined === "object"')
-  code = code.replace(/typeof module == "object"/g, 'typeof undefined == "object"')
+  // Remove complete lodash/UMD probes before replacing their `typeof` guards.
+  // Production minification renames freeExports/freeModule and strips spaces,
+  // so matching those source-level names is not reliable. Leaving the trailing
+  // bare `exports` or `module` identifiers makes Bun classify this ESM bundle
+  // as CommonJS and reject the banner's import statement.
+  code = stripBareCommonJsEnvironmentProbes(code)
   code = code.replace(/typeof module !== "undefined"/g, 'typeof undefined !== "undefined"')
   code = code.replace(/typeof module2 !== "undefined"/g, 'typeof undefined !== "undefined"')
   // esbuild's __commonJS helper: rewrite to avoid bare `exports` token
@@ -352,7 +297,7 @@ if (watch) {
   // Compile to executables using bun --compile (cross-compilation)
   // Copy to a neutral path first so bun doesn't embed the user's home dir as __filename
   const { execSync } = await import('node:child_process')
-  const tmpDir = path.join(import.meta.dirname, '.tmp')
+  const tmpDir = path.join(import.meta.dirname, '.tmp', String(process.pid))
   await mkdir(tmpDir, { recursive: true })
   const tmpFile = path.join(tmpDir, 'mindcode.js')
   await writeFile(tmpFile, code)
@@ -455,6 +400,6 @@ if (watch) {
     src = src.replace(/\brequire\("\.\.\/rust\//g, 'nativeRequire("../rust/')
     await wf(wreqLoader, src)
   }
-  const { unlink } = await import('node:fs/promises')
-  await unlink(tmpFile)
+  const { rm } = await import('node:fs/promises')
+  await rm(tmpDir, { recursive: true, force: true })
 }

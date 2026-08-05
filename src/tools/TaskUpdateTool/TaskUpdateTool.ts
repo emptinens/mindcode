@@ -62,6 +62,14 @@ const inputSchema = lazySchema(() => {
       .describe(
         'Metadata keys to merge into the task. Set a key to null to delete it.',
       ),
+    effort: z
+      .enum(['none', 'low', 'medium', 'high', 'xhigh', 'max'])
+      .optional()
+      .describe('Per-agent reasoning effort assigned by the leader'),
+    files_touched: z.array(z.string()).optional(),
+    read_set: z.array(z.string()).optional(),
+    write_set: z.array(z.string()).optional(),
+    isolation: z.enum(['shared', 'worktree']).optional(),
   })
 })
 type InputSchema = ReturnType<typeof inputSchema>
@@ -131,6 +139,11 @@ export const TaskUpdateTool = buildTool({
       addBlocks,
       addBlockedBy,
       metadata,
+      effort,
+      files_touched,
+      read_set,
+      write_set,
+      isolation,
     },
     context,
   ) {
@@ -187,7 +200,7 @@ export const TaskUpdateTool = buildTool({
     // todo items to teammates for showing activity status.
     if (
       isAgentSwarmsEnabled() &&
-      status === 'in_progress' &&
+      (status === 'in_progress' || status === 'running' || status === 'claimed') &&
       owner === undefined &&
       !existingTask.owner
     ) {
@@ -207,6 +220,17 @@ export const TaskUpdateTool = buildTool({
         }
       }
       updates.metadata = merged
+      updatedFields.push('metadata')
+    }
+    const structuralMetadata = {
+      ...(effort === undefined ? {} : { effort }),
+      ...(files_touched === undefined ? {} : { files_touched }),
+      ...(read_set === undefined ? {} : { read_set }),
+      ...(write_set === undefined ? {} : { write_set }),
+      ...(isolation === undefined ? {} : { isolation }),
+    }
+    if (Object.keys(structuralMetadata).length > 0) {
+      updates.metadata = { ...(updates.metadata ?? existingTask.metadata ?? {}), ...structuralMetadata }
       updatedFields.push('metadata')
     }
     if (status !== undefined) {

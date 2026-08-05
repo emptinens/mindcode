@@ -11,7 +11,7 @@ export const PROMPT = `Use this tool to update a task in the task list.
 - After resolving, call TaskList to find your next task
 
 - ONLY mark a task as completed when you have FULLY accomplished it
-- If you encounter errors, blockers, or cannot finish, keep the task as in_progress
+- If you encounter errors, blockers, or cannot finish, mark the task as failed or keep it running
 - When blocked, create a new task describing what needs to be resolved
 - Never mark a task as completed if:
   - Tests are failing
@@ -32,7 +32,7 @@ export const PROMPT = `Use this tool to update a task in the task list.
 - **status**: The task status (see Status Workflow below)
 - **subject**: Change the task title (imperative form, e.g., "Run tests")
 - **description**: Change the task description
-- **activeForm**: Present continuous form shown in spinner when in_progress (e.g., "Running tests")
+- **activeForm**: Present continuous form shown in spinner when running (e.g., "Running tests")
 - **owner**: Change the task owner (agent name)
 - **metadata**: Merge metadata keys into the task (set a key to null to delete it)
 - **addBlocks**: Mark tasks that cannot start until this one completes
@@ -40,7 +40,7 @@ export const PROMPT = `Use this tool to update a task in the task list.
 
 ## Status Workflow
 
-Status progresses: \`pending\` → \`in_progress\` → \`completed\`
+Status progresses: \`pending\` → \`claimed\` → \`running\` → \`completed\` (or \`failed\`)
 
 Use \`deleted\` to permanently remove a task.
 
@@ -52,7 +52,7 @@ Make sure to read a task's latest state using \`TaskGet\` before updating it.
 
 Mark task as in progress when starting work:
 \`\`\`json
-{"taskId": "1", "status": "in_progress"}
+{"taskId": "1", "status": "running", "owner": "worker-name"}
 \`\`\`
 
 Mark task as completed after finishing work:

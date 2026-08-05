@@ -29,6 +29,14 @@ const inputSchema = lazySchema(() =>
       .record(z.string(), z.unknown())
       .optional()
       .describe('Arbitrary metadata to attach to the task'),
+    effort: z
+      .enum(['none', 'low', 'medium', 'high', 'xhigh', 'max'])
+      .optional()
+      .describe('Per-agent reasoning effort assigned by the leader'),
+    files_touched: z.array(z.string()).optional(),
+    read_set: z.array(z.string()).optional(),
+    write_set: z.array(z.string()).optional(),
+    isolation: z.enum(['shared', 'worktree']).optional(),
   }),
 )
 type InputSchema = ReturnType<typeof inputSchema>
@@ -77,7 +85,18 @@ export const TaskCreateTool = buildTool({
   renderToolUseMessage() {
     return null
   },
-  async call({ subject, description, activeForm, metadata }, context) {
+  async call(
+    { subject, description, activeForm, metadata, effort, files_touched, read_set, write_set, isolation },
+    context,
+  ) {
+    const taskMetadata = {
+      ...(metadata ?? {}),
+      ...(effort === undefined ? {} : { effort }),
+      ...(files_touched === undefined ? {} : { files_touched }),
+      ...(read_set === undefined ? {} : { read_set }),
+      ...(write_set === undefined ? {} : { write_set }),
+      ...(isolation === undefined ? {} : { isolation }),
+    }
     const taskId = await createTask(getTaskListId(), {
       subject,
       description,
@@ -86,7 +105,7 @@ export const TaskCreateTool = buildTool({
       owner: undefined,
       blocks: [],
       blockedBy: [],
-      metadata,
+      metadata: taskMetadata,
     })
 
     const blockingErrors: string[] = []

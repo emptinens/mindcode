@@ -22,6 +22,7 @@ const outputSchema = lazySchema(() =>
         status: TaskStatusSchema(),
         owner: z.string().optional(),
         blockedBy: z.array(z.string()),
+        metadata: z.record(z.string(), z.unknown()).optional(),
       }),
     ),
   }),
@@ -80,6 +81,7 @@ export const TaskListTool = buildTool({
       status: task.status,
       owner: task.owner,
       blockedBy: task.blockedBy.filter(id => !resolvedTaskIds.has(id)),
+      metadata: task.metadata,
     }))
 
     return {
