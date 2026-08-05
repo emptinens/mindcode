@@ -2,7 +2,7 @@ import { statSync } from 'fs'
 import ignore from 'ignore'
 import * as path from 'path'
 import {
-  CLAUDE_CONFIG_DIRECTORIES,
+  MINDCODE_CONFIG_DIRECTORIES,
   loadMarkdownFilesForSubdir,
 } from 'src/utils/markdownConfigLoader.js'
 import type { SuggestionItem } from '../components/PromptInput/PromptInputFooterSuggestions.js'
@@ -444,7 +444,7 @@ function collectDirectoryNames(
  */
 async function getClaudeConfigFiles(cwd: string): Promise<string[]> {
   const markdownFileArrays = await Promise.all(
-    CLAUDE_CONFIG_DIRECTORIES.map(subdir =>
+    MINDCODE_CONFIG_DIRECTORIES.map(subdir =>
       loadMarkdownFilesForSubdir(subdir, cwd),
     ),
   )

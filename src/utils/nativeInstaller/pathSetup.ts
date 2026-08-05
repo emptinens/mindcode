@@ -23,7 +23,7 @@ import { getShellType } from '../localInstaller.js'
 import { getShellConfigPaths, readFileLines, writeFileLines } from '../shellConfig.js'
 import type { SetupMessage } from './installer.js'
 
-const MARKER = '# Added by Claude Code'
+const MARKER = '# Added by MindCode'
 
 /** Windows user PATH lives here. Machine-wide PATH would need elevation. */
 const WINDOWS_ENV_KEY = 'HKCU\\Environment'
@@ -163,7 +163,7 @@ async function addToWindowsPath(binDir: string): Promise<SetupMessage[]> {
   logForDebugging(`PATH setup: added ${windowsBinPath} to persisted user PATH`)
   return [
     {
-      message: `Added ${windowsBinPath} to your user PATH. Restart your terminal for the claude command to be available.`,
+      message: `Added ${windowsBinPath} to your user PATH. Restart your terminal for the mindcode command to be available.`,
       userActionRequired: false,
       type: 'info',
     },

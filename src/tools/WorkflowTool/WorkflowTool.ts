@@ -48,7 +48,7 @@ const inputSchema = lazySchema(() =>
         .string()
         .optional()
         .describe(
-          'Name of a predefined workflow (built-in or from .claude/workflows/).',
+          'Name of a predefined workflow (built-in or from .mindcode/workflows/).',
         ),
       description: z.string().optional().describe('Ignored — set in meta.'),
       title: z.string().optional().describe('Ignored — set in meta.'),

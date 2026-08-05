@@ -1,6 +1,6 @@
 /**
  * Shared utilities for displaying agent information.
- * Used by both the CLI `claude agents` handler and the interactive `/agents` command.
+ * Used by both the CLI `mindcode agents` handler and the interactive `/agents` command.
  */
 
 import { getAgentModelDisplay } from '../../utils/model/agent.js'

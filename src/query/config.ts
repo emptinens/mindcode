@@ -32,22 +32,22 @@ export function buildQueryConfig(): QueryConfig {
     gates: {
       // Default-on (upstream made streaming tool execution always-enabled in
       // 2.1.154); required for live in-progress tool rendering, e.g. the
-      // workflow agent tree. Opt out with CLAUDE_CODE_DISABLE_STREAMING_TOOL_EXECUTION=1.
+      // workflow agent tree. Opt out with MINDCODE_DISABLE_STREAMING_TOOL_EXECUTION=1.
       streamingToolExecution:
         !isEnvTruthy(
-          process.env.CLAUDE_CODE_DISABLE_STREAMING_TOOL_EXECUTION,
+          process.env.MINDCODE_DISABLE_STREAMING_TOOL_EXECUTION,
         ) ||
         checkStatsigFeatureGate_CACHED_MAY_BE_STALE(
           'tengu_streaming_tool_execution2',
         ),
       emitToolUseSummaries: isEnvTruthy(
-        process.env.CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES,
+        process.env.MINDCODE_EMIT_TOOL_USE_SUMMARIES,
       ),
       isAnt: process.env.USER_TYPE === 'ant',
       // Inlined from fastMode.ts to avoid pulling its heavy module graph
       // (axios, settings, auth, model, oauth, config) into test shards that
       // didn't previously load it — changes init order and breaks unrelated tests.
-      fastModeEnabled: !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_FAST_MODE),
+      fastModeEnabled: !isEnvTruthy(process.env.MINDCODE_DISABLE_FAST_MODE),
     },
   }
 }

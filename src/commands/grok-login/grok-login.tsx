@@ -91,7 +91,7 @@ function GrokLogin({
 					<Text dimColor>
 						Get it from grok.com → DevTools → Application → Cookies → the
 						"sso" value (a long JWT starting with eyJ…). Stored in
-						~/.claude.json.
+						~/.mindcode.json.
 					</Text>
 				</Box>
 			</Box>

@@ -1,0 +1,7 @@
+export const PRODUCT_NAME = 'MindCode'
+export const CLI_NAME = 'mindcode'
+export const PACKAGE_NAME = 'mindcode'
+export const CONFIG_DIRECTORY_NAME = '.mindcode'
+export const CONFIG_ENVIRONMENT_VARIABLE = 'MINDCODE_CONFIG_DIR'
+export const INSTRUCTIONS_FILE_NAME = 'MINDCODE.md'
+export const ENVIRONMENT_PREFIX = 'MINDCODE_'

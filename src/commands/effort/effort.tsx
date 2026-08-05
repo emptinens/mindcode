@@ -37,17 +37,17 @@ function setEffortValue(effortValue: EffortValue): EffortCommandResult {
   // the same, so "Set effort to X" is true and the note is noise.
   const envOverride = getEffortEnvOverride();
   if (envOverride !== undefined && envOverride !== effortValue) {
-    const envRaw = process.env.CLAUDE_CODE_EFFORT_LEVEL;
+    const envRaw = process.env.MINDCODE_EFFORT_LEVEL;
     if (persistable === undefined) {
       return {
-        message: `Not applied: CLAUDE_CODE_EFFORT_LEVEL=${envRaw} overrides effort this session, and ${effortValue} is session-only (nothing saved)`,
+        message: `Not applied: MINDCODE_EFFORT_LEVEL=${envRaw} overrides effort this session, and ${effortValue} is session-only (nothing saved)`,
         effortUpdate: {
           value: effortValue
         }
       };
     }
     return {
-      message: `CLAUDE_CODE_EFFORT_LEVEL=${envRaw} overrides this session — clear it and ${effortValue} takes over`,
+      message: `MINDCODE_EFFORT_LEVEL=${envRaw} overrides this session — clear it and ${effortValue} takes over`,
       effortUpdate: {
         value: effortValue
       }
@@ -104,9 +104,9 @@ function unsetEffortLevel(): EffortCommandResult {
   // when env is pinning a specific level that will keep overriding.
   const envOverride = getEffortEnvOverride();
   if (envOverride !== undefined && envOverride !== null) {
-    const envRaw = process.env.CLAUDE_CODE_EFFORT_LEVEL;
+    const envRaw = process.env.MINDCODE_EFFORT_LEVEL;
     return {
-      message: `Cleared effort from settings, but CLAUDE_CODE_EFFORT_LEVEL=${envRaw} still controls this session`,
+      message: `Cleared effort from settings, but MINDCODE_EFFORT_LEVEL=${envRaw} still controls this session`,
       effortUpdate: {
         value: undefined
       }

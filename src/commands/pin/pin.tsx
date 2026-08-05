@@ -186,7 +186,7 @@ function PinPicker({
                 color={message.type === 'user' ? 'success' : 'claude'}
                 bold={selected}
               >
-                {message.type === 'user' ? 'you' : 'claude'}
+                {message.type === 'user' ? 'you' : 'MindCode'}
               </Text>
               {isPinned(message.uuid) ? (
                 <Text color="warning">●</Text>

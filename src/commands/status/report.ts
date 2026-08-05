@@ -19,7 +19,7 @@ import {
   getTotalToolDuration,
   getTotalWebSearchRequests,
 } from '../../bootstrap/state.js'
-import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
+import { getMindCodeConfigHomeDir } from '../../utils/envUtils.js'
 
 const number = new Intl.NumberFormat('en-US')
 const money = new Intl.NumberFormat('en-US', {
@@ -122,9 +122,9 @@ export async function generateStatusHtmlReport(): Promise<string> {
 
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Claude Code Session Status</title><style>
+<title>MindCode Session Status</title><style>
 :root{color-scheme:dark;--bg:#09090b;--panel:#141418;--line:#2a2a31;--text:#f4f4f5;--muted:#a1a1aa;--accent:#f97316;--accent2:#fb923c}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top right,#29170e 0,transparent 33%),var(--bg);color:var(--text);font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}.wrap{max-width:1400px;margin:auto;padding:34px}header{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;margin-bottom:24px}h1{font-size:29px;margin:0 0 5px}h2{font-size:17px;margin:0 0 16px}.subtitle,.meta,small{color:var(--muted)}.meta{text-align:right}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.metric,.panel{background:linear-gradient(145deg,#17171c,#111115);border:1px solid var(--line);border-radius:14px}.metric{padding:16px;display:flex;flex-direction:column;min-height:112px}.metric span{color:var(--muted)}.metric strong{font-size:25px;margin:7px 0}.panel{padding:20px;margin-top:14px;overflow:auto}.columns{display:grid;grid-template-columns:1fr 1fr;gap:14px}.bar-row{margin:12px 0}.bar-label{display:flex;justify-content:space-between;gap:20px;margin-bottom:5px}.track{height:9px;border-radius:99px;background:#25252b;overflow:hidden}.track i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--accent),var(--accent2))}table{width:100%;border-collapse:collapse;white-space:nowrap}th,td{padding:11px 13px;border-bottom:1px solid var(--line);text-align:right}th{color:var(--muted);font-weight:600}th:first-child,td:first-child{text-align:left}.model{max-width:360px;overflow:hidden;text-overflow:ellipsis}.empty{text-align:center!important;color:var(--muted);padding:25px}footer{color:var(--muted);margin-top:18px;text-align:center}@media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}.columns{grid-template-columns:1fr}header{display:block}.meta{text-align:left;margin-top:12px}}@media(max-width:520px){.wrap{padding:18px}.grid{grid-template-columns:1fr}}
-</style></head><body><main class="wrap"><header><div><h1>Session telemetry</h1><div class="subtitle">Detailed Claude Code runtime statistics</div></div><div class="meta">Session ${escapeHtml(getSessionId())}<br>${escapeHtml(generatedAt.toLocaleString())}</div></header>
+</style></head><body><main class="wrap"><header><div><h1>Session telemetry</h1><div class="subtitle">Detailed MindCode runtime statistics</div></div><div class="meta">Session ${escapeHtml(getSessionId())}<br>${escapeHtml(generatedAt.toLocaleString())}</div></header>
 <section class="grid">
 ${metric('API requests', number.format(requestCount), requestCount ? `${number.format(Math.round(totalTokens / requestCount))} tokens/request` : 'no completed requests')}
 ${metric('Total tokens', number.format(totalTokens), `${number.format(input)} input · ${number.format(output)} output`)}
@@ -140,7 +140,7 @@ ${metric('Web searches', number.format(getTotalWebSearchRequests()), `${number.f
 <section class="panel"><h2>Timing details</h2><table><tbody><tr><th>Wall clock</th><td>${duration(wall)}</td><th>API with retries</th><td>${duration(api)}</td></tr><tr><th>API without retries</th><td>${duration(apiWithoutRetries)}</td><th>Retry/overhead</th><td>${duration(retries)}</td></tr><tr><th>Tool duration</th><td>${duration(toolDuration)}</td><th>API utilization</th><td>${wall ? ((api / wall) * 100).toFixed(1) : '0.0'}%</td></tr></tbody></table></section>
 <footer>Generated locally by /status html · no report data was uploaded</footer></main></body></html>`
 
-  const reportsDir = join(getClaudeConfigHomeDir(), 'reports')
+  const reportsDir = join(getMindCodeConfigHomeDir(), 'reports')
   await mkdir(reportsDir, { recursive: true })
   const stamp = generatedAt.toISOString().replaceAll(':', '-').replaceAll('.', '-')
   const path = join(reportsDir, `status-${stamp}.html`)

@@ -6,7 +6,7 @@
 // File: <claude config dir>/shortcuts.json  e.g. { "q": "Answer only..." }
 import { existsSync, readFileSync, writeFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { getClaudeConfigHomeDir } from './envUtils.js'
+import { getMindCodeConfigHomeDir } from './envUtils.js'
 import { logError } from './log.js'
 
 export type PromptShortcuts = Record<string, string>
@@ -18,7 +18,7 @@ const SHORTCUT_NAME_RE = /^[a-zA-Z0-9_-]+$/
 const INPUT_PLACEHOLDER = '{input}'
 
 export function getShortcutsFilePath(): string {
-  return join(getClaudeConfigHomeDir(), 'shortcuts.json')
+  return join(getMindCodeConfigHomeDir(), 'shortcuts.json')
 }
 
 export function isValidShortcutName(name: string): boolean {

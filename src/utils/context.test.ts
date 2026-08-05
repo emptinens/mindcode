@@ -20,14 +20,14 @@ const {
   VEXZY_LUNA_CONTEXT_WINDOW,
 } = await import('./context.js')
 
-const originalDisable1m = process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+const originalDisable1m = process.env.MINDCODE_DISABLE_1M_CONTEXT
 const originalUserType = process.env.USER_TYPE
 
 afterEach(() => {
   if (originalDisable1m === undefined) {
-    clearEnv('CLAUDE_CODE_DISABLE_1M_CONTEXT')
+    clearEnv('MINDCODE_DISABLE_1M_CONTEXT')
   } else {
-    process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = originalDisable1m
+    process.env.MINDCODE_DISABLE_1M_CONTEXT = originalDisable1m
   }
   if (originalUserType === undefined) {
     clearEnv('USER_TYPE')
@@ -42,7 +42,7 @@ function clearEnv(name: string): void {
 
 describe('context windows', () => {
   test('uses the native 1,050,000-token context for Vexzy Luna', () => {
-    clearEnv('CLAUDE_CODE_DISABLE_1M_CONTEXT')
+    clearEnv('MINDCODE_DISABLE_1M_CONTEXT')
     clearEnv('USER_TYPE')
 
     expect(VEXZY_LUNA_CONTEXT_WINDOW).toBe(1_050_000)
@@ -51,7 +51,7 @@ describe('context windows', () => {
   })
 
   test('does not downgrade Vexzy Luna when legacy Claude 1M is disabled', () => {
-    process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = 'true'
+    process.env.MINDCODE_DISABLE_1M_CONTEXT = 'true'
     clearEnv('USER_TYPE')
 
     expect(getContextWindowForModel('gpt-5.6-luna')).toBe(1_050_000)
@@ -60,7 +60,7 @@ describe('context windows', () => {
   })
 
   test('keeps explicit 1m suffixes at 1,000,000 for other models', () => {
-    process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = 'true'
+    process.env.MINDCODE_DISABLE_1M_CONTEXT = 'true'
     clearEnv('USER_TYPE')
 
     expect(getContextWindowForModel('custom-model[1m]')).toBe(1_000_000)

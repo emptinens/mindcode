@@ -16,7 +16,7 @@ const ENV_KEYS = [
   'VEXZY_API_KEY',
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_CUSTOM_HEADERS',
-  'CLAUDE_CODE_USE_BEDROCK',
+  'MINDCODE_USE_BEDROCK',
 ] as const
 const originalEnv = Object.fromEntries(
   ENV_KEYS.map(key => [key, process.env[key]]),
@@ -35,7 +35,7 @@ describe('Vexzy runtime API client wiring', () => {
     process.env.VEXZY_API_KEY = 'forge-client-key'
     process.env.ANTHROPIC_API_KEY = 'legacy-anthropic-key'
     process.env.ANTHROPIC_CUSTOM_HEADERS = 'x-api-key: custom-legacy-key'
-    process.env.CLAUDE_CODE_USE_BEDROCK = '1'
+    process.env.MINDCODE_USE_BEDROCK = '1'
 
     let capturedRequest:
       | { input: RequestInfo | URL; init?: RequestInit }

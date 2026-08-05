@@ -4,14 +4,14 @@ import {
   getSessionId,
   getSessionProjectDir,
 } from '../bootstrap/state.js'
-import { getClaudeConfigHomeDir } from './envUtils.js'
+import { getMindCodeConfigHomeDir } from './envUtils.js'
 import { sanitizePath } from './path.js'
 
 function getCurrentSessionDirectory(): string {
   return (
     getSessionProjectDir() ??
     join(
-      getClaudeConfigHomeDir(),
+      getMindCodeConfigHomeDir(),
       'projects',
       sanitizePath(getOriginalCwd()),
     )

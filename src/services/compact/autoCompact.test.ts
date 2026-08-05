@@ -60,18 +60,18 @@ const {
 } = await import('./autoCompact.js')
 
 const originalAutoCompactOverride =
-  process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE
-const originalAutoCompactWindow = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  process.env.MINDCODE_AUTOCOMPACT_PCT_OVERRIDE
+const originalAutoCompactWindow = process.env.MINDCODE_AUTO_COMPACT_WINDOW
 const originalBlockingOverride =
-  process.env.CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE
+  process.env.MINDCODE_BLOCKING_LIMIT_OVERRIDE
 
 afterEach(() => {
   restoreEnv(
-    'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE',
+    'MINDCODE_AUTOCOMPACT_PCT_OVERRIDE',
     originalAutoCompactOverride,
   )
-  restoreEnv('CLAUDE_CODE_AUTO_COMPACT_WINDOW', originalAutoCompactWindow)
-  restoreEnv('CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE', originalBlockingOverride)
+  restoreEnv('MINDCODE_AUTO_COMPACT_WINDOW', originalAutoCompactWindow)
+  restoreEnv('MINDCODE_BLOCKING_LIMIT_OVERRIDE', originalBlockingOverride)
 })
 
 function restoreEnv(name: string, value: string | undefined): void {
@@ -88,13 +88,13 @@ function clearEnv(name: string): void {
 
 describe('auto compact thresholds', () => {
   test('uses Luna effective context of 1,030,000 tokens', () => {
-    clearEnv('CLAUDE_CODE_AUTO_COMPACT_WINDOW')
+    clearEnv('MINDCODE_AUTO_COMPACT_WINDOW')
     expect(getEffectiveContextWindowSize('gpt-5.6-luna')).toBe(1_030_000)
   })
 
   test('warns at 85% and auto-compacts/blocks at 95%', () => {
-    clearEnv('CLAUDE_AUTOCOMPACT_PCT_OVERRIDE')
-    clearEnv('CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE')
+    clearEnv('MINDCODE_AUTOCOMPACT_PCT_OVERRIDE')
+    clearEnv('MINDCODE_BLOCKING_LIMIT_OVERRIDE')
 
     expect(getAutoCompactThreshold('gpt-5.6-luna')).toBe(978_500)
 
@@ -117,10 +117,10 @@ describe('auto compact thresholds', () => {
   })
 
   test('validates the auto-compact percentage override', () => {
-    process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = '90'
+    process.env.MINDCODE_AUTOCOMPACT_PCT_OVERRIDE = '90'
     expect(getAutoCompactThreshold('gpt-5.6-luna')).toBe(927_000)
 
-    process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = '101'
+    process.env.MINDCODE_AUTOCOMPACT_PCT_OVERRIDE = '101'
     expect(getAutoCompactThreshold('gpt-5.6-luna')).toBe(978_500)
   })
 })

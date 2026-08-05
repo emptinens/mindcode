@@ -99,26 +99,26 @@ const TEAMMATE_ENV_VARS = [
   'ANTHROPIC_API_KEY',
   'VEXZY_API_KEY',
   'ANTHROPIC_MODEL',
-  'CLAUDE_CODE_SUBAGENT_MODEL',
-  'CLAUDE_CODE_COMPACT_MODEL',
-  'CLAUDE_CODE_DISABLE_COMPACT_CACHE_SHARING',
+  'MINDCODE_SUBAGENT_MODEL',
+  'MINDCODE_COMPACT_MODEL',
+  'MINDCODE_DISABLE_COMPACT_CACHE_SHARING',
   // API provider selection — without these, teammates default to firstParty
   // and send requests to the wrong endpoint (GitHub issue #23561)
-  'CLAUDE_CODE_USE_BEDROCK',
-  'CLAUDE_CODE_USE_VERTEX',
-  'CLAUDE_CODE_USE_FOUNDRY',
+  'MINDCODE_USE_BEDROCK',
+  'MINDCODE_USE_VERTEX',
+  'MINDCODE_USE_FOUNDRY',
   // Custom API endpoint
   'ANTHROPIC_BASE_URL',
   // Config directory override
-  'CLAUDE_CONFIG_DIR',
+  'MINDCODE_CONFIG_DIR',
   // CCR marker — teammates need this for CCR-aware code paths. Auth finds
-  // its own way via /home/claude/.claude/remote/.oauth_token regardless;
+  // its own way via /home/claude/.mindcode/remote/.oauth_token regardless;
   // the FD env var wouldn't help (pipe FDs don't cross tmux).
-  'CLAUDE_CODE_REMOTE',
+  'MINDCODE_REMOTE',
   // Auto-memory gate (memdir/paths.ts) checks REMOTE && !MEMORY_DIR to
   // disable memory on ephemeral CCR filesystems. Forwarding REMOTE alone
   // would flip teammates to memory-off when the parent has it on.
-  'CLAUDE_CODE_REMOTE_MEMORY_DIR',
+  'MINDCODE_REMOTE_MEMORY_DIR',
   // Upstream proxy — the parent's MITM relay is reachable from teammates
   // (same container network). Forward the proxy vars so teammates route
   // customer-configured upstream traffic through the relay for credential
@@ -141,11 +141,11 @@ export function isTeammateEnvVarForwarded(name: string): boolean {
 
 /**
  * Builds the `env KEY=VALUE ...` string for teammate spawn commands.
- * Always includes CLAUDECODE=1 and CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1,
+ * Always includes MINDCODE=1 and MINDCODE_EXPERIMENTAL_AGENT_TEAMS=1,
  * plus any provider/config env vars that are set in the current process.
  */
 export function buildInheritedEnvVars(): string {
-  const envVars = ['CLAUDECODE=1', 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1']
+  const envVars = ['MINDCODE=1', 'MINDCODE_EXPERIMENTAL_AGENT_TEAMS=1']
 
   for (const key of TEAMMATE_ENV_VARS) {
     const value = process.env[key]

@@ -26,11 +26,11 @@ export type APIProvider = 'firstParty' | 'bedrock' | 'vertex' | 'foundry'
 export function getAPIProvider(): APIProvider {
   if (isVexzyMode()) return 'firstParty'
 
-  return isEnvTruthy(process.env.CLAUDE_CODE_USE_BEDROCK)
+  return isEnvTruthy(process.env.MINDCODE_USE_BEDROCK)
     ? 'bedrock'
-    : isEnvTruthy(process.env.CLAUDE_CODE_USE_VERTEX)
+    : isEnvTruthy(process.env.MINDCODE_USE_VERTEX)
       ? 'vertex'
-      : isEnvTruthy(process.env.CLAUDE_CODE_USE_FOUNDRY)
+      : isEnvTruthy(process.env.MINDCODE_USE_FOUNDRY)
         ? 'foundry'
         : 'firstParty'
 }

@@ -1,4 +1,8 @@
-# VEXZY Claude Code Roadmap
+# MindCode VEXZY Roadmap
+
+Version: `0.1.0`
+Configuration directory: `~/.mindcode`
+Environment prefix: `MINDCODE_`
 
 ## P0 — Runtime diagnostics
 
@@ -6,7 +10,7 @@
   - `BASE_URL`
   - auth source without secret disclosure
   - main model
-  - fixed subagent model
+  - fixed Worker model
   - compact model
   - context-window size
   - thinking mode and effort
@@ -14,7 +18,7 @@
 - `/agent-smoke`
   - spawn one isolated Agent
   - verify effective model is `gpt-5.6-luna`
-  - verify inherited thinking/effort
+  - verify explicitly assigned Worker thinking/effort
   - verify TaskCreate/TaskUpdate/SendMessage
 - `/compact-status`
   - last compact model
@@ -48,12 +52,12 @@
   - main effort
   - subagent thinking policy
   - compact model
-- Per-agent reasoning policy: `inherit`, `adaptive`, `low`, `medium`, `high`, `xhigh`.
+- Per-agent reasoning policy: `adaptive`, `low`, `medium`, `high`, `xhigh`, `max`.
 
 ## P1 — Authentication
 
 - macOS Keychain storage for `VEXZY_API_KEY`.
-- `claude vexzy login` and `claude vexzy logout`.
+- `mindcode vexzy login` and `mindcode vexzy logout`.
 - Gateway health check before REPL startup.
 - API-key rotation without restarting the terminal.
 - Sanitized auth diagnostics with endpoint and source only.
@@ -81,19 +85,19 @@
 - `./install-vexzy.sh`:
   - build current architecture
   - verify binary markers
-  - atomically update `~/.local/bin/claude`
+  - atomically update `~/.local/bin/mindcode`
   - preserve rollback binary
 - `./rollback-vexzy.sh`.
-- Build metadata in `claude --version`: commit, target, build time.
+- Build metadata in `mindcode --version`: commit, target, build time.
 - CI smoke matrix for macOS x64/arm64 and Linux x64/arm64.
 
 ## P3 — Tests
 
-- Unit tests for fixed subagent model resolution.
+- Unit tests for fixed Worker model resolution.
 - Unit tests for custom-gateway auth status.
 - Integration test for Agent spawn and Task tools.
 - Integration test for `/compact` on 200k and 1M contexts.
-- Regression test for `CLAUDE_CODE_SIMPLE` disabling Agent tools.
+- Regression test for `MINDCODE_SIMPLE` disabling Agent tools.
 - Golden test for launcher environment propagation.
 
 ## Recommended implementation order

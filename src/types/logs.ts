@@ -8,7 +8,7 @@ import type { QueueOperationMessage } from './messageQueueTypes.js'
 export type SerializedMessage = Message & {
   cwd: string
   userType: string
-  entrypoint?: string // CLAUDE_CODE_ENTRYPOINT — distinguishes cli/sdk-ts/sdk-py/etc.
+  entrypoint?: string // MINDCODE_ENTRYPOINT — distinguishes cli/sdk-ts/sdk-py/etc.
   sessionId: string
   timestamp: string
   version: string
@@ -87,7 +87,7 @@ export type LastPromptMessage = {
 /**
  * Periodic fork-generated summary of what the agent is currently doing.
  * Written every min(5 steps, 2min) by forking the main thread mid-turn so
- * `claude ps` can show something more useful than the last user prompt
+ * `mindcode ps` can show something more useful than the last user prompt
  * (which is often "ok go" or "fix it").
  */
 export type TaskSummaryMessage = {

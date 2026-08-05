@@ -4,7 +4,7 @@
  *
  * "Env-less" = no Environments API layer. Distinct from "CCR v2" (the
  * /worker/* transport protocol) — the env-based path (replBridge.ts) can also
- * use CCR v2 transport via CLAUDE_CODE_USE_CCR_V2. This file is about removing
+ * use CCR v2 transport via MINDCODE_USE_CCR_V2. This file is about removing
  * the poll/dispatch layer, not about which transport protocol is underneath.
  *
  * Unlike initBridgeCore (env-based, ~2400 lines), this connects directly
@@ -227,7 +227,7 @@ export async function initEnvLessBridgeCore(
       heartbeatIntervalMs: cfg.heartbeat_interval_ms,
       heartbeatJitterFraction: cfg.heartbeat_jitter_fraction,
       // Per-instance closure — keeps the worker JWT out of
-      // process.env.CLAUDE_CODE_SESSION_ACCESS_TOKEN, which mcp/client.ts
+      // process.env.MINDCODE_SESSION_ACCESS_TOKEN, which mcp/client.ts
       // reads ungatedly and would otherwise send to user-configured ws/http
       // MCP servers. Frozen-at-construction is correct: transport is fully
       // rebuilt on refresh (rebuildTransport below).
@@ -925,7 +925,7 @@ import {
 } from './codeSessionApi.js'
 import { getBridgeBaseUrlOverride } from './bridgeConfig.js'
 
-// CLI-side wrapper that applies the CLAUDE_BRIDGE_BASE_URL dev override and
+// CLI-side wrapper that applies the MINDCODE_BRIDGE_BASE_URL dev override and
 // injects the trusted-device token (both are env/GrowthBook reads that the
 // SDK-facing codeSessionApi.ts export must stay free of).
 export async function fetchRemoteCredentials(

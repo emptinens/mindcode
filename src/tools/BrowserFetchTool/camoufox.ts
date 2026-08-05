@@ -35,10 +35,10 @@ import { AbortError } from '../../utils/errors.js'
 import { logError } from '../../utils/log.js'
 import type { ImpersonateOptions, RenderedContent } from './utils.js'
 
-// Per-user, on-demand install location. Override with CLAUDE_BROWSERFETCH_DIR
+// Per-user, on-demand install location. Override with MINDCODE_BROWSERFETCH_DIR
 // (useful for containers/CI with an ephemeral home).
 const HOME =
-  process.env.CLAUDE_BROWSERFETCH_DIR ??
+  process.env.MINDCODE_BROWSERFETCH_DIR ??
   join(homedir(), '.cache', 'claude-browserfetch')
 const NODE_MODULES = join(HOME, 'node_modules')
 const CAMOUFOX_MAIN = join(NODE_MODULES, 'camoufox-js', 'dist', '__main__.js')
@@ -59,9 +59,9 @@ const READY_MARKER = join(HOME, '.ready-v2')
 // camoufox-js@0.11.x is built/tested against playwright-core ^1.53.1, so we pin
 // to that. Both overridable via env for forward-compat.
 const CAMOUFOX_JS_VERSION =
-  process.env.CLAUDE_BROWSERFETCH_CAMOUFOX_VERSION ?? '0.11.1'
+  process.env.MINDCODE_BROWSERFETCH_CAMOUFOX_VERSION ?? '0.11.1'
 const PLAYWRIGHT_VERSION =
-  process.env.CLAUDE_BROWSERFETCH_PLAYWRIGHT_VERSION ?? '1.53.1'
+  process.env.MINDCODE_BROWSERFETCH_PLAYWRIGHT_VERSION ?? '1.53.1'
 
 const RENDER_NAV_TIMEOUT_MS = 30_000
 const RENDER_NETWORK_IDLE_MS = 20_000
@@ -76,7 +76,7 @@ let cachedNode: string | null | undefined
 /** Locate a Node.js >= 22 runtime to host the Camoufox driver. */
 export function findNodeRuntime(): string | null {
   if (cachedNode !== undefined) return cachedNode
-  const candidates = [process.env.CLAUDE_BROWSERFETCH_NODE, 'node'].filter(
+  const candidates = [process.env.MINDCODE_BROWSERFETCH_NODE, 'node'].filter(
     (c): c is string => !!c,
   )
   for (const cand of candidates) {
@@ -195,7 +195,7 @@ async function doInstall(node: string, signal: AbortSignal): Promise<void> {
   writeFileSync(
     join(HOME, 'package.json'),
     JSON.stringify(
-      { name: 'claude-browserfetch-camoufox', version: '1.0.0', private: true },
+      { name: 'mindcode-browserfetch-camoufox', version: '1.0.0', private: true },
       null,
       2,
     ),

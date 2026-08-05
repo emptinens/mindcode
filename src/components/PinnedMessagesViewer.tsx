@@ -96,7 +96,7 @@ export function PinnedMessagesViewer({ onClose }: Props): React.ReactNode {
                   color={pin.role === 'user' ? 'success' : 'claude'}
                   bold={selected}
                 >
-                  {pin.role === 'user' ? 'you' : 'claude'}
+          {pin.role === 'user' ? 'you' : 'MindCode'}
                 </Text>
                 <Text dimColor>·</Text>
                 <Text dimColor>

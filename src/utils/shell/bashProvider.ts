@@ -29,7 +29,7 @@ import type { ShellProvider } from './shellProvider.js'
  * Extended globs (bash extglob, zsh EXTENDED_GLOB) can be exploited via
  * malicious filenames that expand after our security validation.
  *
- * When CLAUDE_CODE_SHELL_PREFIX is set, the actual executing shell may differ
+ * When MINDCODE_SHELL_PREFIX is set, the actual executing shell may differ
  * from shellPath (e.g., shellPath is zsh but the wrapper runs bash). In this
  * case, we include commands for BOTH shells. We redirect both stdout and stderr
  * to /dev/null because zsh's command_not_found_handler writes to STDOUT.
@@ -37,9 +37,9 @@ import type { ShellProvider } from './shellProvider.js'
  * When no shell prefix is set, we use the appropriate command for the detected shell.
  */
 function getDisableExtglobCommand(shellPath: string): string | null {
-  // When CLAUDE_CODE_SHELL_PREFIX is set, the wrapper may use a different shell
+  // When MINDCODE_SHELL_PREFIX is set, the wrapper may use a different shell
   // than shellPath, so we include both bash and zsh commands
-  if (process.env.CLAUDE_CODE_SHELL_PREFIX) {
+  if (process.env.MINDCODE_SHELL_PREFIX) {
     // Redirect both stdout and stderr because zsh's command_not_found_handler
     // writes to stdout instead of stderr
     return '{ shopt -u extglob || setopt NO_EXTENDED_GLOB; } >/dev/null 2>&1 || true'
@@ -186,10 +186,10 @@ export async function createBashShellProvider(
       commandParts.push(`pwd -P >| ${quote([shellCwdFilePath])}`)
       let commandString = commandParts.join(' && ')
 
-      // Apply CLAUDE_CODE_SHELL_PREFIX if set
-      if (process.env.CLAUDE_CODE_SHELL_PREFIX) {
+      // Apply MINDCODE_SHELL_PREFIX if set
+      if (process.env.MINDCODE_SHELL_PREFIX) {
         commandString = formatShellPrefixCommand(
-          process.env.CLAUDE_CODE_SHELL_PREFIX,
+          process.env.MINDCODE_SHELL_PREFIX,
           commandString,
         )
       }
@@ -238,7 +238,7 @@ export async function createBashShellProvider(
           posixTmpDir = windowsPathToPosixPath(posixTmpDir)
         }
         env.TMPDIR = posixTmpDir
-        env.CLAUDE_CODE_TMPDIR = posixTmpDir
+        env.MINDCODE_TMPDIR = posixTmpDir
         // Zsh uses TMPPREFIX (default /tmp/zsh) for heredoc temp files,
         // not TMPDIR. Set it to a path inside the sandbox tmp dir so
         // heredocs work in sandboxed zsh commands.

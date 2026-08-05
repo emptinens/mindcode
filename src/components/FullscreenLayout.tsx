@@ -129,7 +129,7 @@ export function useUnseenDivider(messageCount: number): {
     // • click-to-select at bottom: useDragToScroll.check() calls
     //   scrollTo(current) to break sticky so streaming content doesn't shift
     //   under the selection, then onScroll(false, …) — but scrollTop is still
-    //   at max (Sarah Deaton, #claude-code-feedback 2026-03-15)
+    //   at max (Sarah Deaton, #mindcode-feedback 2026-03-15)
     // pendingDelta: scrollBy accumulates without updating scrollTop. Without
     // it, wheeling up from max would see scrollTop==max and suppress the pill.
     const max = Math.max(0, handle.getScrollHeight() - handle.getViewportHeight());
@@ -261,8 +261,8 @@ export function computeUnseenDivider(messages: readonly Message[], dividerIndex:
  * Outside fullscreen mode, renders content sequentially so the existing
  * main-screen scrollback rendering works unchanged.
  *
- * Fullscreen mode defaults on for ants (CLAUDE_CODE_NO_FLICKER=0 to opt out)
- * and off for external users (CLAUDE_CODE_NO_FLICKER=1 to opt in).
+ * Fullscreen mode defaults on for ants (MINDCODE_NO_FLICKER=0 to opt out)
+ * and off for external users (MINDCODE_NO_FLICKER=1 to opt in).
  * The <AlternateScreen> wrapper
  * (alt buffer + mouse tracking + height constraint) lives at REPL's root
  * so nothing can accidentally render outside it.

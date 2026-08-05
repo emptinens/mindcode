@@ -1,5 +1,5 @@
 /**
- * Main entrypoint for Claude Code Agent SDK types.
+ * Main entrypoint for MindCode Agent SDK types.
  *
  * This file re-exports the public SDK API from:
  * - sdk/coreTypes.ts - Common serializable types (messages, configs)
@@ -98,7 +98,7 @@ type CreateSdkMcpServerOptions = {
  * Creates an MCP server instance that can be used with the SDK transport.
  * This allows SDK users to define custom tools that run in the same process.
  *
- * If your SDK MCP calls will run longer than 60s, override CLAUDE_CODE_STREAM_CLOSE_TIMEOUT
+ * If your SDK MCP calls will run longer than 60s, override MINDCODE_STREAM_CLOSE_TIMEOUT
  */
 export function createSdkMcpServer(
   _options: CreateSdkMcpServerOptions,
@@ -277,7 +277,7 @@ export async function forkSession(
 // ============================================================================
 
 /**
- * A scheduled task from `<dir>/.claude/scheduled_tasks.json`.
+ * A scheduled task from `<dir>/.mindcode/scheduled_tasks.json`.
  * @internal
  */
 export type CronTask = {
@@ -328,7 +328,7 @@ export type ScheduledTasksHandle = {
 }
 
 /**
- * Watch `<dir>/.claude/scheduled_tasks.json` and yield events as tasks fire.
+ * Watch `<dir>/.mindcode/scheduled_tasks.json` and yield events as tasks fire.
  *
  * Acquires the per-directory scheduler lock (PID-based liveness) so a REPL
  * session in the same dir won't double-fire. Releases the lock and closes

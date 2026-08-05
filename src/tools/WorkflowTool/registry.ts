@@ -2,8 +2,8 @@
 //
 // Resolution order for a workflow `name`:
 //   1. bundled (built-in: deep-research, code-review)
-//   2. project: <cwd>/.claude/workflows/*.js
-//   3. user:    <config>/.claude/workflows/*.js  (CLAUDE_CONFIG_DIR or ~/.claude)
+//   2. project: <cwd>/.mindcode/workflows/*.js
+//   3. user:    <config>/.mindcode/workflows/*.js  (MINDCODE_CONFIG_DIR or ~/.mindcode)
 //
 // Inline scripts (passed via `script`) bypass the registry entirely.
 
@@ -49,14 +49,14 @@ export function rememberBundledWorkflow(
 }
 
 function userWorkflowsDir(): string {
-  const base = process.env.CLAUDE_CONFIG_DIR
-    ? process.env.CLAUDE_CONFIG_DIR
-    : join(homedir(), '.claude')
+  const base = process.env.MINDCODE_CONFIG_DIR
+    ? process.env.MINDCODE_CONFIG_DIR
+    : join(homedir(), '.mindcode')
   return join(base, 'workflows')
 }
 
 function projectWorkflowsDir(): string {
-  return join(getCwd(), '.claude', 'workflows')
+  return join(getCwd(), '.mindcode', 'workflows')
 }
 
 function loadDir(dir: string, source: WorkflowSource): WorkflowEntry[] {

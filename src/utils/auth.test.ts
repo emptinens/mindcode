@@ -20,7 +20,7 @@ const {
 const ENV_KEYS = [
   'VEXZY_API_KEY',
   'ANTHROPIC_API_KEY',
-  'CLAUDE_CODE_OAUTH_TOKEN',
+  'MINDCODE_OAUTH_TOKEN',
 ] as const
 const originalEnv = Object.fromEntries(
   ENV_KEYS.map(key => [key, process.env[key]]),
@@ -38,7 +38,7 @@ describe('Vexzy runtime auth gates', () => {
   test('uses the Vexzy credential and bypasses OAuth behavior', async () => {
     process.env.VEXZY_API_KEY = 'forge-auth-key'
     process.env.ANTHROPIC_API_KEY = 'legacy-anthropic-key'
-    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'legacy-oauth-token'
+    process.env.MINDCODE_OAUTH_TOKEN = 'legacy-oauth-token'
 
     expect(getAnthropicApiKey()).toBe('forge-auth-key')
     expect(isAnthropicAuthEnabled()).toBe(false)
@@ -51,7 +51,7 @@ describe('Vexzy runtime auth gates', () => {
     value => {
       process.env.VEXZY_API_KEY = value
       process.env.ANTHROPIC_API_KEY = 'legacy-anthropic-key'
-      process.env.CLAUDE_CODE_OAUTH_TOKEN = 'legacy-oauth-token'
+      process.env.MINDCODE_OAUTH_TOKEN = 'legacy-oauth-token'
 
       expect(() => getAnthropicApiKey()).toThrow(VexzyConfigurationError)
       expect(() => isAnthropicAuthEnabled()).toThrow(VexzyConfigurationError)
@@ -64,7 +64,7 @@ describe('Vexzy runtime auth gates', () => {
   test('keeps legacy API-key behavior when VEXZY_API_KEY is absent', () => {
     Reflect.deleteProperty(process.env, 'VEXZY_API_KEY')
     process.env.ANTHROPIC_API_KEY = 'legacy-anthropic-key'
-    Reflect.deleteProperty(process.env, 'CLAUDE_CODE_OAUTH_TOKEN')
+    Reflect.deleteProperty(process.env, 'MINDCODE_OAUTH_TOKEN')
 
     expect(getAnthropicApiKey()).toBe('legacy-anthropic-key')
   })

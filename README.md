@@ -1,14 +1,16 @@
-# Claude Code — Custom Build
+# MindCode — VEXZY Build
 
-A modified build of Claude Code, Anthropic's agentic coding CLI. This is the reconstructed TypeScript source with a set of custom features layered on top — the headline one being a built-in **jailbreak** that unlocks the model, plus full telemetry removal, permission bypass by default, multi-account switching, and a couple of extra tools.
+MindCode is a VEXZY-only agentic coding CLI, version `0.1.0`. It is a reconstructed TypeScript build with custom workflow, privacy, agent, and observability features.
 
-Everything runs in your terminal exactly like the official CLI. The difference is what's been added and taken out.
+Everything runs locally in your terminal through the VEXZY API.
+
+Configuration is stored under `~/.mindcode`. Environment variables use the `MINDCODE_` prefix; the API credential is `VEXZY_API_KEY`.
 
 ---
 
 ## Highlight: Jailbreak
 
-The main feature. A built-in jailbreak system that unlocks the model's behavior — works across all models, **Opus 4.8 included**.
+The main feature. A built-in jailbreak system that unlocks the model's behavior — works across all models, **GPT-5.6 Luna and other configured VEXZY models**.
 
 It's controlled by the `/jailbreak` command with three levels:
 
@@ -40,11 +42,11 @@ resumed, and surfaced in both the status row and session picker.
 - **Trust prompt skipped** — no "do you trust this folder" gate.
 - **Root/sudo guard removed** — runs under root without complaint.
 - **Malware / binary-scan bypass** — internal binary scanning is disabled.
-- **WebFetch domain blocklist removed** — no preflight check against Anthropic before fetching a URL.
+- **WebFetch domain blocklist removed** — no preflight check against the upstream provider before fetching a URL.
 
 ### Accounts & models
-- **In-session account switching** — manage multiple Claude OAuth accounts and API configs (key + optional base URL + auth token) and swap between them on the fly with `/account`. Switching is instant, no restart. Also reachable from the rate-limit menu.
-- **Provider-aware model catalog** — the `/model` picker keeps the fork's newer canonical model mappings and aliases across Anthropic, Bedrock, Vertex, and Foundry. It also incorporates bootstrap-discovered model options, custom model configuration, account capability data, and `availableModels` organization restrictions.
+- **In-session account switching** — manage multiple VEXZY API accounts and API configs (key + optional base URL + auth token) and swap between them on the fly with `/account`. Switching is instant, no restart. Also reachable from the rate-limit menu.
+- **VEXZY model catalog** — the `/model` picker loads VEXZY models, capabilities, aliases, account capability data, and availability restrictions from the VEXZY API.
 
 ### Extra tools
 - **BrowserFetch** — fetches URLs with a real browser network fingerprint (JA3/JA4 TLS + HTTP/2 + correctly-ordered headers) to reach sites that block generic HTTP clients. Has a render tier driven by headless Camoufox (anti-detect Firefox) that runs the page's JavaScript and clears Cloudflare "Just a moment…" / Turnstile challenges. Modes: `auto`, `fast`, `render`.
@@ -77,11 +79,11 @@ npm run build
 
 | File | Platform |
 |------|----------|
-| `dist/claude.exe` | Windows x64 |
-| `dist/claude-linux-x64` | Linux x64 |
-| `dist/claude-linux-arm64` | Linux arm64 |
-| `dist/claude-darwin-x64` | macOS Intel |
-| `dist/claude-darwin-arm64` | macOS Apple Silicon |
+| `dist/mindcode.exe` | Windows x64 |
+| `dist/mindcode-linux-x64` | Linux x64 |
+| `dist/mindcode-linux-arm64` | Linux arm64 |
+| `dist/mindcode-darwin-x64` | macOS Intel |
+| `dist/mindcode-darwin-arm64` | macOS Apple Silicon |
 
 Other build scripts:
 
@@ -98,13 +100,13 @@ Run the compiled binary for your platform:
 
 ```bash
 # Windows
-./dist/claude.exe
+./dist/mindcode.exe
 
 # Linux
-./dist/claude-linux-x64
+./dist/mindcode-linux-x64
 
 # macOS (Apple Silicon)
-./dist/claude-darwin-arm64
+./dist/mindcode-darwin-arm64
 ```
 
 Or run from source directly with Bun (no build needed):
@@ -113,10 +115,10 @@ Or run from source directly with Bun (no build needed):
 bun src/entrypoints/cli.tsx
 ```
 
-On first launch it prompts you to authenticate via OAuth — the same flow as the official CLI. Then `cd` into a project and start a session, or pass a prompt directly:
+On first launch configure `VEXZY_API_KEY` (or the local VEXZY credential store). Then `cd` into a project and start a session, or pass a prompt directly:
 
 ```bash
-./dist/claude.exe "explain what this repo does"
+./dist/mindcode.exe "explain what this repo does"
 ```
 
 ## First steps

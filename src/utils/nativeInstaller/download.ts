@@ -1,7 +1,7 @@
 /**
  * Download functionality for native installer
  *
- * Handles downloading Claude binaries from various sources:
+ * Handles downloading MindCode binaries from configured release sources:
  * - Artifactory NPM packages
  * - GCS bucket
  */
@@ -22,20 +22,38 @@ import { sleep } from '../sleep.js'
 import { jsonStringify, writeFileSync_DEPRECATED } from '../slowOperations.js'
 import { getBinaryName, getPlatform } from './installer.js'
 
-const GCS_BUCKET_URL =
-  'https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases'
 export const ARTIFACTORY_REGISTRY_URL =
   'https://artifactory.infra.ant.dev/artifactory/api/npm/npm-all/'
+
+function getReleaseBaseUrl(): string {
+  const baseUrl = process.env.MINDCODE_RELEASE_BASE_URL?.trim()
+  if (!baseUrl) {
+    throw new Error(
+      'MindCode release endpoint is not configured for this local build',
+    )
+  }
+  return baseUrl.replace(/\/+$/u, '')
+}
+
+function getNativePackageUrl(): string {
+  if (!MACRO.NATIVE_PACKAGE_URL) {
+    throw new Error(
+      'MindCode native package is not configured for this local build',
+    )
+  }
+  return MACRO.NATIVE_PACKAGE_URL
+}
 
 export async function getLatestVersionFromArtifactory(
   tag: string = 'latest',
 ): Promise<string> {
+  const nativePackageUrl = getNativePackageUrl()
   const startTime = Date.now()
   const { stdout, code, stderr } = await execFileNoThrowWithCwd(
     'npm',
     [
       'view',
-      `${MACRO.NATIVE_PACKAGE_URL}@${tag}`,
+      `${nativePackageUrl}@${tag}`,
       'version',
       '--prefer-online',
       '--registry',
@@ -65,7 +83,7 @@ export async function getLatestVersionFromArtifactory(
     source_npm: true,
   })
   logForDebugging(
-    `npm view ${MACRO.NATIVE_PACKAGE_URL}@${tag} version: ${stdout}`,
+    `npm view ${nativePackageUrl}@${tag} version: ${stdout}`,
   )
   const latestVersion = stdout.trim()
   return latestVersion
@@ -145,13 +163,14 @@ export async function getLatestVersion(
   }
 
   // Use GCS for external users
-  return getLatestVersionFromBinaryRepo(channel, GCS_BUCKET_URL)
+  return getLatestVersionFromBinaryRepo(channel, getReleaseBaseUrl())
 }
 
 export async function downloadVersionFromArtifactory(
   version: string,
   stagingPath: string,
 ) {
+  const nativePackageUrl = getNativePackageUrl()
   const fs = getFsImplementation()
 
   // If we get here, we own the lock and can delete a partial download
@@ -159,7 +178,7 @@ export async function downloadVersionFromArtifactory(
 
   // Get the platform-specific package name
   const platform = getPlatform()
-  const platformPackageName = `${MACRO.NATIVE_PACKAGE_URL}-${platform}`
+  const platformPackageName = `${nativePackageUrl}-${platform}`
 
   // Fetch integrity hash for the platform-specific package
   logForDebugging(
@@ -204,7 +223,7 @@ export async function downloadVersionFromArtifactory(
     name: 'claude-native-installer',
     version: '0.0.1',
     dependencies: {
-      [MACRO.NATIVE_PACKAGE_URL!]: version,
+      [nativePackageUrl]: version,
     },
   }
 
@@ -219,10 +238,10 @@ export async function downloadVersionFromArtifactory(
         name: 'claude-native-installer',
         version: '0.0.1',
         dependencies: {
-          [MACRO.NATIVE_PACKAGE_URL!]: version,
+          [nativePackageUrl]: version,
         },
       },
-      [`node_modules/${MACRO.NATIVE_PACKAGE_URL}`]: {
+      [`node_modules/${nativePackageUrl}`]: {
         version: version,
         optionalDependencies: {
           [platformPackageName]: version,
@@ -264,7 +283,7 @@ export async function downloadVersionFromArtifactory(
   }
 
   logForDebugging(
-    `Successfully downloaded and verified ${MACRO.NATIVE_PACKAGE_URL}@${version}`,
+    `Successfully downloaded and verified ${nativePackageUrl}@${version}`,
   )
 }
 
@@ -274,7 +293,7 @@ const MAX_DOWNLOAD_RETRIES = 3
 
 function getStallTimeoutMs(): number {
   return (
-    Number(process.env.CLAUDE_CODE_STALL_TIMEOUT_MS_FOR_TESTING) ||
+    Number(process.env.MINDCODE_STALL_TIMEOUT_MS_FOR_TESTING) ||
     DEFAULT_STALL_TIMEOUT_MS
   )
 }
@@ -513,7 +532,11 @@ export async function downloadVersion(
   }
 
   // Use GCS for external users
-  await downloadVersionFromBinaryRepo(version, stagingPath, GCS_BUCKET_URL)
+  await downloadVersionFromBinaryRepo(
+    version,
+    stagingPath,
+    getReleaseBaseUrl(),
+  )
   return 'binary'
 }
 

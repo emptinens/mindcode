@@ -389,9 +389,9 @@ function PermissionRulesTab(t0) {
     let t8;
     if ($[10] === Symbol.for("react.memo_cache_sentinel")) {
       t8 = {
-        allow: "Claude Code won't ask before using allowed tools.",
-        ask: "Claude Code will always ask for confirmation before using these tools.",
-        deny: "Claude Code will always reject requests to use denied tools."
+        allow: "MindCode won't ask before using allowed tools.",
+        ask: "MindCode will always ask for confirmation before using these tools.",
+        deny: "MindCode will always reject requests to use denied tools."
       };
       $[10] = t8;
     } else {
@@ -1100,7 +1100,7 @@ export function PermissionRuleList(t0) {
   }
   let t28;
   if ($[89] === Symbol.for("react.memo_cache_sentinel")) {
-    t28 = <Text>Claude Code can read files in the workspace, and make edits when auto-accept edits is on.</Text>;
+    t28 = <Text>MindCode can read files in the workspace, and make edits when auto-accept edits is on.</Text>;
     $[89] = t28;
   } else {
     t28 = $[89];
@@ -1114,7 +1114,7 @@ export function PermissionRuleList(t0) {
   } else {
     t29 = $[92];
   }
-  const tAllowEverythingTab = <Tab id="allowEverything" title="Allow Everything"><Box flexDirection="column"><Text>When on, Claude Code skips all permission checks (same as --dangerously-skip-permissions). Saved as your default for future sessions.</Text><Select onChange={val => {const newMode = val === 'on' ? 'bypassPermissions' : 'default'; setAppState(prev => ({...prev, toolPermissionContext: {...prev.toolPermissionContext, mode: newMode}})); updateSettingsForSource('userSettings', {permissions: {defaultMode: val === 'on' ? 'bypassPermissions' : undefined}});}} options={[{label: 'On', value: 'on'}, {label: 'Off', value: 'off'}]} defaultFocusValue={isAllowEverything ? 'on' : 'off'} /></Box></Tab>;
+  const tAllowEverythingTab = <Tab id="allowEverything" title="Allow Everything"><Box flexDirection="column"><Text>When on, MindCode skips all permission checks (same as --dangerously-skip-permissions). Saved as your default for future sessions.</Text><Select onChange={val => {const newMode = val === 'on' ? 'bypassPermissions' : 'default'; setAppState(prev => ({...prev, toolPermissionContext: {...prev.toolPermissionContext, mode: newMode}})); updateSettingsForSource('userSettings', {permissions: {defaultMode: val === 'on' ? 'bypassPermissions' : undefined}});}} options={[{label: 'On', value: 'on'}, {label: 'Off', value: 'off'}]} defaultFocusValue={isAllowEverything ? 'on' : 'off'} /></Box></Tab>;
   let t30;
   if ($[93] !== defaultTab || $[94] !== isHidden || $[95] !== t23 || $[96] !== t25 || $[97] !== t26 || $[98] !== t27 || $[99] !== t29 || $[113] !== isAllowEverything) {
     t30 = <Tabs title="Permissions:" color="permission" defaultTab={defaultTab} hidden={isHidden} initialHeaderFocused={!hasDenials} navFromContent={t23}>{tAllowEverythingTab}{t24}{t25}{t26}{t27}{t29}</Tabs>;

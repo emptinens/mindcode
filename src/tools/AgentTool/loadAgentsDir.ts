@@ -127,11 +127,11 @@ export type BaseAgentDefinition = {
   // this automatically; isolation must be explicitly requested in the Agent call.
   isolation?: 'worktree' | 'remote'
   pendingSnapshotUpdate?: { snapshotTimestamp: string }
-  /** Omit CLAUDE.md hierarchy from the agent's userContext. Read-only agents
+  /** Omit MINDCODE.md hierarchy from the agent's userContext. Read-only agents
    * (Explore, Plan) don't need commit/PR/lint guidelines — the main agent has
-   * full CLAUDE.md and interprets their output. Saves ~5-15 Gtok/week across
-   * 34M+ Explore spawns. Kill-switch: tengu_slim_subagent_claudemd. */
-  omitClaudeMd?: boolean
+   * full MINDCODE.md and interprets their output. Saves ~5-15 Gtok/week across
+   * 34M+ Explore spawns. Kill-switch: tengu_slim_subagent_mindcodemd. */
+  omitMindCodeMd?: boolean
 }
 
 // Built-in agents - dynamic prompts only, no static systemPrompt field
@@ -298,7 +298,7 @@ async function initializeAgentMemorySnapshots(
 export const getAgentDefinitionsWithOverrides = memoize(
   async (cwd: string): Promise<AgentDefinitionsResult> => {
     // Simple mode: skip custom agents, only return built-ins
-    if (isEnvTruthy(process.env.CLAUDE_CODE_SIMPLE)) {
+    if (isEnvTruthy(process.env.MINDCODE_SIMPLE)) {
       const builtInAgents = getBuiltInAgents()
       return {
         activeAgents: builtInAgents,

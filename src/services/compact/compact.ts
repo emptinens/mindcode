@@ -139,14 +139,14 @@ export const POST_COMPACT_SKILLS_TOKEN_BUDGET = 25_000
 const MAX_COMPACT_STREAMING_RETRIES = 2
 
 function getCompactModel(mainLoopModel: string): string {
-  return process.env.CLAUDE_CODE_COMPACT_MODEL?.trim() || mainLoopModel
+  return process.env.MINDCODE_COMPACT_MODEL?.trim() || mainLoopModel
 }
 
 function isCompactCacheSharingEnabled(
   mainLoopModel: string,
   compactModel: string,
 ): boolean {
-  if (isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_COMPACT_CACHE_SHARING)) {
+  if (isEnvTruthy(process.env.MINDCODE_DISABLE_COMPACT_CACHE_SHARING)) {
     return false
   }
   // Cache sharing requires byte-identical model parameters. A dedicated
@@ -1737,8 +1737,8 @@ function shouldExcludeFromPostCompactRestore(
   }
 
   // Exclude all types of claude.md files
-  // TODO: Refactor to use isMemoryFilePath() from claudemd.ts for consistency
-  // and to also match child directory memory files (.claude/rules/*.md, etc.)
+  // TODO: Refactor to use isMemoryFilePath() from mindcodemd.ts for consistency
+  // and to also match child directory memory files (.mindcode/rules/*.md, etc.)
   try {
     const normalizedMemoryPaths = new Set(
       MEMORY_TYPE_VALUES.map(type => expandPath(getMemoryPath(type))),

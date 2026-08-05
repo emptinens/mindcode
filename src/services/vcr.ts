@@ -15,7 +15,7 @@ import type {
 } from '../types/message.js'
 import { getCwd } from '../utils/cwd.js'
 import { env } from '../utils/env.js'
-import { getClaudeConfigHomeDir, isEnvTruthy } from '../utils/envUtils.js'
+import { getMindCodeConfigHomeDir, isEnvTruthy } from '../utils/envUtils.js'
 import { getErrnoCode } from '../utils/errors.js'
 import { normalizeMessagesForAPI } from '../utils/messages.js'
 import { jsonParse, jsonStringify } from '../utils/slowOperations.js'
@@ -51,7 +51,7 @@ async function withFixture<T>(
     .digest('hex')
     .slice(0, 12)
   const filename = join(
-    process.env.CLAUDE_CODE_TEST_FIXTURES_ROOT ?? getCwd(),
+    process.env.MINDCODE_TEST_FIXTURES_ROOT ?? getCwd(),
     `fixtures/${fixtureName}-${hash}.json`,
   )
 
@@ -110,7 +110,7 @@ export async function withVCR(
     dehydrateValue,
   )
   const filename = join(
-    process.env.CLAUDE_CODE_TEST_FIXTURES_ROOT ?? getCwd(),
+    process.env.MINDCODE_TEST_FIXTURES_ROOT ?? getCwd(),
     `fixtures/${dehydratedInput.map(_ => createHash('sha1').update(jsonStringify(_)).digest('hex').slice(0, 6)).join('-')}.json`,
   )
 
@@ -293,7 +293,7 @@ function dehydrateValue(s: unknown): unknown {
     return s
   }
   const cwd = getCwd()
-  const configHome = getClaudeConfigHomeDir()
+  const configHome = getMindCodeConfigHomeDir()
   let s1 = s
     .replace(/num_files="\d+"/g, 'num_files="[NUM]"')
     .replace(/duration_ms="\d+"/g, 'duration_ms="[DURATION]"')
@@ -342,7 +342,7 @@ function hydrateValue(s: unknown): unknown {
   return s
     .replaceAll('[NUM]', '1')
     .replaceAll('[DURATION]', '100')
-    .replaceAll('[CONFIG_HOME]', getClaudeConfigHomeDir())
+    .replaceAll('[CONFIG_HOME]', getMindCodeConfigHomeDir())
     .replaceAll('[CWD]', getCwd())
 }
 

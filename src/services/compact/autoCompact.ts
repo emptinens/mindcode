@@ -42,7 +42,7 @@ export function getEffectiveContextWindowSize(model: string): number {
   )
   let contextWindow = getContextWindowForModel(model, getSdkBetas())
 
-  const autoCompactWindow = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  const autoCompactWindow = process.env.MINDCODE_AUTO_COMPACT_WINDOW
   if (autoCompactWindow) {
     const parsed = Number.parseInt(autoCompactWindow, 10)
     if (!Number.isNaN(parsed) && parsed > 0) {
@@ -86,7 +86,7 @@ export function getAutoCompactThreshold(model: string): number {
 
   return calculateAutoCompactThreshold(
     effectiveContextWindow,
-    process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE,
+    process.env.MINDCODE_AUTOCOMPACT_PCT_OVERRIDE,
   )
 }
 
@@ -121,7 +121,7 @@ export function calculateTokenWarningState(
   const defaultBlockingLimit = calculateHardLimitThreshold(effectiveContextWindow)
 
   // Allow override for testing
-  const blockingLimitOverride = process.env.CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE
+  const blockingLimitOverride = process.env.MINDCODE_BLOCKING_LIMIT_OVERRIDE
   const parsedOverride = blockingLimitOverride
     ? Number.parseInt(blockingLimitOverride, 10)
     : Number.NaN
@@ -206,7 +206,7 @@ export async function shouldAutoCompact(
   // sessionMemory + manual /compact working.
   //
   // Consult isContextCollapseEnabled (not the raw gate) so the
-  // CLAUDE_CONTEXT_COLLAPSE env override is honored here too. require()
+  // MINDCODE_CONTEXT_COLLAPSE env override is honored here too. require()
   // inside the block breaks the init-time cycle (this file exports
   // getEffectiveContextWindowSize which collapse's index imports).
   if (feature('CONTEXT_COLLAPSE')) {

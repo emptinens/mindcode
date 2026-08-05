@@ -604,8 +604,8 @@ export function getMockHeaderless429Message(): string | null {
     return null
   }
   // Env var path for -p / SDK testing where slash commands aren't available
-  if (process.env.CLAUDE_MOCK_HEADERLESS_429) {
-    return process.env.CLAUDE_MOCK_HEADERLESS_429
+  if (process.env.MINDCODE_MOCK_HEADERLESS_429) {
+    return process.env.MINDCODE_MOCK_HEADERLESS_429
   }
   if (!mockEnabled) {
     return null
@@ -714,7 +714,7 @@ export function shouldProcessMockLimits(): boolean {
   if (process.env.USER_TYPE !== 'ant') {
     return false
   }
-  return mockEnabled || Boolean(process.env.CLAUDE_MOCK_HEADERLESS_429)
+  return mockEnabled || Boolean(process.env.MINDCODE_MOCK_HEADERLESS_429)
 }
 
 export function getCurrentMockScenario(): MockScenario | null {

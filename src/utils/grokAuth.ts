@@ -1,5 +1,5 @@
 // Auth helpers for Grok web research (GrokSearch tool + /grok-login command).
-// The `sso` session cookie from grok.com is stored plain-text in ~/.claude.json.
+// The `sso` session cookie from grok.com is stored plain-text in ~/.mindcode.json.
 import { getGlobalConfig, saveGlobalConfig } from "./config.js";
 
 /** The stored Grok `sso` cookie, or undefined if not set / blank. */

@@ -31,7 +31,7 @@ function resolveSourcePath(candidate: string): string | null {
 }
 
 plugin({
-  name: 'claude-code-shims',
+  name: 'mindcode-shims',
   setup(build) {
     build.onResolve({ filter: /^src\// }, args => {
       const basePath = path.join(root, args.path)

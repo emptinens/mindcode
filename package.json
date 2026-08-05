@@ -1,13 +1,13 @@
 {
-  "name": "@anthropic-ai/claude-code",
-  "version": "1.0.0",
-  "description": "Anthropic Claude Code CLI — leaked source (2026-03-31). Not an official release.",
+  "name": "mindcode",
+  "version": "0.1.0",
+  "description": "MindCode CLI",
   "license": "UNLICENSED",
   "private": true,
   "type": "module",
   "main": "src/entrypoints/cli.tsx",
   "bin": {
-    "claude": "src/entrypoints/cli.tsx"
+    "mindcode": "src/entrypoints/cli.tsx"
   },
   "scripts": {
     "build": "node scripts/build-bundle.mjs",
@@ -25,7 +25,7 @@
     "check": "bun run lint && bun run typecheck",
     "quality-baseline:update": "node scripts/quality-baseline.mjs update",
     "test": "bun test",
-    "smoke": "bun dist/claude.js --help"
+    "smoke": "bun dist/mindcode.js --help"
   },
   "dependencies": {
     "@alcalzone/ansi-tokenize": "^0.3.0",

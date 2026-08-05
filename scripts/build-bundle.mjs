@@ -76,8 +76,8 @@ function resolveSourcePath(candidate) {
 }
 
 // bun --compile bakes the entry file's absolute path into the standalone binary
-// as `var __filename = "<build-root>/scripts/.tmp/claude.js"`, injected AFTER
-// the claude.js path-stripping pass, so the build machine's home dir leaks into
+// as `var __filename = "<build-root>/scripts/.tmp/mindcode.js"`, injected AFTER
+// the mindcode.js path-stripping pass, so the build machine's home dir leaks into
 // every shipped executable. No bun flag disables this. Scrub it out of the
 // finished binary by overwriting the build-root prefix wherever it appears with
 // an equal-length filler, preserving every byte offset so the binary stays
@@ -127,7 +127,7 @@ function scrubBuildPath(binaryPath) {
   // Fail-loud guard: the build machine's home directory (which contains the
   // username — the actually-sensitive part of the path) must not survive in any
   // encoding. Checking the home dir rather than the project name avoids false
-  // positives, since "claude-code" legitimately appears throughout the binary
+  // positives, since "mindcode" legitimately appears throughout the binary
   // (package name, URLs, plugin prefixes) unrelated to the build path.
   const homeDir = os.homedir()
   const scrubbed = readFileSync(binaryPath)
@@ -256,11 +256,14 @@ await mkdir(outdir, { recursive: true })
 
 // Ensure dist is treated as ESM by bun/node
 import { writeFile as writeFileSync } from 'node:fs/promises'
-await writeFileSync(path.join(outdir, 'package.json'), JSON.stringify({ type: 'module' }, null, 2) + '\n')
+await writeFileSync(
+  path.join(outdir, 'package.json'),
+  JSON.stringify({ name: 'mindcode', version: '0.1.0', type: 'module' }, null, 2) + '\n',
+)
 
 const options = {
   entryPoints: [path.join(root, 'src/entrypoints/cli.tsx')],
-  outfile: path.join(outdir, 'claude.js'),
+  outfile: path.join(outdir, 'mindcode.js'),
   bundle: true,
   platform: 'node',
   target: 'node22',
@@ -273,17 +276,17 @@ const options = {
 import { createRequire as __createRequire } from "node:module";
 const require = __createRequire(import.meta.url);
 const MACRO = {
-  VERSION: "1.0.0",
+  VERSION: "0.1.0",
   BUILD_TIME: ${JSON.stringify(new Date().toISOString())},
-  PACKAGE_URL: "@anthropic-ai/claude-code",
-  NATIVE_PACKAGE_URL: "@anthropic-ai/claude-code-native",
-  FEEDBACK_CHANNEL: "https://github.com/anthropics/claude-code/issues",
-  ISSUES_EXPLAINER: "file an issue at https://github.com/anthropics/claude-code/issues",
+  PACKAGE_URL: undefined,
+  NATIVE_PACKAGE_URL: undefined,
+  FEEDBACK_CHANNEL: "",
+  ISSUES_EXPLAINER: "file an issue in the MindCode repository",
   VERSION_CHANGELOG: ""
 };`,
   },
   define: {
-    'MACRO.VERSION': JSON.stringify('1.0.0'),
+    'MACRO.VERSION': JSON.stringify('0.1.0'),
     'MACRO.BUILD_TIME': JSON.stringify(new Date().toISOString()),
   },
   external: [
@@ -314,7 +317,7 @@ if (watch) {
 
   // Strip absolute paths from the output to avoid leaking personal info
   const { readFile, writeFile } = await import('node:fs/promises')
-  const outfile = path.join(outdir, 'claude.js')
+  const outfile = path.join(outdir, 'mindcode.js')
   let code = await readFile(outfile, 'utf8')
 
   // Replace any absolute path pointing to the project root with ./
@@ -351,7 +354,7 @@ if (watch) {
   const { execSync } = await import('node:child_process')
   const tmpDir = path.join(import.meta.dirname, '.tmp')
   await mkdir(tmpDir, { recursive: true })
-  const tmpFile = path.join(tmpDir, 'claude.js')
+  const tmpFile = path.join(tmpDir, 'mindcode.js')
   await writeFile(tmpFile, code)
 
   // wreq-js is intentionally NOT external here: bun embeds its .node addon into
@@ -415,13 +418,13 @@ if (watch) {
   }
 
   const allTargets = [
-    { target: 'bun-windows-x64', outfile: 'claude.exe' },
-    { target: 'bun-linux-x64', outfile: 'claude-linux-x64' },
-    { target: 'bun-linux-arm64', outfile: 'claude-linux-arm64' },
-    { target: 'bun-darwin-x64', outfile: 'claude-darwin-x64' },
-    { target: 'bun-darwin-arm64', outfile: 'claude-darwin-arm64' },
+    { target: 'bun-windows-x64', outfile: 'mindcode.exe' },
+    { target: 'bun-linux-x64', outfile: 'mindcode-linux-x64' },
+    { target: 'bun-linux-arm64', outfile: 'mindcode-linux-arm64' },
+    { target: 'bun-darwin-x64', outfile: 'mindcode-darwin-x64' },
+    { target: 'bun-darwin-arm64', outfile: 'mindcode-darwin-arm64' },
   ]
-  const requestedTargets = process.env.CLAUDE_BUILD_TARGETS
+  const requestedTargets = process.env.MINDCODE_BUILD_TARGETS
     ?.split(',')
     .map(value => value.trim())
     .filter(Boolean)
@@ -430,7 +433,7 @@ if (watch) {
     : allTargets
   if (targets.length === 0) {
     throw new Error(
-      `No build targets matched CLAUDE_BUILD_TARGETS=${process.env.CLAUDE_BUILD_TARGETS}`,
+      `No build targets matched MINDCODE_BUILD_TARGETS=${process.env.MINDCODE_BUILD_TARGETS}`,
     )
   }
   for (const { target, outfile: out } of targets) {
