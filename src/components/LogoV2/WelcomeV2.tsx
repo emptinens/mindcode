@@ -12,12 +12,9 @@ export function WelcomeV2(): React.ReactNode {
         <Text color="rgb(255,153,204)">Welcome to MindCode</Text>{" "}
         <Text dimColor>v{MACRO.VERSION}</Text>
       </Text>
-      <Box marginY={1} flexDirection="column" alignItems="center">
-        <Text color="rgb(255,190,224)"> ·✿·✿· </Text>
-        <Text color="rgb(255,153,204)"> ·✿╲╱✿· </Text>
-        <Text color="rgb(177,105,79)"> ║█║ </Text>
+      <Box marginY={1}>
+        <Sakura pose="bloom" />
       </Box>
-      <Sakura pose="bloom" />
     </Box>
   );
 }

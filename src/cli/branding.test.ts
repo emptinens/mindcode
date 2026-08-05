@@ -44,4 +44,17 @@ describe('bounded CLI branding', () => {
     expect(runtimeSource).not.toContain('fetchClaudeAIMcpConfigsIfEligible')
     expect(runtimeSource).not.toContain('claudeaiConfigPromise')
   })
+
+  test('interactive startup cannot stall on the removed internal permission logger', async () => {
+    const main = await Bun.file(
+      new URL('../../src/main.tsx', import.meta.url),
+    ).text()
+    const entrypoint = await Bun.file(
+      new URL('../../src/entrypoints/cli.tsx', import.meta.url),
+    ).text()
+
+    expect(main).not.toContain('logPermissionContextForAnts(')
+    expect(entrypoint).toContain('void main().catch')
+    expect(entrypoint).toContain('process.exit(1)')
+  })
 })

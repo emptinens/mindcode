@@ -222,4 +222,15 @@ async function main(): Promise<void> {
 }
 
 // eslint-disable-next-line custom-rules/no-top-level-side-effects
-void main();
+void main().catch(error => {
+  const details = error instanceof Error ? error.stack ?? error.message : String(error);
+  try {
+    if (process.stdin.isTTY && process.stdin.setRawMode) {
+      process.stdin.setRawMode(false);
+    }
+    process.stderr.write(`\x1b[?25h\x1b[?2004l\x1b[?1004l\r\nMindCode startup failure: ${details}\n`);
+  } finally {
+    // eslint-disable-next-line custom-rules/no-process-exit -- fatal bootstrap failure
+    process.exit(1);
+  }
+});

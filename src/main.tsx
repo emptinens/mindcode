@@ -1932,7 +1932,7 @@ async function run(): Promise<CommanderCommand> {
 
     // Log context metrics once at initialization
     void logContextMetrics(regularMcpConfigs, toolPermissionContext);
-    void logPermissionContextForAnts(null, 'initialization');
+    // Internal provider permission telemetry is intentionally disabled.
     logManagedSettings();
 
     // Register PID file for concurrent-session detection (~/.mindcode/sessions/)

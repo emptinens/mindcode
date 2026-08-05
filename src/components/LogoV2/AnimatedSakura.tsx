@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { Box } from "../../ink.js";
 import { getInitialSettings } from "../../utils/settings/settings.js";
 import { Sakura } from "./Sakura.js";
-import type { SakuraPose } from "./sakuraArt.js";
+import { SAKURA_HEIGHT, SAKURA_WIDTH, type SakuraPose } from "./sakuraArt.js";
 
 type Props = {
   compact?: boolean;
@@ -61,8 +61,8 @@ export function AnimatedSakura({
 
   return (
     <Box
-      height={3}
-      width={9}
+      height={SAKURA_HEIGHT}
+      width={SAKURA_WIDTH}
       flexDirection="column"
       flexShrink={0}
       onClick={onClick}

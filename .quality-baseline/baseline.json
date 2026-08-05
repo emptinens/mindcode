@@ -3,8 +3,8 @@
   "typecheck": {
     "command": "tsc --noEmit",
     "version": "Version 5.9.3",
-    "hash": "69d4beeab0cfa7ed0ff5faf02c48a594dbaf7517cd2c58cf2fa1c263e0cf401a",
-    "count": 4184
+    "hash": "4781995c37266ab4ea8887ec5ac3789d5437ab3c0e5edd0b17564be7266d764e",
+    "count": 4183
   },
   "lint": {
     "command": "biome lint src/ --max-diagnostics=none --reporter=github",

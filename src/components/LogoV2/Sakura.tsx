@@ -20,7 +20,7 @@ type Props = {
 
 /** MindCode's compact Sakura tree mascot. */
 export function Sakura({ pose = "default" }: Props): React.ReactNode {
-  const [canopy, branches, trunk] = SAKURA_ART[pose];
+  const frame = SAKURA_ART[pose];
   return (
     <Box
       width={SAKURA_WIDTH}
@@ -28,9 +28,20 @@ export function Sakura({ pose = "default" }: Props): React.ReactNode {
       flexDirection="column"
       flexShrink={0}
     >
-      <Text color={PETAL_HIGHLIGHT}>{canopy}</Text>
-      <Text color={PETAL_COLOR}>{branches}</Text>
-      <Text color={TRUNK_COLOR}>{trunk}</Text>
+      {frame.map((row, index) => (
+        <Text
+          key={row}
+          color={
+            index === 0
+              ? PETAL_HIGHLIGHT
+              : index < 4
+                ? PETAL_COLOR
+                : TRUNK_COLOR
+          }
+        >
+          {row}
+        </Text>
+      ))}
     </Box>
   );
 }

@@ -1,23 +1,27 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { stringWidth } from "../../ink/stringWidth.js";
 import { SAKURA_ART, SAKURA_HEIGHT, SAKURA_WIDTH } from "./sakuraArt.js";
 
 test("Sakura mascot keeps a stable terminal footprint", () => {
-  expect(SAKURA_WIDTH).toBe(9);
-  expect(SAKURA_HEIGHT).toBe(3);
+  expect(SAKURA_WIDTH).toBe(17);
+  expect(SAKURA_HEIGHT).toBe(6);
   for (const frame of Object.values(SAKURA_ART)) {
-    expect(frame).toHaveLength(3);
-    expect(frame.every((row) => [...row].length === SAKURA_WIDTH)).toBe(true);
+    expect(frame).toHaveLength(SAKURA_HEIGHT);
+    expect(frame.every((row) => stringWidth(row) === SAKURA_WIDTH)).toBe(true);
   }
 });
 
 test("Sakura art has a snapshot-stable default frame", () => {
   expect(SAKURA_ART.default).toMatchInlineSnapshot(`
     [
-      "  .✿.✿.  ",
-      " .✿╲╱✿.  ",
-      "   ║█║   ",
+      "      ·   ❀      ",
+      "    · ❀ ✿ ❀ ·    ",
+      "   ❀ ✿╲✿╱✿ ❀  ·  ",
+      "   ╲ ╲│╱ ╱   ❀   ",
+      "        │        ",
+      "       ╱┴╲       ",
     ]
   `);
 });
