@@ -399,3 +399,36 @@ src/commands/copycon/
 src/commands/status/
 src/commands.ts
 ```
+
+## 7. Rust acceleration program — IN PROGRESS (2026-08-06)
+
+Цель: уменьшить локальный p95 Agent dispatch до `<100ms` для первого запуска и
+`<50ms` для тёплого, сделать поле ввода доступным за `<500ms`, не увеличивая
+число model calls. При конфликте latency и стоимости действует credits-first.
+
+Зафиксированная архитектура:
+
+- macOS/Linux x64+arm64; Windows остаётся на TS fallback;
+- `mindcoded` — lazy Rust daemon с idle timeout 30 минут;
+- Unix socket protocol v1: 4-byte big-endian length + MessagePack, максимум 16MiB;
+- `VEXZY_API_KEY` разрешён только в памяти процесса и не входит в IPC status/logs;
+- последний валидный каталог VEXZY используется сразу, refresh выполняется в фоне;
+- low/medium используют тёплый pool, high/max и write-overlap требуют изоляции;
+- общий project pool имеет session namespaces и глобальный overlap guard;
+- hard cap 64 поверх weighted adaptive scheduler;
+- весь validated DAG может продолжаться после закрытия TUI, но новые задачи без
+  Leader не создаются и расход останавливается на 2x от прогноза;
+- TS fallback сохраняется два стабильных релиза.
+
+Текущий статус:
+
+1. `DONE`: повторяемый p50/p95 benchmark harness.
+2. `DONE`: shared Rust protocol, hardened daemon lifecycle и TS IPC adapter.
+   Protocol v1 использует 4-byte big-endian framing + MessagePack, handshake
+   timeout, concurrent cancellation, duplicate-ID protection, socket/runtime
+   permissions `0600/0700`, generation-safe reconnect и sanitized spawn env.
+   Проверки: `17` Rust tests, `17` TS daemon tests и реальный Rust↔TS interop.
+3. `TODO`: Rust TaskGraph/session SQLite, core tools/index/Git/process/MCP.
+4. `TODO`: model-native VEXZY proxy и immutable prompt snapshots.
+5. `TODO`: streaming DAG, credits-first tuning и тёплый worker pool.
+6. `TODO`: Ratatui input/status/tasks migration и release performance gates.
