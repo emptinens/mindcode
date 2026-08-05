@@ -79,6 +79,23 @@ describe('Vexzy model catalog', () => {
     expect(registry.get('priced-model')?.outputCreditsPerMillion).toBe(37)
   })
 
+  test('accepts numeric-string prices and rejects malformed or negative values', () => {
+    const registry = createVexzyModelRegistry({
+      object: 'list',
+      data: [
+        { ...model('string-price'), pricing: { output_credits_per_million: '37' } },
+        { ...model('free-model'), pricing: { output_credits_per_million: 0 } },
+        { ...model('bad-price'), pricing: { output_credits_per_million: '37 credits' } },
+        { ...model('negative-price'), pricing: { output_credits_per_million: -1 } },
+      ],
+    })
+
+    expect(registry.get('string-price')?.outputCreditsPerMillion).toBe(37)
+    expect(registry.get('free-model')?.outputCreditsPerMillion).toBe(0)
+    expect(registry.get('bad-price')?.outputCreditsPerMillion).toBeNull()
+    expect(registry.get('negative-price')?.outputCreditsPerMillion).toBeNull()
+  })
+
   test('deduplicates concurrent loads through the shared model client', async () => {
     let calls = 0
     let release: (() => void) | undefined

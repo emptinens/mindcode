@@ -35,6 +35,7 @@ import {
 } from "../../services/credits/accounting.js";
 import { getTaskGraphDatabasePath } from "../../storage/taskGraphPaths.js";
 import { getMindCodeConfigHomeDir } from "../../utils/envUtils.js";
+import { getConfiguredSubagentModel } from "../../utils/model/subagentModel.js";
 import { getSwarmConcurrencySnapshot } from "../../utils/swarm/concurrencyPolicy.js";
 
 const number = new Intl.NumberFormat("en-US");
@@ -88,6 +89,7 @@ export type StatusReportData = {
     compactTokens: number | null;
   };
   taskGraph: "initialized" | "not initialized";
+  workerModel: string;
 };
 
 export function escapeHtml(value: unknown): string {
@@ -166,7 +168,7 @@ function architecture(data: StatusReportData): string {
     data.taskGraph === "initialized"
       ? "initialized · persisted runtime state detected"
       : "not initialized · no persisted runtime state detected";
-  return `<section class="panel architecture"><h2>Runtime architecture</h2><div class="flow"><div class="node"><b>Leader</b><small>running</small></div><span class="arrow" aria-hidden="true">→</span><div class="node"><b>Weighted scheduler</b><small>${escapeHtml(`${scheduler.activeWorkers} active · ${scheduler.queuedWorkers} queued`)}</small></div><span class="arrow" aria-hidden="true">→</span><div class="node"><b>Luna workers</b><small>fixed worker model · runtime pool</small></div><span class="arrow" aria-hidden="true">→</span><div class="node"><b>Structured worker report</b><small>active · JSON-only Leader context</small></div></div><div class="architecture-foot"><span><b>Task graph</b><br>${escapeHtml(taskGraphStatus)}</span><span><b>Worker budget</b><br>${escapeHtml(`${number.format(scheduler.activeWeight)} active / ${number.format(scheduler.budget)} total weight`)}</span></div></section>`;
+  return `<section class="panel architecture"><h2>Runtime architecture</h2><div class="flow"><div class="node"><b>Leader</b><small>running</small></div><span class="arrow" aria-hidden="true">→</span><div class="node"><b>Weighted scheduler</b><small>${escapeHtml(`${scheduler.activeWorkers} active · ${scheduler.queuedWorkers} queued`)}</small></div><span class="arrow" aria-hidden="true">→</span><div class="node"><b>Workers</b><small>${escapeHtml(`${data.workerModel} · configured VEXZY model`)}</small></div><span class="arrow" aria-hidden="true">→</span><div class="node"><b>Structured worker report</b><small>active · JSON-only Leader context</small></div></div><div class="architecture-foot"><span><b>Task graph</b><br>${escapeHtml(taskGraphStatus)}</span><span><b>Worker budget</b><br>${escapeHtml(`${number.format(scheduler.activeWeight)} active / ${number.format(scheduler.budget)} total weight`)}</span></div></section>`;
 }
 
 export function renderStatusHtml(data: StatusReportData): string {
@@ -379,6 +381,7 @@ export async function generateStatusHtmlReport(): Promise<string> {
     taskGraph: existsSync(getTaskGraphDatabasePath())
       ? "initialized"
       : "not initialized",
+    workerModel: getConfiguredSubagentModel(),
   };
   const html = renderStatusHtml(data);
   const reportsDir = join(getMindCodeConfigHomeDir(), "reports");

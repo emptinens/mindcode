@@ -23,6 +23,11 @@ export type ModelCreditUsage = CreditBreakdown & {
   requests: number;
 };
 
+export type SessionCreditTotals = CreditBreakdown & {
+  requests: number;
+  modelsWithoutPrice: number;
+};
+
 export const VEXZY_CREDIT_DIVISORS = {
   input: 8,
   cache: 40,
@@ -105,11 +110,9 @@ export function getSessionModelCredits(): ModelCreditUsage[] {
   return result;
 }
 
-export function getSessionCreditTotals(): CreditBreakdown & {
-  requests: number;
-  modelsWithoutPrice: number;
-} {
-  const models = getSessionModelCredits();
+export function aggregateSessionCredits(
+  models: readonly ModelCreditUsage[],
+): SessionCreditTotals {
   const totals = models.reduce(
     (acc, model) => {
       acc.inputTokens += model.inputTokens;
@@ -144,12 +147,12 @@ export function getSessionCreditTotals(): CreditBreakdown & {
   );
   return {
     ...totals,
-    totalCredits:
-      totals.modelsWithoutPrice > 0 &&
-      models.every((model) => model.totalCredits === null)
-        ? null
-        : totals.totalCredits,
+    totalCredits: totals.modelsWithoutPrice > 0 ? null : totals.totalCredits,
   };
+}
+
+export function getSessionCreditTotals(): SessionCreditTotals {
+  return aggregateSessionCredits(getSessionModelCredits());
 }
 
 export function formatVexzyCredits(value: number | null): string {

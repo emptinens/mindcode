@@ -78,6 +78,7 @@ function fixture(): StatusReportData {
       compactTokens: 978_500,
     },
     taskGraph: "initialized",
+    workerModel: "gpt-5.6-luna",
     credits: {
       ...calculateVexzyCredits(
         {
@@ -104,6 +105,7 @@ describe("status HTML report", () => {
     expect(html).not.toContain('<model onmouseover="bad">');
     expect(html).toContain("3 active · 2 queued");
     expect(html).toContain("12 active / 32 total weight");
+    expect(html).toContain("gpt-5.6-luna · configured VEXZY model");
     expect(html).toContain("Retry overhead");
     expect(html).toContain("875,500 tokens");
     expect(html).toContain("Session credits");

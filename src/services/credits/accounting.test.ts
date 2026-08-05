@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { VEXZY_CREDIT_DIVISORS, calculateVexzyCredits } from "./accounting.js";
+import {
+  VEXZY_CREDIT_DIVISORS,
+  aggregateSessionCredits,
+  calculateVexzyCredits,
+} from "./accounting.js";
 
 describe("VEXZY credit accounting", () => {
   test("applies the documented output-price multipliers", () => {
@@ -64,5 +68,36 @@ describe("VEXZY credit accounting", () => {
     expect(result.reasoningTokens).toBe(0);
     expect(result.outputTokens).toBe(100);
     expect(result.totalCredits).toBe(0.0037);
+  });
+
+  test("marks a mixed-price session total unknown instead of under-reporting", () => {
+    const known = calculateVexzyCredits(
+      {
+        inputTokens: 1_000,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        outputTokens: 1_000,
+      },
+      100,
+    );
+    const unknown = calculateVexzyCredits(
+      {
+        inputTokens: 1_000,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        outputTokens: 1_000,
+      },
+      null,
+    );
+
+    const totals = aggregateSessionCredits([
+      { model: "known", requests: 1, ...known },
+      { model: "unknown", requests: 1, ...unknown },
+    ]);
+
+    expect(totals.modelsWithoutPrice).toBe(1);
+    expect(totals.totalCredits).toBeNull();
   });
 });
