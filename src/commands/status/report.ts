@@ -19,7 +19,6 @@ import {
   getTotalToolDuration,
   getTotalWebSearchRequests,
 } from "../../bootstrap/state.js";
-import { TaskGraphDaemonClient } from "../../runtime/taskGraph/client.js";
 import {
   DEFAULT_AUTO_COMPACT_PERCENTAGE,
   DEFAULT_WARNING_PERCENTAGE,
@@ -35,7 +34,6 @@ import {
   getSessionModelCredits,
 } from "../../services/credits/accounting.js";
 import { getTaskGraphDatabasePath } from "../../storage/taskGraphPaths.js";
-import { openTaskGraph } from "../../tasks/graph/taskGraph.js";
 import type { TaskGraphSnapshot } from "../../tasks/graph/types.js";
 import { getMindCodeConfigHomeDir } from "../../utils/envUtils.js";
 import { getConfiguredSubagentModel } from "../../utils/model/subagentModel.js";
@@ -44,6 +42,7 @@ import {
   getSwarmWorkerWeight,
 } from "../../utils/swarm/concurrencyPolicy.js";
 import type { CreditsSnapshot } from "../../utils/swarm/creditsPolicy.js";
+import { graphSnapshot } from "../../utils/taskGraphAdapter.js";
 
 const number = new Intl.NumberFormat("en-US");
 
@@ -186,8 +185,15 @@ function displayTimestamp(value: string | null): string {
 function safeOpaque(value: unknown): string {
   const text = String(value ?? "");
   if (
-    /(?:^|[\s(])(?:~\/|\/|[A-Za-z]:[\\/])/.test(text) ||
-    /forge-[A-Za-z0-9._-]+/i.test(text)
+    /(?:^|[=\s("'\x60])(?:~\/|\/(?!\/)|[A-Za-z]:[\\/])/.test(text) ||
+    /forge-[A-Za-z0-9._-]+/i.test(text) ||
+    /\bBearer\s+[^\s<]+/i.test(text) ||
+    /\b(?:VEXZY_API_KEY|api[_-]?key|authorization)\s*[:=]\s*[^\s<]+/i.test(
+      text,
+    ) ||
+    /\b(?:raw[_ -]?response(?:[_ -]?(?:body|text))?|response\.(?:body|data))\b/i.test(
+      text,
+    )
   ) {
     return "[redacted]";
   }
@@ -255,16 +261,7 @@ async function readTaskMetrics(
 ): Promise<StatusTaskMetrics> {
   if (!existsSync(databasePath)) return unavailableTaskMetrics();
   try {
-    const client = new TaskGraphDaemonClient();
-    const result = await client.snapshotWithFallback(() => {
-      const graph = openTaskGraph();
-      try {
-        return graph.snapshot();
-      } finally {
-        graph.close();
-      }
-    });
-    return taskMetricsFromSnapshot(result.value);
+    return taskMetricsFromSnapshot(await graphSnapshot());
   } catch {
     return unavailableTaskMetrics();
   }
@@ -306,7 +303,7 @@ function modelRows(models: StatusReportModel[]): string {
   return models
     .map(
       (model) =>
-        `<tr><td class="model">${escapeHtml(model.name)}</td><td>${escapeHtml(number.format(model.requests))}</td><td>${escapeHtml(model.priceCreditsPerMillion === null ? "n/a" : number.format(model.priceCreditsPerMillion))}</td><td>${escapeHtml(number.format(model.inputTokens))}</td><td>${escapeHtml(number.format(model.outputTokens))}</td><td>${escapeHtml(number.format(model.cacheReadTokens))}</td><td>${escapeHtml(number.format(model.cacheWriteTokens))}</td><td>${escapeHtml(model.reasoningTokens === null ? "n/a" : number.format(model.reasoningTokens))}</td><td>${escapeHtml(formatVexzyCredits(model.credits.inputCredits))}</td><td>${escapeHtml(formatVexzyCredits(model.credits.cacheCredits))}</td><td>${escapeHtml(formatVexzyCredits(model.credits.reasoningCredits))}</td><td>${escapeHtml(formatVexzyCredits(model.credits.outputCredits))}</td><td>${escapeHtml(formatVexzyCredits(model.credits.totalCredits))}</td><td>${escapeHtml(number.format(model.webSearchRequests))}</td><td>${escapeHtml(number.format(totalModelTokens(model)))}</td></tr>`,
+        `<tr><td class="model">${escapeHtml(safeOpaque(model.name))}</td><td>${escapeHtml(number.format(model.requests))}</td><td>${escapeHtml(model.priceCreditsPerMillion === null ? "n/a" : number.format(model.priceCreditsPerMillion))}</td><td>${escapeHtml(number.format(model.inputTokens))}</td><td>${escapeHtml(number.format(model.outputTokens))}</td><td>${escapeHtml(number.format(model.cacheReadTokens))}</td><td>${escapeHtml(number.format(model.cacheWriteTokens))}</td><td>${escapeHtml(model.reasoningTokens === null ? "n/a" : number.format(model.reasoningTokens))}</td><td>${escapeHtml(formatVexzyCredits(model.credits.inputCredits))}</td><td>${escapeHtml(formatVexzyCredits(model.credits.cacheCredits))}</td><td>${escapeHtml(formatVexzyCredits(model.credits.reasoningCredits))}</td><td>${escapeHtml(formatVexzyCredits(model.credits.outputCredits))}</td><td>${escapeHtml(formatVexzyCredits(model.credits.totalCredits))}</td><td>${escapeHtml(number.format(model.webSearchRequests))}</td><td>${escapeHtml(number.format(totalModelTokens(model)))}</td></tr>`,
     )
     .join("");
 }
@@ -333,7 +330,7 @@ function architecture(data: StatusReportData): string {
     data.taskGraph === "initialized"
       ? "initialized · persisted runtime state detected"
       : "not initialized · no persisted runtime state detected";
-  return `<section class="panel architecture"><h2>Runtime architecture</h2><div class="flow"><div class="node"><b>Leader</b><small>running</small></div><span class="arrow" aria-hidden="true">→</span><div class="node"><b>Weighted scheduler</b><small>${escapeHtml(`${scheduler.activeWorkers} active · ${scheduler.queuedWorkers} queued`)}</small></div><span class="arrow" aria-hidden="true">→</span><div class="node"><b>Workers</b><small>${escapeHtml(`${data.workerModel} · configured VEXZY model`)}</small></div><span class="arrow" aria-hidden="true">→</span><div class="node"><b>Structured worker report</b><small>active · JSON-only Leader context</small></div></div><div class="architecture-foot"><span><b>Task graph</b><br>${escapeHtml(taskGraphStatus)}</span><span><b>Worker budget</b><br>${escapeHtml(`${number.format(scheduler.activeWeight)} active / ${number.format(scheduler.budget)} total weight`)}</span></div></section>`;
+  return `<section class="panel architecture"><h2>Runtime architecture</h2><div class="flow"><div class="node"><b>Leader</b><small>running</small></div><span class="arrow" aria-hidden="true">→</span><div class="node"><b>Weighted scheduler</b><small>${escapeHtml(`${scheduler.activeWorkers} active · ${scheduler.queuedWorkers} queued`)}</small></div><span class="arrow" aria-hidden="true">→</span><div class="node"><b>Workers</b><small>${escapeHtml(`${safeOpaque(data.workerModel)} · configured VEXZY model`)}</small></div><span class="arrow" aria-hidden="true">→</span><div class="node"><b>Structured worker report</b><small>active · JSON-only Leader context</small></div></div><div class="architecture-foot"><span><b>Task graph</b><br>${escapeHtml(taskGraphStatus)}</span><span><b>Worker budget</b><br>${escapeHtml(`${number.format(scheduler.activeWeight)} active / ${number.format(scheduler.budget)} total weight`)}</span></div></section>`;
 }
 
 function roleRows(data: StatusReportData): string {
@@ -349,7 +346,7 @@ function roleRows(data: StatusReportData): string {
   )
     .map(
       ([role, metrics]) =>
-        `<tr><th>${escapeHtml(role)}</th><td>${escapeHtml(displayNumber(metrics.requests))}</td><td>${escapeHtml(displayNumber(metrics.inputTokens))}</td><td>${escapeHtml(displayNumber(metrics.outputTokens))}</td><td>${escapeHtml(displayNumber(metrics.reasoningTokens))}</td><td>${escapeHtml(metrics.effort ?? "unavailable")}</td></tr>`,
+        `<tr><th>${escapeHtml(role)}</th><td>${escapeHtml(displayNumber(metrics.requests))}</td><td>${escapeHtml(displayNumber(metrics.inputTokens))}</td><td>${escapeHtml(displayNumber(metrics.outputTokens))}</td><td>${escapeHtml(displayNumber(metrics.reasoningTokens))}</td><td>${escapeHtml(metrics.effort === null ? "unavailable" : safeOpaque(metrics.effort))}</td></tr>`,
     )
     .join("");
 }
@@ -367,11 +364,11 @@ function taskCountRows(metrics: StatusTaskMetrics): string {
   const rows = [
     ...statuses.map(
       ([status, count]) =>
-        `<tr><td>Status · ${escapeHtml(status)}</td><td>${escapeHtml(number.format(count))}</td><td>count</td></tr>`,
+        `<tr><td>Status · ${escapeHtml(safeOpaque(status))}</td><td>${escapeHtml(number.format(count))}</td><td>count</td></tr>`,
     ),
     ...efforts.map(
       ([effort, count]) =>
-        `<tr><td>Effort · ${escapeHtml(effort)}</td><td>${escapeHtml(number.format(count))}</td><td>${escapeHtml(`${number.format(metrics.effortWeights[effort] ?? 0)} weight`)}</td></tr>`,
+        `<tr><td>Effort · ${escapeHtml(safeOpaque(effort))}</td><td>${escapeHtml(number.format(count))}</td><td>${escapeHtml(`${number.format(metrics.effortWeights[effort] ?? 0)} weight`)}</td></tr>`,
     ),
   ];
   return rows.length
@@ -469,7 +466,7 @@ export function renderStatusHtml(data: StatusReportData): string {
   const modelBars = data.models.length
     ? data.models
         .map((model) =>
-          bar(model.name, totalModelTokens(model), maxModelTokens),
+          bar(safeOpaque(model.name), totalModelTokens(model), maxModelTokens),
         )
         .join("")
     : '<p class="empty">No model activity yet.</p>';
@@ -510,7 +507,7 @@ export function renderStatusHtml(data: StatusReportData): string {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MindCode · Session status</title><style>
 :root{color-scheme:light;--bg:#fff;--panel:#fff;--panel2:#f4f4f4;--line:#111;--text:#000;--muted:#555;--accent:#000;--shadow:0 5px 18px #0001}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}.wrap{max-width:1440px;margin:auto;padding:30px}header{display:flex;justify-content:space-between;align-items:center;gap:24px;margin-bottom:22px}h1{font-size:30px;letter-spacing:-.04em;margin:0 0 4px}h2{font-size:17px;margin:0 0 16px}.subtitle,.meta,small{color:var(--muted)}.meta{text-align:right}.hero{display:flex;align-items:center;gap:16px}.sakura{width:120px;height:104px;flex:none}.sakura path,.sakura circle{stroke:#000}.sakura path{fill:none;stroke-width:3;stroke-linecap:round}.sakura circle{fill:#fff;stroke-width:1.4}.petals{position:fixed;inset:0;pointer-events:none;overflow:hidden;z-index:3}.petal{position:absolute;top:-24px;width:10px;height:6px;border:1px solid #000;border-radius:100% 0 100% 0;background:#fff;opacity:.7;animation:fall 12s linear infinite}.p1{left:14%;animation-delay:-3s}.p2{left:37%;animation-delay:-8s;animation-duration:15s}.p3{left:63%;animation-delay:-6s;animation-duration:11s}.p4{left:84%;animation-delay:-10s;animation-duration:17s}@keyframes fall{0%{transform:translate3d(0,-20px,0) rotate(0)}50%{transform:translate3d(42px,52vh,0) rotate(180deg)}100%{transform:translate3d(-28px,110vh,0) rotate(360deg)}}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.metric,.panel{background:linear-gradient(145deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow)}.metric{padding:15px;display:flex;flex-direction:column;min-height:110px}.metric span{color:var(--muted)}.metric strong{font-size:24px;margin:7px 0;color:var(--text)}.panel{padding:19px;margin-top:14px;overflow:auto}.columns{display:grid;grid-template-columns:1fr 1fr;gap:14px}.bar-row{margin:12px 0}.bar-label{display:flex;justify-content:space-between;gap:20px;margin-bottom:5px}progress{display:block;width:100%;height:9px;border:1px solid #000;border-radius:99px;overflow:hidden;background:#fff}progress::-webkit-progress-bar{background:#fff;border-radius:99px}progress::-webkit-progress-value{background:#000;border-radius:99px}progress::-moz-progress-bar{background:#000;border-radius:99px}table{width:100%;border-collapse:collapse;white-space:nowrap}th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:right}th{color:var(--muted);font-weight:600}th:first-child,td:first-child{text-align:left}.model{max-width:360px;overflow:hidden;text-overflow:ellipsis}.empty{text-align:center!important;color:var(--muted);padding:24px}.architecture .flow{display:flex;align-items:stretch;gap:8px;overflow-x:auto;padding-bottom:5px}.node{min-width:170px;flex:1;padding:14px;background:#fff;border:1px solid #000;border-radius:8px}.node b{display:block;color:#000;margin-bottom:4px}.arrow{align-self:center;color:#000;font-size:22px}.architecture-foot{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px;color:var(--muted)}.architecture-foot span{padding:11px 13px;border-left:2px solid #000}.architecture-foot b{color:#000}footer{color:var(--muted);margin-top:18px;text-align:center}@media(prefers-reduced-motion:reduce){.petal{animation:none;display:none}}@media(max-width:950px){.grid{grid-template-columns:repeat(2,1fr)}.columns{grid-template-columns:1fr}.flow{min-width:760px}header{display:block}.meta{text-align:left;margin-top:12px}}@media(max-width:540px){.wrap{padding:17px}.grid{grid-template-columns:1fr}.hero{align-items:flex-start}.sakura{width:92px}}
-</style></head><body><div class="petals" aria-hidden="true"><i class="petal p1"></i><i class="petal p2"></i><i class="petal p3"></i><i class="petal p4"></i></div><main class="wrap"><header><div class="hero"><svg class="sakura" viewBox="0 0 120 104" role="img" aria-label="Sakura tree"><path d="M57 101c5-22 3-39-3-55M56 67c-15-8-24-17-31-30M59 60c16-10 27-19 36-34M54 78c-9-2-17-1-26 4M61 80c11-4 21-4 31-1"/><circle cx="24" cy="29" r="9"/><circle cx="43" cy="18" r="10"/><circle cx="63" cy="24" r="11"/><circle cx="84" cy="17" r="10"/><circle cx="99" cy="31" r="8"/><circle cx="30" cy="49" r="7"/><circle cx="78" cy="45" r="8"/></svg><div><h1>MindCode</h1><div class="subtitle">Session telemetry · local HTML report</div></div></div><div class="meta">Session ${escapeHtml(data.sessionId)}<br>Started ${escapeHtml(data.sessionStartedAt.toLocaleString())}<br>Generated ${escapeHtml(data.generatedAt.toLocaleString())}</div></header>
+</style></head><body><div class="petals" aria-hidden="true"><i class="petal p1"></i><i class="petal p2"></i><i class="petal p3"></i><i class="petal p4"></i></div><main class="wrap"><header><div class="hero"><svg class="sakura" viewBox="0 0 120 104" role="img" aria-label="Sakura tree"><path d="M57 101c5-22 3-39-3-55M56 67c-15-8-24-17-31-30M59 60c16-10 27-19 36-34M54 78c-9-2-17-1-26 4M61 80c11-4 21-4 31-1"/><circle cx="24" cy="29" r="9"/><circle cx="43" cy="18" r="10"/><circle cx="63" cy="24" r="11"/><circle cx="84" cy="17" r="10"/><circle cx="99" cy="31" r="8"/><circle cx="30" cy="49" r="7"/><circle cx="78" cy="45" r="8"/></svg><div><h1>MindCode</h1><div class="subtitle">Session telemetry · local HTML report</div></div></div><div class="meta">Session ${escapeHtml(safeOpaque(data.sessionId))}<br>Started ${escapeHtml(data.sessionStartedAt.toLocaleString())}<br>Generated ${escapeHtml(data.generatedAt.toLocaleString())}</div></header>
 <section class="grid">${metric("API requests", number.format(data.requestCount), data.requestCount ? `${number.format(Math.round(totalTokens / data.requestCount))} tokens/request` : "no completed requests")}${metric("Total tokens", number.format(totalTokens), `${number.format(data.inputTokens)} input · ${number.format(data.outputTokens)} output`)}${metric("Session credits", formatVexzyCredits(credits.totalCredits), credits.modelsWithoutPrice ? `${credits.modelsWithoutPrice} model price unavailable` : "VEXZY model pricing")}${metric("Cache hit rate", `${cacheHitRate}%`, `${number.format(data.cacheReadTokens)} read · ${number.format(data.cacheWriteTokens)} write`)}${metric("Wall duration", duration(data.wallDurationMs), data.requestCount ? `${duration(data.wallDurationMs / data.requestCount)} / request` : "0 ms")}${metric("API duration", duration(data.apiDurationMs), `${duration(retryOverhead)} retry overhead`)}${metric("Tool activity", number.format(data.toolCount), `${duration(data.toolDurationMs)} total tool time`)}${metric("Lines changed", `+${number.format(data.linesAdded)} / -${number.format(data.linesRemoved)}`, `${number.format(data.webSearchRequests)} web searches`)}</section>
 <section class="columns"><article class="panel"><h2>Token composition</h2>${tokenBars}</article><article class="panel"><h2>Tokens by model</h2>${modelBars}</article></section>
 <section class="panel"><h2>Credits by component</h2><p>VEXZY output price per 1M: input = price / 8 · cache = price / 40 · reasoning = price / 2 · output = price.</p>${creditBars}</section>

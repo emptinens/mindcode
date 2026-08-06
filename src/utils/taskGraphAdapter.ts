@@ -16,6 +16,7 @@ import type {
   TaskEffort,
   TaskKind,
   TaskRecord,
+  TaskGraphSnapshot,
 } from "../tasks/graph/types.js";
 import { normalizeTargets } from "../tasks/validation/targets.js";
 import { getMindCodeConfigHomeDir } from "./envUtils.js";
@@ -1338,6 +1339,19 @@ export async function graphListTasks(
   return withAdapterStores(taskListId, (graph, db) =>
     allTasksFromBackend(graph, db, taskListId),
   );
+}
+
+/** Read the authoritative global graph without exposing a second storage path. */
+export async function graphSnapshot(): Promise<TaskGraphSnapshot> {
+  const result = await daemonClientFactory().snapshotWithFallback(() => {
+    const graph = openTaskGraph();
+    try {
+      return graph.snapshot();
+    } finally {
+      graph.close();
+    }
+  });
+  return result.value;
 }
 
 export async function graphUpdateTask(

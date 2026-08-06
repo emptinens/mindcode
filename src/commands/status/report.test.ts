@@ -229,6 +229,43 @@ describe("status HTML report", () => {
     expect(html).not.toMatch(/response.body|raw response|transcript/i);
   });
 
+  test("redacts credentials and absolute paths from every free-text report field", () => {
+    const apiKey = "forge-status-report-secret-123456";
+    const bearer = "Bearer opaque-session-secret";
+    const absolutePath = "/Users/private/project/output.json";
+    const embeddedPath = "artifact=/private/session/raw.json";
+    const keyedSecret = "api_key=opaque-query-secret";
+    const rawResponse = "raw response body: upstream payload";
+    const html = renderStatusHtml({
+      ...fixture(),
+      sessionId: absolutePath,
+      workerModel: apiKey,
+      models: fixture().models.map((model) => ({ ...model, name: bearer })),
+      roleBreakdown: {
+        leader: { requests: 1, inputTokens: 1, outputTokens: 1, reasoningTokens: 1, effort: absolutePath },
+        worker: { requests: 1, inputTokens: 1, outputTokens: 1, reasoningTokens: 1, effort: keyedSecret },
+      },
+      taskMetrics: {
+        available: true,
+        statusCounts: { [embeddedPath]: 1 },
+        effortCounts: { [rawResponse]: 1 },
+        effortWeights: { [bearer]: 1 },
+        activeLeases: 0,
+        timeline: [],
+      },
+      rawResponseBody: apiKey,
+    } as StatusReportData & { rawResponseBody: string });
+
+    expect(html).toContain("[redacted]");
+    expect(html).not.toContain(apiKey);
+    expect(html).not.toContain(bearer);
+    expect(html).not.toContain(absolutePath);
+    expect(html).not.toContain(embeddedPath);
+    expect(html).not.toContain(keyedSecret);
+    expect(html).not.toContain(rawResponse);
+    expect(html).not.toContain("rawResponseBody");
+  });
+
   test("contains compact self-contained Sakura report without legacy branding", () => {
     const html = renderStatusHtml(fixture());
     const normalized = html.toLowerCase();
