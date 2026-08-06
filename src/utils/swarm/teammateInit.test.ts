@@ -28,11 +28,46 @@ mock.module(modulePath("./backends/types.ts"), () => ({
 }));
 mock.module(modulePath("./workerTeamReport.ts"), () => ({
   buildWorkerTeamReportFromMessages: () => ({}),
-  isWorkerReportCompletionEligible: () => true,
+  isWorkerReportCompletionEligibleForPolicy: () => true,
   serializeWorkerTeamReportMessage: () => "{}",
 }));
 
-const { resolveTeammateWorkerEffort } = await import("./teammateInit.js");
+const {
+  initializeTeammateHooks,
+  requireInheritedWorkerPolicyIdentity,
+  resolveTeammateWorkerEffort,
+} = await import("./teammateInit.js");
+
+describe("teammate Worker policy admission", () => {
+  test("requires an exact inherited epoch/digest pair", () => {
+    expect(() => requireInheritedWorkerPolicyIdentity({})).toThrow(
+      "Inherited Worker policy epoch and source digest are required",
+    );
+    expect(() =>
+      requireInheritedWorkerPolicyIdentity({ MINDCODE_POLICY_EPOCH: "7" }),
+    ).toThrow("Inherited Worker policy epoch and source digest are required");
+
+    expect(
+      requireInheritedWorkerPolicyIdentity({
+        MINDCODE_POLICY_EPOCH: "7",
+        MINDCODE_POLICY_DIGEST: "a".repeat(64),
+      }),
+    ).toEqual({
+      policyEpoch: 7,
+      policyDigest: "a".repeat(64),
+    });
+  });
+
+  test("rejects missing policy identity at hook initialization", () => {
+    expect(() =>
+      initializeTeammateHooks(() => undefined, "session", {
+        teamName: "team",
+        agentId: "worker@team",
+        agentName: "worker",
+      } as never),
+    ).toThrow("Teammate Worker policy epoch");
+  });
+});
 
 describe("teammate Worker effort precedence", () => {
   test("CLI effort wins over a conflicting inherited Leader environment value", () => {

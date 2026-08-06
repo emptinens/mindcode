@@ -20,6 +20,9 @@ import { quote } from '../../utils/bash/shellQuote.js'
 import { isInBundledMode } from '../../utils/bundledMode.js'
 import { getCwd } from '../../utils/cwd.js'
 import { logForDebugging } from '../../utils/debug.js'
+import {
+  assertWorkerPolicyIdentity,
+} from '../../services/policy/index.js'
 import { execFileNoThrow } from '../../utils/execFileNoThrow.js'
 import type { PermissionMode } from '../../utils/permissions/PermissionMode.js'
 import { isTmuxAvailable } from '../../utils/swarm/backends/detection.js'
@@ -81,8 +84,8 @@ import { acquireSpawnedInProcessWorker, bindSpawnedInProcessWorker, createWorker
  * not consulted here.
  */
 export function resolveTeammateModel(
-  _inputModel: string | undefined,
-  _leaderModel: string | null,
+  // Worker model selection has no caller-controlled inputs.
+  // The compatibility resolver remains as a fixed-model public boundary.
 ): string {
   return resolveWorkerRuntime(undefined).model
 }
@@ -90,7 +93,6 @@ export function resolveTeammateModel(
 // ============================================================================
 // Types
 // ============================================================================
-
 export type SpawnOutput = {
   teammate_id: string
   agent_id: string
@@ -105,7 +107,6 @@ export type SpawnOutput = {
   is_splitpane?: boolean
   plan_mode_required?: boolean
 }
-
 export type SpawnTeammateConfig = {
   name: string
   prompt: string
@@ -113,9 +114,12 @@ export type SpawnTeammateConfig = {
   cwd?: string
   use_splitpane?: boolean
   plan_mode_required?: boolean
-  model?: string
+  // Worker model is resolved internally; no caller override is accepted.
   /** Per-worker effort; omitted values resolve to medium, never Leader effort. */
   effort?: WorkerEffortInput
+  /** Policy identity captured by the Leader for this Worker admission. */
+  policyEpoch?: number
+  policyDigest?: string
   /** Explicit overlap/isolation signals from task validation. */
   writeOverlap?: boolean; hasWriteOverlap?: boolean; overlap?: boolean; isolation?: 'shared' | 'isolated' | 'worktree'
   agent_type?: string
@@ -125,7 +129,6 @@ export type SpawnTeammateConfig = {
    *  lineage tracing on tengu_api_* events. */
   invokingRequestId?: string
 }
-
 // Internal input type matching TeammateTool's spawn parameters
 type SpawnInput = {
   name: string
@@ -134,18 +137,18 @@ type SpawnInput = {
   cwd?: string
   use_splitpane?: boolean
   plan_mode_required?: boolean
-  model?: string
+  // Worker model is resolved internally; no caller override is accepted.
   effort?: WorkerEffortInput
+  policyEpoch?: number
+  policyDigest?: string
   writeOverlap?: boolean; hasWriteOverlap?: boolean; overlap?: boolean; isolation?: 'shared' | 'isolated' | 'worktree'
   agent_type?: string
   description?: string
   invokingRequestId?: string
 }
-
 // ============================================================================
 // Helper Functions
 // ============================================================================
-
 /**
  * Checks if a tmux session exists
  */
@@ -155,7 +158,6 @@ async function runSwarmTmux(args: string[]) {
     buildSwarmTmuxArgs(getSwarmSocketName(), args),
   )
 }
-
 async function hasSession(sessionName: string): Promise<boolean> {
   const result = await runSwarmTmux([
     'has-session',
@@ -164,7 +166,6 @@ async function hasSession(sessionName: string): Promise<boolean> {
   ])
   return result.code === 0
 }
-
 /**
  * Creates a new tmux session if it doesn't exist
  */
@@ -184,7 +185,6 @@ async function ensureSession(sessionName: string): Promise<void> {
     }
   }
 }
-
 /**
  * Gets the command to spawn a teammate.
  * For native builds (compiled binaries), use process.execPath.
@@ -387,8 +387,10 @@ async function handleSpawnSplitPane(
     cwd: workingDir,
     color: teammateColor,
     planModeRequired: plan_mode_required ?? false,
-    model,
+    // In-process Workers resolve fixed Luna internally.
     effort,
+    policyEpoch: input.policyEpoch,
+    policyDigest: input.policyDigest,
     agentType: agent_type,
     parentSessionId: getSessionId(),
     abortSignal: context.abortController.signal,
@@ -614,7 +616,8 @@ async function handleSpawnSeparateWindow(
   const flagsStr = inheritedFlags ? ` ${inheritedFlags}` : ''
   // Propagate env vars that teammates need but may not inherit from tmux split-window shells.
   // Includes MINDCODE, MINDCODE_EXPERIMENTAL_AGENT_TEAMS, and API provider vars.
-  const envStr = `${buildInheritedEnvVars()} ${WORKER_LIFECYCLE_RUN_ID_ENV}=${quote([workerRunId])}`
+  const workerPolicy = assertWorkerPolicyIdentity({ policyEpoch: input.policyEpoch, policyDigest: input.policyDigest })
+  const envStr = `${buildInheritedEnvVars(undefined, workerPolicy)} ${WORKER_LIFECYCLE_RUN_ID_ENV}=${quote([workerRunId])}`
   const spawnCommand = `cd ${quote([workingDir])} && env ${envStr} exec ${quote([binaryPath])} ${teammateArgs}${flagsStr}`
   const sendKeysResult = await runSwarmTmux([
     'send-keys',
@@ -639,6 +642,8 @@ async function handleSpawnSeparateWindow(
     effort,
     taskId: teammateId,
     workerRunId,
+    policyEpoch: input.policyEpoch,
+    policyDigest: input.policyDigest,
     lifecycleStartedAtMs,
   })
   tracked = true
@@ -883,8 +888,10 @@ async function handleSpawnInProcess(
     prompt,
     color: teammateColor,
     planModeRequired: plan_mode_required ?? false,
-    model,
+    // Worker model is resolved inside spawnInProcessTeammate.
     effort,
+    policyEpoch: input.policyEpoch,
+    policyDigest: input.policyDigest,
   }
 
   const { result, lease: warmWorkerLease } = await acquireSpawnedInProcessWorker(input, workerRuntime, warmDecision, () => spawnInProcessTeammate(config, context))
@@ -914,6 +921,8 @@ async function handleSpawnInProcess(
       description: input.description,
       model,
       effort,
+      policyEpoch: config.policyEpoch,
+      policyDigest: config.policyDigest,
       agentDefinition,
       teammateContext: result.teammateContext,
       concurrencyLeaseId: result.concurrencyLeaseId,
@@ -925,18 +934,17 @@ async function handleSpawnInProcess(
       abortController: result.abortController,
       invokingRequestId: input.invokingRequestId,
     })
-    logForDebugging(
-      `[handleSpawnInProcess] Started agent execution for ${teammateId}`,
+    logForDebugging(`[handleSpawnInProcess] Started agent execution for ${teammateId}`)
+    Boolean(
+        input.agent_type!,
     )
   }
-
   // Track the teammate in AppState's teamContext
   // Auto-register leader if spawning without prior spawnTeam call
   setAppState(prev => {
     const needsLeaderSetup = !prev.teamContext?.leadAgentId
-    const leadAgentId = needsLeaderSetup
-      ? formatAgentId(TEAM_LEAD_NAME, teamName)
-      : prev.teamContext!.leadAgentId
+    const leadAgentId = prev.teamContext?.leadAgentId ??
+      formatAgentId(TEAM_LEAD_NAME, teamName)
 
     // Build teammates map, including leader if needed for inbox polling
     const existingTeammates = prev.teamContext?.teammates || {}
@@ -1072,5 +1080,27 @@ export async function spawnTeammate(
   context: ToolUseContext,
 ): Promise<{ data: SpawnOutput }> {
   const workerRuntime = resolveWorkerRuntime(config.effort)
-  return handleSpawn(config, context, workerRuntime)
+  const hasPolicyEpoch = config.policyEpoch !== undefined
+  const hasPolicyDigest = config.policyDigest !== undefined
+  if (hasPolicyEpoch !== hasPolicyDigest) {
+    throw new Error('Worker spawn policy identity requires epoch and source digest')
+  }
+  if (!hasPolicyEpoch || !hasPolicyDigest) {
+    throw new Error(
+      'Worker spawn policy epoch and source digest are required at the production boundary',
+    )
+  }
+  const workerPolicy = assertWorkerPolicyIdentity({
+    policyEpoch: config.policyEpoch,
+    policyDigest: config.policyDigest,
+  })
+  return handleSpawn(
+    {
+      ...config,
+      policyEpoch: workerPolicy.policyEpoch,
+      policyDigest: workerPolicy.policyDigest,
+    },
+    context,
+    workerRuntime,
+  )
 }

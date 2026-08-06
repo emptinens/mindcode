@@ -1,6 +1,7 @@
 import type { AgentColorName } from '../../../tools/AgentTool/agentColorManager.js'
 import {
   type WorkerEffort,
+  type WorkerEffortInput,
   workerEffortResolver,
   workerModelResolver,
 } from '../../model/resolvers.js'
@@ -263,6 +264,9 @@ export type TeammateSpawnConfig = TeammateIdentity & {
   model?: string
   /** Reasoning effort to pass to the child CLI. */
   effort?: WorkerEffortInput
+  /** Worker policy identity captured by the Leader at spawn admission. */
+  policyEpoch?: number
+  policyDigest?: string
   /** System prompt for this teammate (resolved from workflow config) */
   systemPrompt?: string
   /** How to apply the system prompt: 'replace' or 'append' to default */

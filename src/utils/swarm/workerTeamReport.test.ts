@@ -6,14 +6,39 @@ import {
 } from '../teammateMailbox.js'
 import {
   accumulateWorkerTokenUsage,
-  buildWorkerTeamReport,
-  buildWorkerTeamReportFromMessages,
+  buildWorkerTeamReport as buildWorkerTeamReportProduction,
+  buildWorkerTeamReportFromMessages as buildWorkerTeamReportFromMessagesProduction,
   createWorkerTeamReportMessage,
   deriveWorkerReportId,
   serializeWorkerTeamReportMessage,
   workerTeamReportMessageSchema,
 } from './workerTeamReport.js'
 import type { WorkerReport } from '../../tools/AgentTool/workerReport.js'
+
+const STABLE_POLICY_IDENTITY = {
+  policyEpoch: 0,
+  policyDigest: 'a'.repeat(64),
+} as const
+
+function buildWorkerTeamReport(
+  input: Parameters<typeof buildWorkerTeamReportProduction>[0],
+) {
+  return buildWorkerTeamReportProduction({
+    ...input,
+    policyEpoch: input.policyEpoch ?? STABLE_POLICY_IDENTITY.policyEpoch,
+    policyDigest: input.policyDigest ?? STABLE_POLICY_IDENTITY.policyDigest,
+  })
+}
+
+function buildWorkerTeamReportFromMessages(
+  input: Parameters<typeof buildWorkerTeamReportFromMessagesProduction>[0],
+) {
+  return buildWorkerTeamReportFromMessagesProduction({
+    ...input,
+    policyEpoch: input.policyEpoch ?? STABLE_POLICY_IDENTITY.policyEpoch,
+    policyDigest: input.policyDigest ?? STABLE_POLICY_IDENTITY.policyDigest,
+  })
+}
 
 type WorkerMessage = Parameters<
   typeof buildWorkerTeamReportFromMessages
@@ -28,6 +53,7 @@ function reportCandidate(overrides: Partial<WorkerReport> = {}): WorkerReport {
     model: 'gpt-5.6-luna',
     effort_used: 'medium',
     policy_epoch: 3,
+    policy_digest: 'a'.repeat(64),
     status: 'completed',
     summary: 'Team worker completed the requested operation.',
     changed_files: ['src/team.ts'],
@@ -289,6 +315,7 @@ describe('persistent teammate WorkerReport v1 transport', () => {
         model: 'gpt-5.6-luna',
         effort_used: 'none',
         policy_epoch: 0,
+        policy_digest: expect.any(String),
         status: 'completed',
         summary: 'Team worker completed the requested operation.',
         changed_files: [],

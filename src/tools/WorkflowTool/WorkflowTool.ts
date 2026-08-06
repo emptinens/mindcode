@@ -330,7 +330,7 @@ export const WorkflowTool = buildTool({
             prompt: spec.prompt,
             schema: spec.schema,
             agentType: spec.agentType,
-            model: spec.model,
+            // Worker model is resolved by runWorkflowSubagent.
             effort: spec.effort,
             toolUseContext: context,
             canUseTool,

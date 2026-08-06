@@ -17,6 +17,7 @@ import sample from 'lodash-es/sample.js'
 import { getSessionId } from '../../bootstrap/state.js'
 import { getSpinnerVerbs } from '../../constants/spinnerVerbs.js'
 import { TURN_COMPLETION_VERBS } from '../../constants/turnCompletionVerbs.js'
+import { assertWorkerPolicyIdentity } from '../../services/policy/index.js'
 import type { AppState } from '../../state/AppState.js'
 import { createTaskStateBase, generateTaskId } from '../../Task.js'
 import type {
@@ -73,10 +74,13 @@ export type InProcessSpawnConfig = {
   color?: string
   /** Whether teammate must enter plan mode before implementing */
   planModeRequired: boolean
-  /** Optional model override for this teammate */
-  model?: string
+  /** Worker model is fixed by the runtime and cannot be overridden. */
+  // No model field is exposed at the in-process Worker boundary.
   /** Reasoning effort for this teammate; omitted values resolve to medium. */
   effort?: WorkerEffortInput
+  /** Policy identity captured by the Leader for this teammate run. */
+  policyEpoch?: number
+  policyDigest?: string
 }
 
 /**
@@ -119,6 +123,18 @@ export async function spawnInProcessTeammate(
   const { setAppState } = context
   const workerRuntime = resolveWorkerRuntime(config.effort)
   const { model, effort: resolvedEffort } = workerRuntime
+  if (
+    config.policyEpoch === undefined ||
+    config.policyDigest === undefined
+  ) {
+    throw new Error(
+      'In-process Worker policy epoch and source digest are required at the production boundary',
+    )
+  }
+  assertWorkerPolicyIdentity({
+    policyEpoch: config.policyEpoch,
+    policyDigest: config.policyDigest,
+  })
   const workerLease = await acquireSwarmWorkerSlot(config.teamName, {
     effort: resolvedEffort,
     signal: context.abortController?.signal,
@@ -132,13 +148,12 @@ export async function spawnInProcessTeammate(
     `[spawnInProcessTeammate] Spawning ${agentId} (taskId: ${taskId})`,
   )
 
+  const parentSessionId = getSessionId()
+
   try {
     // Create independent AbortController for this teammate
     // Teammates should not be aborted when the leader's query is interrupted
     const abortController = createAbortController()
-
-    // Get parent session ID for transcript correlation
-    const parentSessionId = getSessionId()
 
     // Create teammate identity (stored as plain data in AppState)
     const identity: TeammateIdentity = {
@@ -169,7 +184,6 @@ export async function spawnInProcessTeammate(
 
     // Create task state
     const description = `${name}: ${prompt.substring(0, 50)}${prompt.length > 50 ? '...' : ''}`
-
     const taskState: InProcessTeammateTaskState = {
       ...createTaskStateBase(
         taskId,
@@ -194,13 +208,11 @@ export async function spawnInProcessTeammate(
       pendingUserMessages: [],
       messages: [], // Initialize to empty array so getDisplayedMessages works immediately
     }
-
     // Aborting before the runner starts must not strand a permit. The runner
     // also releases the same id on normal completion; release is idempotent.
     abortController.signal.addEventListener('abort', workerLease.release, {
       once: true,
     })
-
     // Register cleanup handler for graceful shutdown
     const unregisterCleanup = registerCleanup(async () => {
       workerLease.release()
@@ -209,14 +221,11 @@ export async function spawnInProcessTeammate(
       // Task state will be updated by the execution loop when it detects abort
     })
     taskState.unregisterCleanup = unregisterCleanup
-
     // Register task in AppState
     registerTask(taskState, setAppState)
-
     logForDebugging(
       `[spawnInProcessTeammate] Registered ${agentId} in AppState`,
     )
-
     return {
       success: true,
       agentId,
@@ -239,7 +248,6 @@ export async function spawnInProcessTeammate(
     }
   }
 }
-
 /**
  * Kills an in-process teammate by aborting its controller.
  *
@@ -258,34 +266,26 @@ export function killInProcessTeammate(
   let agentId: string | null = null
   let toolUseId: string | undefined
   let description: string | undefined
-
   setAppState((prev: AppState) => {
     const task = prev.tasks[taskId]
     if (!task || task.type !== 'in_process_teammate') {
       return prev
     }
-
     const teammateTask = task as InProcessTeammateTaskState
-
     if (teammateTask.status !== 'running') {
       return prev
     }
-
     // Capture identity for cleanup after state update
     teamName = teammateTask.identity.teamName
     agentId = teammateTask.identity.agentId
     toolUseId = teammateTask.toolUseId
     description = teammateTask.description
-
     // Abort the controller to stop execution
     teammateTask.abortController?.abort()
-
     // Call cleanup handler
     teammateTask.unregisterCleanup?.()
-
     // Update task state and remove from teamContext.teammates
     killed = true
-
     // Call pending idle callbacks to unblock any waiters (e.g., engine.waitForIdle)
     teammateTask.onIdleCallbacks?.forEach(cb => cb())
 

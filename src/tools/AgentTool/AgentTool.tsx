@@ -163,7 +163,7 @@ const baseInputSchema = lazySchema(() => z.object({
   write_set: z.array(z.string()).max(256).optional().describe('Cwd-relative files this task writes.'),
   blocked_by: z.array(z.string()).max(256).optional().describe('Task IDs that must complete before this task can run.'),
   subagent_type: z.string().optional().describe('The type of specialized agent to use for this task'),
-  model: z.enum(['sonnet', 'opus', 'haiku']).optional().describe('Legacy compatibility field. Non-swarm workers are always routed to gpt-5.6-luna.'),
+  // Worker model is fixed by resolveWorkerRuntime and is not caller-selectable.
   effort: z
     .enum(WORKER_EFFORT_LEVELS)
     .optional()
@@ -196,9 +196,9 @@ const fullInputSchema = lazySchema(() => {
 // type, but call() destructures via the explicit AgentToolInput type below
 // which always includes all optional fields.
 export const inputSchema = lazySchema(() => {
-  const schema = (feature('KAIROS') ? fullInputSchema() : fullInputSchema().omit({
+  const schema = feature('KAIROS') ? fullInputSchema() : fullInputSchema().omit({
     cwd: true
-  })).omit({ model: true });
+  });
 
   // GrowthBook-in-lazySchema is acceptable here (unlike subagent_type, which
   // was removed in 906da6c723): the divergence window is one-session-per-
@@ -328,7 +328,7 @@ export const AgentTool = buildTool({
     blocked_by,
     subagent_type,
     description,
-    model: _modelParam,
+    // No Worker model input: the runtime resolves fixed Luna internally.
     effort: workerEffortInput,
     run_in_background,
     name,
@@ -404,8 +404,10 @@ export const AgentTool = buildTool({
         team_name: teamName,
         use_splitpane: true,
         plan_mode_required: spawnMode === 'plan',
-        model: workerModel,
+        // spawnTeammate resolves fixed Luna independently of Leader input.
         effort: resolvedWorkerEffort, cwd, isolation: resolveAgentIsolation(isolation, toolUseContext.agentId ? undefined : getLatestHumanPrompt(toolUseContext.messages), toolUseContext.agentId !== undefined) === 'worktree' ? 'worktree' : 'shared',
+        policyEpoch: workerPolicy.policyEpoch,
+        policyDigest: workerPolicy.sourceDigest,
         agent_type: subagent_type,
         invokingRequestId: assistantMessage?.requestId
       }, toolUseContext);
@@ -472,11 +474,9 @@ export const AgentTool = buildTool({
     if (isInProcessTeammate() && teamName && selectedAgent.background === true) {
       throw new Error(`In-process teammates cannot spawn background agents. Agent '${selectedAgent.agentType}' has background: true in its definition.`);
     }
-
     // Capture for type narrowing — `let selectedAgent` prevents TS from
     // narrowing property types across the if-else assignment above.
     const requiredMcpServers = selectedAgent.requiredMcpServers;
-
     // Check if required MCP servers have tools available
     // A server that's connected but not authenticated won't have any tools
     if (requiredMcpServers?.length) {
@@ -543,7 +543,6 @@ export const AgentTool = buildTool({
     // tool results, compact summaries, and agent frontmatter cannot opt in.
     const latestHumanPrompt = toolUseContext.agentId ? undefined : getLatestHumanPrompt(toolUseContext.messages);
     const effectiveIsolation = resolveAgentIsolation(isolation, latestHumanPrompt, toolUseContext.agentId !== undefined);
-
     // System prompt + prompt messages: branch on fork path.
     //
     // Fork path: child inherits the PARENT's system prompt (not FORK_AGENT's)
@@ -559,7 +558,8 @@ export const AgentTool = buildTool({
     const workerPrompt = `${prompt}\n\n${buildWorkerReportInstruction(earlyAgentId, resolvedWorkerEffort, {
       runId: workerRunId,
       workerId: earlyAgentId,
-      policyEpoch: workerPolicy.policyEpoch
+      policyEpoch: workerPolicy.policyEpoch,
+      policyDigest: workerPolicy.sourceDigest,
     })}`;
     if (isForkPath) {
       if (toolUseContext.renderedSystemPrompt) {
@@ -624,6 +624,7 @@ export const AgentTool = buildTool({
       runId: workerRunId,
       workerId: earlyAgentId,
       policyEpoch: workerPolicy.policyEpoch,
+      policyDigest: workerPolicy.sourceDigest,
       effort: resolvedWorkerEffort,
       declaredChangedFiles
     };
@@ -687,8 +688,10 @@ export const AgentTool = buildTool({
       canUseTool,
       isAsync: shouldRunAsync,
       querySource: toolUseContext.options.querySource ?? getQuerySourceForAgent(selectedAgent.agentType, isBuiltInAgent(selectedAgent)),
-      model: isForkPath ? undefined : workerModel,
+      // runAgent resolves the fixed Worker model at its own boundary.
       effort: resolvedWorkerEffort,
+      policyEpoch: workerPolicy.policyEpoch,
+      policyDigest: workerPolicy.sourceDigest,
       // Fork path: pass parent's system prompt AND parent's exact tool
       // array (cache-identical prefix). workerTools is rebuilt under
       // permissionMode 'bubble' which differs from the parent's mode, so
@@ -720,7 +723,6 @@ export const AgentTool = buildTool({
     // takes precedence over worktree isolation path.
     const cwdOverridePath = cwd ?? worktreeInfo?.worktreePath;
     const wrapWithCwd = <T,>(fn: () => T): T => cwdOverridePath ? runWithCwdOverride(cwdOverridePath, fn) : fn();
-
     // Helper to clean up worktree after agent completes
     const cleanupWorktreeIfNeeded = async (): Promise<{
       worktreePath?: string;
@@ -812,7 +814,7 @@ export const AgentTool = buildTool({
       const evidence: WorkerCompletionEvidence | undefined = report ? {
         reportId: report.report_id,
         policyEpoch: report.policy_epoch,
-        policyDigest: workerPolicy.sourceDigest
+        policyDigest: report.policy_digest
       } : undefined;
       void workerExecution[action](evidence).catch(error => {
         logForDebugging(`Failed to ${action} task graph lifecycle for ${earlyAgentId}: ${errorMessage(error)}`, {
@@ -825,6 +827,7 @@ export const AgentTool = buildTool({
       runId: metadata.runId,
       workerId: metadata.workerId ?? earlyAgentId,
       policyEpoch: workerPolicy.policyEpoch,
+      policyDigest: workerPolicy.sourceDigest,
       status: 'failed',
       declaredChangedFiles: metadata.declaredChangedFiles,
       finalText: reason,
@@ -848,7 +851,6 @@ export const AgentTool = buildTool({
         toolUseId: toolUseContext.toolUseId
       });
       registeredAsyncAgentId = agentBackgroundTask.agentId;
-
       // Register name → agentId for SendMessage routing. Post-registerAsyncAgent
       // so we don't leave a stale entry if spawn fails. Sync agents skipped —
       // coordinator is blocked, so SendMessage routing doesn't apply.
@@ -862,7 +864,6 @@ export const AgentTool = buildTool({
           };
         });
       }
-
       // Wrap async agent execution in agent context for analytics attribution
       const asyncAgentContext = {
         agentId: asyncAgentId,
@@ -876,7 +877,6 @@ export const AgentTool = buildTool({
         invocationKind: 'spawn' as const,
         invocationEmitted: false
       };
-
       // Workload propagation: handlePromptSubmit wraps the entire turn in
       // runWithWorkload (AsyncLocalStorage). ALS context is captured at
       // invocation time — when this `void` fires — and survives every await
@@ -1084,7 +1084,6 @@ export const AgentTool = buildTool({
                 // TaskStop still owns the task's abort controller.
                 detachParentAbort?.();
                 detachParentAbort = undefined;
-
                 // Workload: inherited via ALS at `void` invocation time,
                 // same as the async-from-start path above.
                 // Continue agent in background and return async result
@@ -1104,7 +1103,6 @@ export const AgentTool = buildTool({
                     while (!backgroundResult.done) {
                       const msg = backgroundResult.value;
                       agentMessages.push(msg);
-
                       // Track progress for backgrounded agents
                       updateProgressFromMessage(tracker, msg, resolveActivity2, toolUseContext.options.tools);
                       updateAsyncAgentProgress(backgroundedTaskId, getProgressUpdate(tracker), rootSetAppState);
@@ -1123,6 +1121,9 @@ export const AgentTool = buildTool({
                         failAsyncAgent(backgroundedTaskId, validationError, rootSetAppState);
                         settleWorkerExecution('fail', result.workerReport);
                       }
+                    }, {
+                      policyEpoch: workerPolicy.policyEpoch,
+                      policyDigest: workerPolicy.sourceDigest
                     });
                     if (!reportCanComplete) {
                       const worktreeResult = await cleanupWorktreeIfNeeded();
@@ -1138,7 +1139,6 @@ export const AgentTool = buildTool({
                       });
                       return;
                     }
-
                     if (feature('TRANSCRIPT_CLASSIFIER')) {
                       const backgroundedAppState = toolUseContext.getAppState();
                       const handoffWarning = await classifyHandoffIfNeeded({
@@ -1192,6 +1192,7 @@ export const AgentTool = buildTool({
                         runId: metadata.runId,
                         workerId: metadata.workerId ?? backgroundedTaskId,
                         policyEpoch: metadata.policyEpoch,
+                        policyDigest: metadata.policyDigest,
                         status: 'failed',
                         declaredChangedFiles: metadata.declaredChangedFiles,
                         finalText: partialResult ?? 'Worker execution was cancelled.',
@@ -1222,6 +1223,7 @@ export const AgentTool = buildTool({
                         runId: metadata.runId,
                         workerId: metadata.workerId ?? backgroundedTaskId,
                         policyEpoch: metadata.policyEpoch,
+                        policyDigest: metadata.policyDigest,
                         status: 'failed',
                         declaredChangedFiles: metadata.declaredChangedFiles,
                         finalText: errMsg,
@@ -1397,14 +1399,12 @@ export const AgentTool = buildTool({
           // Cancel auto-background timer if agent completed before it fired
           cancelAutoBackground?.();
           detachParentAbort?.();
-
           // Clean up worktree if applicable (in finally to handle abort/error paths)
           // Skip if backgrounded — the background continuation is still running in it
           if (!wasBackgrounded) {
             worktreeResult = await cleanupWorktreeIfNeeded();
           }
         }
-
         // Re-throw abort errors
         // TODO: Find a cleaner way to express this
         const lastMessage = agentMessages.findLast(_ => _.type !== 'system' && _.type !== 'progress');
@@ -1419,7 +1419,6 @@ export const AgentTool = buildTool({
           });
           throw new AbortError();
         }
-
         // If an error occurred during iteration, try to return a result with
         // whatever messages we have. If we have no assistant messages,
         // re-throw the error so it's properly handled by the tool framework.
@@ -1431,7 +1430,6 @@ export const AgentTool = buildTool({
             settleWorkerExecution('fail', buildLifecycleFailureReport(syncAgentError.message));
             throw syncAgentError;
           }
-
           // We have some messages, try to finalize and return them
           // This allows the parent agent to see partial progress even after an error
           logForDebugging(`Sync agent recovering from error with ${agentMessages.length} messages`);
@@ -1454,6 +1452,8 @@ export const AgentTool = buildTool({
             }
             settleWorkerExecution('fail', result.workerReport);
           }
+        }, {
+          policyEpoch: workerPolicy.policyEpoch, policyDigest: workerPolicy.sourceDigest
         });
         if (feature('TRANSCRIPT_CLASSIFIER')) {
           const currentAppState = toolUseContext.getAppState();
@@ -1489,6 +1489,7 @@ export const AgentTool = buildTool({
       }
       throw error;
     }
+
   },
   isReadOnly() {
     return true; // delegates permission checks to its underlying tools
@@ -1509,7 +1510,6 @@ export const AgentTool = buildTool({
   },
   async checkPermissions(input, context): Promise<PermissionResult> {
     const appState = context.getAppState();
-
     // Only route through auto mode classifier when in auto mode
     // In all other modes, auto-approve sub-agent generation
     // Note: "external" === 'ant' guard enables dead code elimination for external builds

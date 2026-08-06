@@ -46,6 +46,7 @@ import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_PII_TAGGED,
   logEvent,
 } from '../../services/analytics/index.js'
+import { getWorkerPolicyIdentity } from '../../services/policy/index.js'
 import { getAgentContext } from '../../utils/agentContext.js'
 import { errorMessage } from '../../utils/errors.js'
 import {
@@ -55,7 +56,7 @@ import {
 import { parseFrontmatter } from '../../utils/frontmatterParser.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { createUserMessage, normalizeMessages } from '../../utils/messages.js'
-import type { ModelAlias } from '../../utils/model/aliases.js'
+// Forked skills inherit the fixed Worker model from runAgent.
 import { resolveSkillModelOverride } from '../../utils/model/model.js'
 import { recordSkillUsage } from '../../utils/suggestions/skillUsageTracking.js'
 import { createAgentId } from '../../utils/uuid.js'
@@ -73,7 +74,6 @@ import {
   renderToolUseProgressMessage,
   renderToolUseRejectedMessage,
 } from './UI.js'
-
 /**
  * Gets all commands including MCP skills/prompts from AppState.
  * SkillTool needs this because getCommands() only returns local/bundled skills.
@@ -213,11 +213,10 @@ async function executeForkedSkill(
 
   // Collect messages from the forked agent
   const agentMessages: Message[] = []
-
   logForDebugging(
     `SkillTool executing forked skill ${commandName} with agent ${agentDefinition.agentType}`,
   )
-
+  const workerPolicy = getWorkerPolicyIdentity()
   try {
     // Run the sub-agent
     for await (const message of runAgent({
@@ -230,12 +229,13 @@ async function executeForkedSkill(
       canUseTool,
       isAsync: false,
       querySource: 'agent:custom',
-      model: command.model as ModelAlias | undefined,
+      // command.model is Leader-only; forked execution resolves fixed Luna.
+      policyEpoch: workerPolicy.policyEpoch,
+      policyDigest: workerPolicy.policyDigest,
       availableTools: context.options.tools,
       override: { agentId },
     })) {
       agentMessages.push(message)
-
       // Report progress for tool uses (like AgentTool does)
       if (
         (message.type === 'assistant' || message.type === 'user') &&

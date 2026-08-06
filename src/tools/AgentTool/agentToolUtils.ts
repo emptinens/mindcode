@@ -37,6 +37,7 @@ import {
 } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
 import { asAgentId } from '../../types/ids.js'
 import type { Message as MessageType } from '../../types/message.js'
+import { assertWorkerPolicyIdentity } from '../../services/policy/index.js'
 import { isAgentSwarmsEnabled } from '../../utils/agentSwarmsEnabled.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { isInProtectedNamespace } from '../../utils/envUtils.js'
@@ -296,7 +297,7 @@ export function finalizeAgentTool(
     taskId?: string
     runId?: string
     workerId?: string
-    policyEpoch?: number
+    policyEpoch?: number; policyDigest?: string
     effort?: WorkerEffort
     declaredChangedFiles?: readonly string[]
     reportStatus?: WorkerReportStatus
@@ -310,7 +311,6 @@ export function finalizeAgentTool(
     agentType,
     isAsync,
   } = metadata
-
   const lastAssistantMessage = getLastAssistantMessage(agentMessages)
   if (lastAssistantMessage === undefined) {
     throw new Error('No assistant messages found')
@@ -339,7 +339,7 @@ export function finalizeAgentTool(
     taskId: metadata.taskId ?? agentId,
     runId: metadata.runId,
     workerId: metadata.workerId ?? agentId,
-    policyEpoch: metadata.policyEpoch,
+    policyEpoch: metadata.policyEpoch, policyDigest: metadata.policyDigest,
     status: metadata.reportStatus ?? 'completed',
     declaredChangedFiles: metadata.declaredChangedFiles,
     finalText: extractTextContent(content, '\n'),
@@ -591,6 +591,13 @@ export async function runAsyncAgentLifecycle({
   onExecutionFailed?: (error: unknown) => void
   onExecutionReleased?: () => void
 }): Promise<void> {
+  const expectedWorkerPolicy = assertWorkerPolicyIdentity(
+    {
+      policyEpoch: metadata.policyEpoch,
+      policyDigest: metadata.policyDigest,
+    },
+    'Worker report',
+  )
   let stopSummarization: (() => void) | undefined
   const agentMessages: MessageType[] = []
   const tracker = createProgressTracker()
@@ -678,7 +685,7 @@ export async function runAsyncAgentLifecycle({
         failAsyncAgent(taskId, validationError.message, rootSetAppState)
         settleExecution('failed', validationError)
       },
-    })
+    }, expectedWorkerPolicy)
     if (!reportCanComplete) {
       const invalidReportMessage = serializeWorkerReport(
         agentResult.workerReport,
@@ -761,6 +768,7 @@ export async function runAsyncAgentLifecycle({
         runId: metadata.runId,
         workerId: metadata.workerId ?? taskId,
         policyEpoch: metadata.policyEpoch,
+        policyDigest: metadata.policyDigest,
         status: 'failed',
         declaredChangedFiles: metadata.declaredChangedFiles,
         finalText: partialResult ?? 'Worker execution was cancelled.',
@@ -792,6 +800,7 @@ export async function runAsyncAgentLifecycle({
           runId: metadata.runId,
           workerId: metadata.workerId ?? taskId,
           policyEpoch: metadata.policyEpoch,
+          policyDigest: metadata.policyDigest,
           status: 'failed',
           declaredChangedFiles: metadata.declaredChangedFiles,
           finalText: msg,

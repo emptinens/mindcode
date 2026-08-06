@@ -36,7 +36,7 @@ export type AgentUpdate = {
 export type AgentCallSpec = {
   prompt: string
   schema?: unknown
-  model?: string
+  // Worker model is resolved at workflow-subagent admission.
   effort?: string
   isolation?: string
   agentType?: string
@@ -139,7 +139,7 @@ export async function runWorkflowScript(
       label?: string
       phase?: string
       schema?: unknown
-      model?: string
+      // Worker model is not a workflow option.
       effort?: string
       isolation?: string
       agentType?: string
@@ -186,7 +186,7 @@ export async function runWorkflowScript(
       const res = await hooks.runAgentCall({
         prompt,
         schema: opts?.schema,
-        model: opts?.model,
+        // Worker model is resolved by runWorkflowSubagent.
         effort: opts?.effort,
         isolation: opts?.isolation,
         agentType: opts?.agentType,

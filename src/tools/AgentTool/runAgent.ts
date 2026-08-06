@@ -41,6 +41,7 @@ import type {
   ToolUseSummaryMessage,
   UserMessage,
 } from '../../types/message.js'
+import { assertWorkerPolicyIdentity } from '../../services/policy/index.js'
 import { createAttachmentMessage } from '../../utils/attachments.js'
 import { AbortError } from '../../utils/errors.js'
 import { getDisplayPath } from '../../utils/file.js'
@@ -63,7 +64,7 @@ import { registerFrontmatterHooks } from '../../utils/hooks/registerFrontmatterH
 import { clearSessionHooks } from '../../utils/hooks/sessionHooks.js'
 import { executeSubagentStartHooks } from '../../utils/hooks.js'
 import { createUserMessage } from '../../utils/messages.js'
-import type { ModelAlias } from '../../utils/model/aliases.js'
+// Worker model aliases are intentionally unavailable at this boundary.
 import {
   clearAgentTranscriptSubdir,
   recordSidechainTranscript,
@@ -87,7 +88,6 @@ import type { ContentReplacementState } from '../../utils/toolResultStorage.js'
 import { createAgentId } from '../../utils/uuid.js'
 import { resolveAgentTools } from './agentToolUtils.js'
 import { type AgentDefinition, isBuiltInAgent } from './loadAgentsDir.js'
-
 /**
  * Build the provider thinking gate for a Worker request.
  *
@@ -277,8 +277,8 @@ export async function* runAgent({
   forkContextMessages,
   querySource,
   override,
-  model: _model,
-  effort,
+  // Worker model is resolved internally and cannot be supplied by callers.
+  effort, policyEpoch, policyDigest,
   maxTurns,
   preserveToolUseResults,
   availableTools,
@@ -311,9 +311,10 @@ export async function* runAgent({
     abortController?: AbortController
     agentId?: AgentId
   }
-  model?: ModelAlias
+  // No model field: resolveWorkerRuntime is the sole Worker model authority.
   /** Per-worker reasoning effort. Missing/invalid values resolve to medium. */
   effort?: WorkerEffortInput
+  policyEpoch: number; policyDigest: string
   maxTurns?: number
   /** Preserve toolUseResult on messages for subagents with viewable transcripts */
   preserveToolUseResults?: boolean
@@ -360,6 +361,7 @@ export async function* runAgent({
   const appState = toolUseContext.getAppState()
   const workerRuntime = resolveWorkerRuntime(effort)
   const resolvedWorkerEffort = workerRuntime.effort
+  const workerPolicy = assertWorkerPolicyIdentity({ policyEpoch, policyDigest }, 'Worker')
   // Always-shared channel to the root AppState store. toolUseContext.setAppState
   // is a no-op when the *parent* is itself an async agent (nested async→async),
   // so session-scoped writes (hooks, bash tasks) must go through this instead.
@@ -525,7 +527,6 @@ export async function* runAgent({
       toolPermissionContext,
     }
   }
-
   const canTransitionToBackground = isBackgrounded !== undefined
   const resolvedTools = useExactTools
     ? availableTools
@@ -534,7 +535,6 @@ export async function* runAgent({
         availableTools,
         isAsync || canTransitionToBackground,
       ).resolvedTools
-
   const additionalWorkingDirectories = Array.from(
     appState.toolPermissionContext.additionalWorkingDirectories.keys(),
   )
@@ -779,7 +779,7 @@ export async function* runAgent({
     agentType: agentDefinition.agentType,
     ...(worktreePath && { worktreePath }),
     ...(description && { description }),
-    effort: resolvedWorkerEffort,
+    effort: resolvedWorkerEffort, policyEpoch: workerPolicy.policyEpoch, policyDigest: workerPolicy.policyDigest,
   }).catch(_err => logForDebugging(`Failed to write agent metadata: ${_err}`))
 
   // Track the last recorded message UUID for parent chain continuity

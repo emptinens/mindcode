@@ -14,7 +14,10 @@ import type { Message } from '../types/message.js'
 import { isAgentSwarmsEnabled } from '../utils/agentSwarmsEnabled.js'
 import { initializeTeammateContextFromSession } from '../utils/swarm/reconnection.js'
 import { readTeamFile } from '../utils/swarm/teamHelpers.js'
-import { initializeTeammateHooks } from '../utils/swarm/teammateInit.js'
+import {
+  initializeTeammateHooks,
+  requireInheritedWorkerPolicyIdentity,
+} from '../utils/swarm/teammateInit.js'
 import { getDynamicTeamContext } from '../utils/teammate.js'
 
 type SetAppState = (f: (prevState: AppState) => AppState) => void
@@ -57,10 +60,13 @@ export function useSwarmInitialization(
           (m: { name: string }) => m.name === agentName,
         )
         if (member) {
+          const workerPolicy = requireInheritedWorkerPolicyIdentity()
           initializeTeammateHooks(setAppState, getSessionId(), {
             teamName,
             agentId: member.agentId,
             agentName,
+            policyEpoch: workerPolicy.policyEpoch,
+            policyDigest: workerPolicy.policyDigest,
           })
         }
       } else {
@@ -69,10 +75,13 @@ export function useSwarmInitialization(
         // and included in initialState, so we only need to initialize hooks here
         const context = getDynamicTeamContext?.()
         if (context?.teamName && context?.agentId && context?.agentName) {
+          const workerPolicy = requireInheritedWorkerPolicyIdentity()
           initializeTeammateHooks(setAppState, getSessionId(), {
             teamName: context.teamName,
             agentId: context.agentId,
             agentName: context.agentName,
+            policyEpoch: workerPolicy.policyEpoch,
+            policyDigest: workerPolicy.policyDigest,
           })
         }
       }

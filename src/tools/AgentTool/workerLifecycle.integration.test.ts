@@ -4,16 +4,44 @@ import { join } from 'node:path'
 import { createTestWorkerTaskGraph } from '../../runtime/taskGraph/workerGraph.js'
 import { TaskGraph } from '../../tasks/graph/taskGraph.js'
 import {
-  buildWorkerReport,
+  buildWorkerReport as buildWorkerReportProduction,
   persistValidatedWorkerReport,
   serializeWorkerReport,
 } from './workerReport.js'
-import { acquireWorkerExecution } from './workerLifecycle.js'
+import {
+  acquireWorkerExecution as acquireWorkerExecutionProduction,
+} from './workerLifecycle.js'
 import {
   AdaptiveSwarmConcurrencyPolicy,
   SWARM_EFFORT_WEIGHTS,
 } from '../../utils/swarm/concurrencyPolicy.js'
 import type { WorkerEffort } from '../../utils/swarm/backends/types.js'
+
+const acquireWorkerExecution = (
+  input: Parameters<typeof acquireWorkerExecutionProduction>[0],
+  dependencies: NonNullable<
+    Parameters<typeof acquireWorkerExecutionProduction>[1]
+  >,
+) =>
+  acquireWorkerExecutionProduction(input, {
+    ...dependencies,
+    testOnlyAllowMissingPolicyIdentity: true,
+  })
+
+const STABLE_POLICY_IDENTITY = {
+  policyEpoch: 0,
+  policyDigest: 'a'.repeat(64),
+} as const
+
+function buildWorkerReport(
+  input: Parameters<typeof buildWorkerReportProduction>[0],
+) {
+  return buildWorkerReportProduction({
+    ...input,
+    policyEpoch: input.policyEpoch ?? STABLE_POLICY_IDENTITY.policyEpoch,
+    policyDigest: input.policyDigest ?? STABLE_POLICY_IDENTITY.policyDigest,
+  })
+}
 
 const temporaryDirectories: string[] = []
 const openGraphs: TaskGraph[] = []
@@ -35,6 +63,7 @@ function validWorkerReport(overrides: Record<string, unknown> = {}) {
     model: 'gpt-5.6-luna',
     effort_used: 'medium',
     policy_epoch: 0,
+    policy_digest: '0'.repeat(64),
     status: 'completed',
     summary: 'Synthetic lifecycle execution completed.',
     changed_files: [],
@@ -345,6 +374,7 @@ describe('AgentTool lifecycle integration audit', () => {
       'effort_used',
       'evidence',
       'model',
+      'policy_digest',
       'policy_epoch',
       'report_id',
       'run_id',
@@ -382,6 +412,8 @@ describe('AgentTool lifecycle integration audit', () => {
       finalText: 'free-form worker output',
       tokensUsed: 3,
       effortUsed: 'high',
+      policyEpoch: 0,
+      policyDigest: '0'.repeat(64),
     })
     const events: string[] = []
     let settlement: Promise<void> | undefined
@@ -398,6 +430,7 @@ describe('AgentTool lifecycle integration audit', () => {
           settlement = execution.fail()
         },
       },
+      { policyEpoch: 0, policyDigest: '0'.repeat(64) },
     )
 
     expect(accepted).toBe(false)

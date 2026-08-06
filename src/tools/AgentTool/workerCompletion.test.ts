@@ -18,6 +18,7 @@ const validReport: WorkerReport = {
   model: 'gpt-5.6-luna',
   effort_used: 'medium',
   policy_epoch: 0,
+  policy_digest: 'a'.repeat(64),
   status: 'completed',
   summary: 'Validated report persisted before completion.',
   changed_files: [],
@@ -25,6 +26,10 @@ const validReport: WorkerReport = {
   tokens_used: 1,
   validation: { verdict: 'pass' },
   blockers: [],
+}
+const expectedPolicy = {
+  policyEpoch: validReport.policy_epoch,
+  policyDigest: validReport.policy_digest,
 }
 
 describe('WorkerReport completion boundary', () => {
@@ -34,7 +39,7 @@ describe('WorkerReport completion boundary', () => {
       persist: () => events.push('persist'),
       complete: () => events.push('complete'),
       reject: () => events.push('reject'),
-    })
+    }, expectedPolicy)
 
     expect(accepted).toBe(true)
     expect(events).toEqual(['persist', 'complete'])
@@ -54,7 +59,23 @@ describe('WorkerReport completion boundary', () => {
         complete: () => events.push('complete'),
         reject: () => events.push('reject'),
       },
+      expectedPolicy,
     )
+
+    expect(accepted).toBe(false)
+    expect(events).toEqual(['reject'])
+  })
+
+  test('rejects a valid-shaped report when the expected policy does not match', () => {
+    const events: string[] = []
+    const accepted = persistValidatedWorkerReport(resultWith(validReport), {
+      persist: () => events.push('persist'),
+      complete: () => events.push('complete'),
+      reject: () => events.push('reject'),
+    }, {
+      policyEpoch: expectedPolicy.policyEpoch + 1,
+      policyDigest: 'b'.repeat(64),
+    })
 
     expect(accepted).toBe(false)
     expect(events).toEqual(['reject'])

@@ -20,13 +20,13 @@ import {
   POLICY_DIGEST_ENV_VAR,
   POLICY_EPOCH_ENV_VAR,
   resolvePolicyEpochForSource,
+  type WorkerPolicyIdentity,
 } from '../../services/policy/index.js'
 import { getWorkerPolicySourceDigest } from '../../services/policy/workerPolicySource.js'
 import { getConfiguredSubagentModel } from '../model/subagentModel.js'
 import type { PermissionMode } from '../permissions/PermissionMode.js'
 import { getTeammateModeFromSnapshot } from './backends/teammateModeSnapshot.js'
 import { TEAMMATE_COMMAND_ENV_VAR } from './constants.js'
-
 /**
  * Gets the command to use for spawning teammate processes.
  * Uses TEAMMATE_COMMAND_ENV_VAR if set, otherwise falls back to the
@@ -148,12 +148,15 @@ export function isTeammateEnvVarForwarded(name: string): boolean {
  */
 export function buildInheritedEnvVars(
   jailbreakLevel: JailbreakLevel = getJailbreakLevel(),
+  policyIdentity?: WorkerPolicyIdentity,
 ): string {
   const normalizedJailbreakLevel =
     parseJailbreakLevel(String(jailbreakLevel))
   const level = normalizedJailbreakLevel ?? getJailbreakLevel()
-  const sourceDigest = getWorkerPolicySourceDigest(level)
-  const policyEpoch = resolvePolicyEpochForSource(sourceDigest, level)
+  const sourceDigest = policyIdentity?.policyDigest ?? getWorkerPolicySourceDigest(level)
+  const policyEpoch = policyIdentity
+    ? { epoch: policyIdentity.policyEpoch }
+    : resolvePolicyEpochForSource(sourceDigest, level)
   const envVars = [
     'MINDCODE=1',
     'MINDCODE_EXPERIMENTAL_AGENT_TEAMS=1',

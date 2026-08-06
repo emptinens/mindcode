@@ -8,7 +8,7 @@
 export type WorkflowPhase = {
   title: string
   detail?: string
-  model?: string
+  // Worker model is fixed at the subagent admission boundary.
 }
 
 export type WorkflowMeta = {
@@ -125,7 +125,7 @@ function validateMeta(value: unknown): WorkflowMeta | { error: string } {
       return {
         title: typeof pp.title === 'string' ? pp.title : '',
         detail: typeof pp.detail === 'string' ? pp.detail : undefined,
-        model: typeof pp.model === 'string' ? pp.model : undefined,
+        // Worker model is intentionally not accepted from workflow metadata.
       }
     })
   }

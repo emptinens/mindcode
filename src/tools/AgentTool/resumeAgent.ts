@@ -20,6 +20,7 @@ import {
   parsePolicyEpochEnvironment,
   readCurrentPolicyEpochState,
 } from '../../services/policy/index.js'
+import { getCompiledResumePolicySnapshot } from '../../services/policy/promptBoundary.js'
 import {
   killAsyncAgent,
   registerAsyncAgent,
@@ -93,7 +94,6 @@ function resolveWorkerPolicySnapshot() {
   }
   return snapshot
 }
-
 function runtimeTaskPrefix(runtimeScope: string): string {
   return `${RUNTIME_TASK_PREFIX}${createHash('sha256')
     .update(runtimeScope)
@@ -268,10 +268,19 @@ export async function resumeAgentBackground({
       )
     }
     // Fork resumes inherit the parent prompt for cache continuity, then receive
-    // the current canonical worker policy snapshot at the worker boundary.
+    // the current canonical resume policy snapshot at the resume boundary.
+    const resumePolicy = getCompiledResumePolicySnapshot(
+      workerPolicy.jailbreakLevel,
+    )
+    if (
+      resumePolicy.policyEpoch !== workerPolicy.policyEpoch ||
+      resumePolicy.sourceDigest !== workerPolicy.sourceDigest
+    ) {
+      throw new Error('Resume policy epoch/digest mismatch')
+    }
     forkParentSystemPrompt = asSystemPrompt([
       ...forkParentSystemPrompt,
-      workerPolicy.prompt,
+      resumePolicy.prompt,
     ])
   }
 
@@ -297,6 +306,7 @@ export async function resumeAgentBackground({
       runId: workerRunId,
       workerId: agentId,
       policyEpoch: workerPolicy.policyEpoch,
+      policyDigest: workerPolicy.sourceDigest,
     },
   )}`
 
@@ -313,8 +323,10 @@ export async function resumeAgentBackground({
       selectedAgent.agentType,
       isBuiltInAgent(selectedAgent),
     ),
-    model: workerRuntime.model,
+    // runAgent re-resolves fixed Luna; resume cannot supply a model override.
     effort,
+    policyEpoch: workerPolicy.policyEpoch,
+    policyDigest: workerPolicy.sourceDigest,
     // Fork resume: pass parent's system prompt (cache-identical prefix).
     // Non-fork: undefined → runAgent recomputes under wrapWithCwd so
     // getCwd() sees resumedWorktreePath.
@@ -402,6 +414,7 @@ export async function resumeAgentBackground({
     runId: workerRunId,
     workerId: agentId,
     policyEpoch: workerPolicy.policyEpoch,
+    policyDigest: workerPolicy.sourceDigest,
     effort,
   }
 
@@ -428,7 +441,7 @@ export async function resumeAgentBackground({
         ? {
             reportId: report.report_id,
             policyEpoch: report.policy_epoch,
-            policyDigest: workerPolicy.sourceDigest,
+            policyDigest: report.policy_digest,
           }
         : undefined
       await workerExecution[action](evidence)
@@ -446,6 +459,7 @@ export async function resumeAgentBackground({
       runId: workerRunId,
       workerId: agentId,
       policyEpoch: workerPolicy.policyEpoch,
+      policyDigest: workerPolicy.sourceDigest,
       status: 'failed',
       finalText: reason,
       tokensUsed: 0,

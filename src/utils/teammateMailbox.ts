@@ -13,11 +13,11 @@ import { z } from 'zod/v4'
 import { TEAMMATE_MESSAGE_TAG } from '../constants/xml.js'
 import { PermissionModeSchema } from '../entrypoints/sdk/coreSchemas.js'
 import {
-  isWorkerReportCompletionEligible,
+  isWorkerReportCompletionEligibleForPolicy,
   type WorkerReport,
 } from '../tools/AgentTool/workerReport.js'
 import { SEND_MESSAGE_TOOL_NAME } from '../tools/SendMessageTool/constants.js'
-import type { Message } from '../types/message.js'
+import type { Message } from '../types/message.js'; import type { WorkerPolicyIdentity } from '../services/policy/policyEpoch.js'
 import { generateRequestId, parseAgentId } from './agentId.js'
 import { count } from './array.js'
 import { logForDebugging } from './debug.js'
@@ -453,6 +453,8 @@ export type WorkerLifecycleCorrelation = Readonly<{
   taskId: string
   runId: string
   startedAtMs: number
+  policyEpoch: number
+  policyDigest: string
 }>
 
 /**
@@ -472,7 +474,9 @@ export function isWorkerReportFreshAndCorrelated(
   return (
     report.worker_id === expected.workerId &&
     report.task_id === expected.taskId &&
-    report.run_id === expected.runId
+    report.run_id === expected.runId &&
+    report.policy_epoch === expected.policyEpoch &&
+    report.policy_digest === expected.policyDigest
   )
 }
 
@@ -564,8 +568,11 @@ export type WorkerReportTerminalStatus = 'completed' | 'failed'
  */
 export function resolveWorkerReportTerminalStatus(
   report: WorkerReport | null | undefined,
+  expectedPolicy?: WorkerPolicyIdentity,
 ): WorkerReportTerminalStatus {
-  return report && isWorkerReportCompletionEligible(report)
+  return report &&
+    expectedPolicy &&
+    isWorkerReportCompletionEligibleForPolicy(report, expectedPolicy)
     ? 'completed'
     : 'failed'
 }

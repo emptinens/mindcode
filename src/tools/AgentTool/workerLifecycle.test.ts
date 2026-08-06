@@ -6,10 +6,21 @@ import { TaskGraph } from '../../tasks/graph/taskGraph.js'
 import { AdaptiveSwarmConcurrencyPolicy } from '../../utils/swarm/concurrencyPolicy.js'
 import type { WorkerEffort } from '../../utils/swarm/backends/types.js'
 import {
-  acquireWorkerExecution,
+  acquireWorkerExecution as acquireWorkerExecutionProduction,
   WorkerLifecycleTimeoutError,
   type WorkerExecutionPhase,
 } from './workerLifecycle.js'
+
+const acquireWorkerExecution = (
+  input: Parameters<typeof acquireWorkerExecutionProduction>[0],
+  dependencies: NonNullable<
+    Parameters<typeof acquireWorkerExecutionProduction>[1]
+  >,
+) =>
+  acquireWorkerExecutionProduction(input, {
+    ...dependencies,
+    testOnlyAllowMissingPolicyIdentity: true,
+  })
 
 const tempDirs: string[] = []
 const graphs: TaskGraph[] = []
@@ -33,6 +44,36 @@ function graph(options: { clock?: () => Date } = {}): TaskGraph {
 }
 
 describe('Agent worker lifecycle', () => {
+  test('requires an explicit bypass for an injected test graph', async () => {
+    const taskGraph = graph()
+    const input = {
+      taskId: 'explicit-test-policy-bypass',
+      owner: 'test-worker',
+      schedulerScope: 'test-session',
+      effort: 'low' as const,
+    }
+
+    await expect(
+      acquireWorkerExecutionProduction(input, {
+        graph: createTestWorkerTaskGraph(taskGraph),
+      }),
+    ).rejects.toThrow('Worker policy epoch and source digest are required')
+
+    await expect(
+      acquireWorkerExecutionProduction(input, {
+        testOnlyAllowMissingPolicyIdentity: true,
+      }),
+    ).rejects.toThrow(
+      'testOnlyAllowMissingPolicyIdentity requires an injected test graph',
+    )
+
+    const execution = await acquireWorkerExecutionProduction(input, {
+      graph: createTestWorkerTaskGraph(taskGraph),
+      testOnlyAllowMissingPolicyIdentity: true,
+    })
+    await execution.complete()
+  })
+
   test('routes, atomically claims, acquires weighted capacity, and completes', async () => {
     const taskGraph = graph()
     const scheduler = new AdaptiveSwarmConcurrencyPolicy(8)
@@ -762,6 +803,7 @@ describe('Agent worker lifecycle', () => {
     expect(taskGraph.requireTask('report-backed-completion')).toMatchObject({
       status: 'running',
       policy_epoch: 12,
+      policy_digest: policyDigest,
       report_id: null,
     })
     await execution.complete({
@@ -773,6 +815,7 @@ describe('Agent worker lifecycle', () => {
     expect(taskGraph.requireTask('report-backed-completion')).toMatchObject({
       status: 'completed',
       policy_epoch: 12,
+      policy_digest: policyDigest,
       report_id: reportId,
     })
   })
@@ -803,6 +846,7 @@ describe('Agent worker lifecycle', () => {
     expect(taskGraph.requireTask('stale-report')).toMatchObject({
       status: 'running',
       policy_epoch: 21,
+      policy_digest: policyDigest,
       report_id: null,
     })
 
@@ -814,8 +858,44 @@ describe('Agent worker lifecycle', () => {
     expect(taskGraph.requireTask('stale-report')).toMatchObject({
       status: 'failed',
       policy_epoch: 21,
+      policy_digest: policyDigest,
       report_id: reportId,
     })
+  })
+
+  test('rejects missing and stale report source digests before terminalizing', async () => {
+    const taskGraph = graph()
+    const policyDigest = 'e'.repeat(64)
+    const execution = await acquireWorkerExecution(
+      {
+        taskId: 'stale-report-digest',
+        owner: 'worker-stale-digest',
+        schedulerScope: 'session',
+        effort: 'low',
+        policyEpoch: 31,
+        policyDigest,
+      },
+      { graph: createTestWorkerTaskGraph(taskGraph) },
+    )
+
+    expect(() => execution.complete()).toThrow(
+      'worker completion requires a validated report_id and policy_epoch',
+    )
+    expect(() =>
+      execution.complete({
+        reportId: 'f'.repeat(64),
+        policyEpoch: 31,
+        policyDigest: 'd'.repeat(64),
+      }),
+    ).toThrow('stale or mismatched worker report policy digest')
+    expect(taskGraph.requireTask('stale-report-digest').status).toBe('running')
+
+    await execution.fail({
+      reportId: 'f'.repeat(64),
+      policyEpoch: 31,
+      policyDigest,
+    })
+    expect(taskGraph.requireTask('stale-report-digest').status).toBe('failed')
   })
 
   test('renews only the active owner lease and handles expired and released leases', async () => {

@@ -65,6 +65,7 @@ import { TASK_UPDATE_TOOL_NAME } from '../../tools/TaskUpdateTool/constants.js'
 import { TEAM_CREATE_TOOL_NAME } from '../../tools/TeamCreateTool/constants.js'
 import { TEAM_DELETE_TOOL_NAME } from '../../tools/TeamDeleteTool/constants.js'
 import type { Message } from '../../types/message.js'
+import { assertWorkerPolicyIdentity, type WorkerPolicyIdentity } from '../../services/policy/index.js'
 import type { PermissionDecision } from '../../types/permissions.js'
 import {
   createAssistantAPIErrorMessage,
@@ -82,7 +83,7 @@ import {
   SUBAGENT_REJECT_MESSAGE,
   SUBAGENT_REJECT_MESSAGE_WITH_REASON_PREFIX,
 } from '../messages.js'
-import type { ModelAlias } from '../model/aliases.js'
+// Worker model aliases are intentionally unavailable in the in-process runner.
 import type { EffortValue } from '../effort.js'
 import {
   applyPermissionUpdates,
@@ -93,7 +94,7 @@ import { hasPermissionsToUseTool } from '../permissions/permissions.js'
 import { emitTaskTerminatedSdk } from '../sdkEventQueue.js'
 import { sleep } from '../sleep.js'
 import { asSystemPrompt } from '../systemPromptType.js'
-import { claimTask, listTasks, type Task, updateTask } from '../tasks.js'
+import { listTasks, updateTask, type Task } from '../tasks.js'
 import type { TeammateContext } from '../teammateContext.js'
 import { runWithTeammateContext } from '../teammateContext.js'
 import {
@@ -108,7 +109,10 @@ import {
 import { unregisterAgent as unregisterPerfettoAgent } from '../telemetry/perfettoTracing.js'
 import { createContentReplacementState } from '../toolResultStorage.js'
 import { TEAM_LEAD_NAME } from './constants.js'
-import { resolveWorkerRuntime } from './backends/types.js'
+import {
+  applyWorkerRuntimeToAppState,
+  resolveWorkerRuntime,
+} from './backends/types.js'
 import { releaseSwarmWorkerSlot } from './concurrencyPolicy.js'
 import {
   getLeaderSetToolPermissionContext,
@@ -118,12 +122,15 @@ import {
   createPermissionRequest,
   sendPermissionRequestViaMailbox,
 } from './permissionSync.js'
+import {
+  claimInProcessSharedTask,
+  settleInProcessSharedTask,
+} from './inProcessSharedTask.js'
 import { TEAMMATE_SYSTEM_PROMPT_ADDENDUM } from './teammatePromptAddendum.js'
 import {
   accumulateWorkerTokenUsage,
   type buildWorkerTeamReport,
   buildWorkerTeamReportFromMessages,
-  isWorkerReportCompletionEligible,
   serializeWorkerTeamReportMessage,
 } from './workerTeamReport.js'
 
@@ -531,6 +538,9 @@ export type InProcessRunnerConfig = {
   model?: string
   /** Per-worker reasoning effort; invalid or missing values resolve to medium. */
   effort?: EffortValue
+  /** Policy identity captured by the Leader for this teammate run. */
+  policyEpoch?: number
+  policyDigest?: string
   /** Optional system prompt override for this teammate */
   systemPrompt?: string
   /** How to apply the system prompt: 'replace' or 'append' to default */
@@ -673,8 +683,10 @@ function formatTaskAsPrompt(task: Task): string {
  */
 async function tryClaimNextTask(
   taskListId: string,
-  agentName: string,
-): Promise<string | undefined> {
+  owner: string,
+  policyIdentity: WorkerPolicyIdentity,
+): Promise<{ taskId: string; runId: string; prompt: string } | undefined> {
+  let claimedTaskId: string | undefined
   try {
     const tasks = await listTasks(taskListId)
     const availableTask = findAvailableTask(tasks)
@@ -682,26 +694,42 @@ async function tryClaimNextTask(
     if (!availableTask) {
       return undefined
     }
+    const runId = createWorkerLifecycleRunId()
 
-    const result = await claimTask(taskListId, availableTask.id, agentName)
-
-    if (!result.success) {
-      logForDebugging(
-        `[inProcessRunner] Failed to claim task #${availableTask.id}: ${result.reason}`,
-      )
-      return undefined
-    }
-
-    // Also set status to in_progress so the UI reflects it immediately
-    await updateTask(taskListId, availableTask.id, { status: 'in_progress' })
+    await claimInProcessSharedTask(
+      taskListId,
+      availableTask.id,
+      owner,
+      runId,
+      policyIdentity,
+    )
+    claimedTaskId = availableTask.id
 
     logForDebugging(
       `[inProcessRunner] Claimed task #${availableTask.id}: ${availableTask.subject}`,
     )
 
-    return formatTaskAsPrompt(availableTask)
+    return {
+      taskId: availableTask.id,
+      runId,
+      prompt: formatTaskAsPrompt(availableTask),
+    }
   } catch (err) {
     logForDebugging(`[inProcessRunner] Error checking task list: ${err}`)
+    // A successful claim without a running transition must not strand a
+    // durable lease. The graph remains the only source of lifecycle state.
+    if (claimedTaskId) {
+      try {
+        await updateTask(taskListId, claimedTaskId, {
+          status: 'failed',
+          metadata: { terminal_reason: 'running_transition_failed' },
+        })
+      } catch (cleanupError) {
+        logForDebugging(
+          `[inProcessRunner] Failed to release task-list claim #${claimedTaskId}: ${cleanupError}`,
+        )
+      }
+    }
     return undefined
   }
 }
@@ -721,6 +749,8 @@ type WaitResult =
       from: string
       color?: string
       summary?: string
+      taskId?: string
+      runId?: string
     }
   | {
       type: 'aborted'
@@ -743,6 +773,7 @@ async function waitForNextPromptOrShutdown(
   getAppState: () => AppState,
   setAppState: SetAppStateFn,
   taskListId: string,
+  policyIdentity: WorkerPolicyIdentity,
 ): Promise<WaitResult> {
   const POLL_INTERVAL_MS = 500
 
@@ -903,12 +934,18 @@ async function waitForNextPromptOrShutdown(
     }
 
     // Check the team's task list for unclaimed tasks
-    const taskPrompt = await tryClaimNextTask(taskListId, identity.agentName)
+    const taskPrompt = await tryClaimNextTask(
+      taskListId,
+      identity.agentId,
+      policyIdentity,
+    )
     if (taskPrompt) {
       return {
         type: 'new_message',
-        message: taskPrompt,
+        message: taskPrompt.prompt,
         from: 'task-list',
+        taskId: taskPrompt.taskId,
+        runId: taskPrompt.runId,
       }
     }
   }
@@ -945,6 +982,8 @@ export async function runInProcessTeammate(
     toolUseContext,
     abortController,
     effort,
+    policyEpoch,
+    policyDigest,
     systemPrompt,
     systemPromptMode,
     allowedTools,
@@ -952,9 +991,36 @@ export async function runInProcessTeammate(
     invokingRequestId,
   } = config
   const { setAppState } = toolUseContext
-  const { model: workerModel, effort: workerEffort } =
-    resolveWorkerRuntime(effort)
+  const workerRuntime = resolveWorkerRuntime(effort)
+  const { model: workerModel, effort: workerEffort } = workerRuntime
+  const workerToolUseContext: ToolUseContext = {
+    ...toolUseContext,
+    getAppState: () =>
+      applyWorkerRuntimeToAppState(toolUseContext.getAppState(), workerRuntime),
+    options: {
+      ...toolUseContext.options,
+      mainLoopModel: workerModel,
+    },
+  }
   const workerPolicy = resolveWorkerPolicySnapshot()
+  if (
+    policyEpoch === undefined ||
+    policyDigest === undefined
+  ) {
+    throw new Error(
+      'In-process Worker policy epoch and source digest are required at the production boundary',
+    )
+  }
+  const admittedPolicy = assertWorkerPolicyIdentity({
+    policyEpoch,
+    policyDigest,
+  })
+  if (
+    admittedPolicy.policyEpoch !== workerPolicy.policyEpoch ||
+    admittedPolicy.policyDigest !== workerPolicy.sourceDigest
+  ) {
+    throw new Error('In-process Worker policy epoch/digest mismatch')
+  }
   const workerRunId = createWorkerLifecycleRunId()
 
   logForDebugging(
@@ -988,10 +1054,10 @@ export async function runInProcessTeammate(
       .join('\n')
   } else {
     const fullSystemPromptParts = await getSystemPrompt(
-      toolUseContext.options.tools,
-      toolUseContext.options.mainLoopModel,
+      workerToolUseContext.options.tools,
+      workerToolUseContext.options.mainLoopModel,
       undefined,
-      toolUseContext.options.mcpClients,
+      workerToolUseContext.options.mcpClients,
     )
 
     const hasBasePolicy = fullSystemPromptParts.some((section) =>
@@ -1078,12 +1144,7 @@ export async function runInProcessTeammate(
   let totalTokensUsed = 0
   const countedUsageIds = new Set<string>()
   let lastWorkerReport: ReturnType<typeof buildWorkerTeamReport> | undefined
-
-  // Try to claim an available task immediately so the UI can show activity
-  // from the very start. The idle loop handles claiming for subsequent tasks.
-  // Use parentSessionId as the task list ID since the leader creates tasks
-  // under its session ID, not the team name.
-  await tryClaimNextTask(identity.parentSessionId, identity.agentName)
+  let activeGraphWork: { taskId: string; runId: string } | undefined
 
   try {
     // Add initial prompt to task.messages for display (wrapped with XML)
@@ -1140,7 +1201,7 @@ export async function runInProcessTeammate(
       const tokenCount = tokenCountWithEstimation(allMessages)
       if (
         tokenCount >
-        getAutoCompactThreshold(toolUseContext.options.mainLoopModel)
+        getAutoCompactThreshold(workerModel)
       ) {
         logForDebugging(
           `[inProcessRunner] ${identity.agentId} compacting history (${tokenCount} tokens)`,
@@ -1149,8 +1210,8 @@ export async function runInProcessTeammate(
         // does not clear the main session's readFileState cache or
         // trigger the main session's UI callbacks.
         const isolatedContext: ToolUseContext = {
-          ...toolUseContext,
-          readFileState: cloneFileStateCache(toolUseContext.readFileState),
+          ...workerToolUseContext,
+          readFileState: cloneFileStateCache(workerToolUseContext.readFileState),
           onCompactProgress: undefined,
           setStreamMode: undefined,
         }
@@ -1242,7 +1303,7 @@ export async function runInProcessTeammate(
           for await (const message of runAgent({
             agentDefinition: iterationAgentDefinition,
             promptMessages,
-            toolUseContext,
+            toolUseContext: workerToolUseContext,
             canUseTool: createInProcessCanUseTool(
               identity,
               currentWorkAbortController,
@@ -1262,10 +1323,12 @@ export async function runInProcessTeammate(
             forkContextMessages,
             querySource: 'agent:custom',
             override: { abortController: currentWorkAbortController },
-            model: workerModel as ModelAlias,
+            // runAgent resolves the fixed Worker model internally.
             effort: workerEffort,
+            policyEpoch: workerPolicy.policyEpoch,
+            policyDigest: workerPolicy.sourceDigest,
             preserveToolUseResults: true,
-            availableTools: toolUseContext.options.tools,
+            availableTools: workerToolUseContext.options.tools,
             allowedTools,
             contentReplacementState: teammateReplacementState,
           })) {
@@ -1405,16 +1468,28 @@ export async function runInProcessTeammate(
       // Only send idle notification on transition to idle (not if already idle)
       if (!wasAlreadyIdle) {
         lastWorkerReport = buildWorkerTeamReportFromMessages({
-          taskId,
-          runId: workerRunId,
+          taskId: activeGraphWork?.taskId ?? taskId,
+          runId: activeGraphWork?.runId ?? workerRunId,
           workerId: identity.agentId,
           policyEpoch: workerPolicy.policyEpoch,
+          policyDigest: workerPolicy.sourceDigest,
           status: workWasAborted ? 'failed' : undefined,
           tokensUsed: totalTokensUsed,
           effortUsed: workerEffort,
           evidence: workWasAborted ? ['turn interrupted'] : [],
           messages: iterationMessages,
         })
+        if (activeGraphWork) {
+          await settleInProcessSharedTask(
+            identity.parentSessionId,
+            activeGraphWork.taskId,
+            identity.agentId,
+            activeGraphWork.runId,
+            lastWorkerReport,
+            admittedPolicy,
+          )
+          activeGraphWork = undefined
+        }
         await sendIdleNotification(
           identity.agentName,
           identity.color,
@@ -1422,7 +1497,11 @@ export async function runInProcessTeammate(
           {
             idleReason: workWasAborted
               ? 'interrupted'
-              : !isWorkerReportCompletionEligible(lastWorkerReport)
+              : resolveWorkerReportTerminalStatus(lastWorkerReport, {
+                    policyEpoch: workerPolicy.policyEpoch,
+                    policyDigest: workerPolicy.sourceDigest,
+                  }) !==
+                  'completed'
                 ? 'failed'
                 : 'available',
             report: lastWorkerReport,
@@ -1446,6 +1525,7 @@ export async function runInProcessTeammate(
         toolUseContext.getAppState,
         setAppState,
         identity.parentSessionId,
+        admittedPolicy,
       )
 
       switch (waitResult.type) {
@@ -1478,6 +1558,17 @@ export async function runInProcessTeammate(
           if (waitResult.from === 'user') {
             currentPrompt = waitResult.message
           } else {
+            if (waitResult.from === 'task-list') {
+              if (!waitResult.taskId || !waitResult.runId) {
+                throw new Error('Claimed graph work is missing task/run identity')
+              }
+              activeGraphWork = {
+                taskId: waitResult.taskId,
+                runId: waitResult.runId,
+              }
+            } else {
+              activeGraphWork = undefined
+            }
             currentPrompt = formatAsTeammateMessage(
               waitResult.from,
               waitResult.message,
@@ -1509,10 +1600,11 @@ export async function runInProcessTeammate(
     // the Worker/Leader boundary and it also gates task completion.
     if (!lastWorkerReport) {
       lastWorkerReport = buildWorkerTeamReportFromMessages({
-        taskId,
-        runId: workerRunId,
+        taskId: activeGraphWork?.taskId ?? taskId,
+        runId: activeGraphWork?.runId ?? workerRunId,
         workerId: identity.agentId,
         policyEpoch: workerPolicy.policyEpoch,
+        policyDigest: workerPolicy.sourceDigest,
         status: 'failed',
         tokensUsed: totalTokensUsed,
         effortUsed: workerEffort,
@@ -1530,7 +1622,22 @@ export async function runInProcessTeammate(
       )
     }
 
-    const terminalStatus = resolveWorkerReportTerminalStatus(lastWorkerReport)
+    if (activeGraphWork) {
+      await settleInProcessSharedTask(
+        identity.parentSessionId,
+        activeGraphWork.taskId,
+        identity.agentId,
+        activeGraphWork.runId,
+        lastWorkerReport,
+        admittedPolicy,
+      )
+      activeGraphWork = undefined
+    }
+
+    const terminalStatus = resolveWorkerReportTerminalStatus(
+      lastWorkerReport,
+      admittedPolicy,
+    )
     const completionEligible = terminalStatus === 'completed'
     const terminalError = completionEligible
       ? undefined
@@ -1642,16 +1749,34 @@ export async function runInProcessTeammate(
 
     // Send idle notification with failure via file-based mailbox
     lastWorkerReport = buildWorkerTeamReportFromMessages({
-      taskId,
-      runId: workerRunId,
+      taskId: activeGraphWork?.taskId ?? taskId,
+      runId: activeGraphWork?.runId ?? workerRunId,
       workerId: identity.agentId,
       policyEpoch: workerPolicy.policyEpoch,
+      policyDigest: workerPolicy.sourceDigest,
       status: 'failed',
       tokensUsed: totalTokensUsed,
       effortUsed: workerEffort,
       evidence: [errorMessage],
       messages: allMessages,
     })
+    if (activeGraphWork) {
+      try {
+        await settleInProcessSharedTask(
+          identity.parentSessionId,
+          activeGraphWork.taskId,
+          identity.agentId,
+          activeGraphWork.runId,
+          lastWorkerReport,
+          admittedPolicy,
+        )
+      } catch (graphError) {
+        logForDebugging(
+          `[inProcessRunner] Failed to terminalize claimed graph task ${activeGraphWork.taskId}: ${graphError}`,
+        )
+      }
+      activeGraphWork = undefined
+    }
     await sendIdleNotification(
       identity.agentName,
       identity.color,

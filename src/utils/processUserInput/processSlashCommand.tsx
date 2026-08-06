@@ -13,6 +13,7 @@ import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, type A
 import { getDumpPromptsPath } from '../../services/api/dumpPrompts.js';
 import { buildPostCompactMessages } from '../../services/compact/compact.js';
 import { resetMicrocompactState } from '../../services/compact/microCompact.js';
+import { getWorkerPolicyIdentity } from '../../services/policy/index.js';
 import type { Progress as AgentProgress } from '../../tools/AgentTool/AgentTool.js';
 import { runAgent } from '../../tools/AgentTool/runAgent.js';
 import { renderToolUseProgressMessage } from '../../tools/AgentTool/UI.js';
@@ -32,7 +33,7 @@ import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 import { logError } from '../log.js';
 import { enqueuePendingNotification } from '../messageQueueManager.js';
 import { createCommandInputMessage, createSyntheticUserCaveatMessage, createSystemMessage, createUserInterruptionMessage, createUserMessage, formatCommandInputTags, isCompactBoundaryMessage, isSystemLocalCommandMessage, normalizeMessages, prepareUserContent } from '../messages.js';
-import type { ModelAlias } from '../model/aliases.js';
+// Prompt command model overrides remain Leader-only, never Worker inputs.
 import { parseToolListFromCLI } from '../permissions/permissionSetup.js';
 import { hasPermissionsToUseTool } from '../permissions/permissions.js';
 import { isOfficialMarketplaceName, parsePluginIdentifier } from '../plugins/pluginIdentifier.js';
@@ -116,7 +117,6 @@ async function executeForkedSlashCommand(command: CommandBase & PromptCommand, a
     // establishes a new context, even for `undefined`) → so it needs its
     // own QueuedCommand.workload tag to preserve attribution.
     const spawnTimeWorkload = getWorkload();
-
     // Re-enter the queue as a hidden prompt. isMeta: hides from queue
     // preview + placeholder + transcript. skipSlashCommands: prevents
     // re-parsing if the result text happens to start with '/'. When
@@ -145,6 +145,7 @@ async function executeForkedSlashCommand(command: CommandBase & PromptCommand, a
         await sleep(MCP_SETTLE_POLL_MS);
       }
       const freshTools = context.options.refreshTools?.() ?? context.options.tools;
+      const workerPolicy = getWorkerPolicyIdentity();
       const agentMessages: Message[] = [];
       for await (const message of runAgent({
         agentDefinition,
@@ -157,7 +158,9 @@ async function executeForkedSlashCommand(command: CommandBase & PromptCommand, a
         canUseTool,
         isAsync: true,
         querySource: 'agent:custom',
-        model: command.model as ModelAlias | undefined,
+        // Forked command Workers resolve their model internally.
+        policyEpoch: workerPolicy.policyEpoch,
+        policyDigest: workerPolicy.policyDigest,
         availableTools: freshTools,
         override: {
           agentId
@@ -207,7 +210,6 @@ async function executeForkedSlashCommand(command: CommandBase & PromptCommand, a
       uuid: randomUUID()
     };
   };
-
   // Helper to update progress display using agent progress UI
   const updateProgress = (): void => {
     setToolJSX({
@@ -220,12 +222,11 @@ async function executeForkedSlashCommand(command: CommandBase & PromptCommand, a
       showSpinner: true
     });
   };
-
   // Show initial "Initializing…" state
   updateProgress();
-
   // Run the sub-agent
   try {
+    const workerPolicy = getWorkerPolicyIdentity();
     for await (const message of runAgent({
       agentDefinition,
       promptMessages,
@@ -236,12 +237,13 @@ async function executeForkedSlashCommand(command: CommandBase & PromptCommand, a
       canUseTool,
       isAsync: false,
       querySource: 'agent:custom',
-      model: command.model as ModelAlias | undefined,
+      // Forked command Workers resolve their model internally.
+      policyEpoch: workerPolicy.policyEpoch,
+      policyDigest: workerPolicy.policyDigest,
       availableTools: context.options.tools
     })) {
       agentMessages.push(message);
       const normalizedNew = normalizeMessages([message]);
-
       // Add progress message for assistant messages (which contain tool uses)
       if (message.type === 'assistant') {
         // Increment token count in spinner for assistant messages
@@ -255,7 +257,6 @@ async function executeForkedSlashCommand(command: CommandBase & PromptCommand, a
           updateProgress();
         }
       }
-
       // Add progress message for user messages (which contain tool results)
       if (message.type === 'user') {
         const normalizedMsg = normalizedNew[0];
@@ -271,7 +272,6 @@ async function executeForkedSlashCommand(command: CommandBase & PromptCommand, a
   }
   let resultText = extractResultText(agentMessages, 'Command completed');
   logForDebugging(`Forked slash command /${command.name} completed with agent ${agentId}`);
-
   // Prepend debug log for ant users so it appears inside the command output
   if ("external" === 'ant') {
     resultText = `[ANT-ONLY] API calls: ${getDisplayPath(getDumpPromptsPath(agentId))}\n${resultText}`;

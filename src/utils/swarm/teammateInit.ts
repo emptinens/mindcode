@@ -8,8 +8,10 @@
 import { randomUUID } from 'node:crypto'
 import { getCompiledWorkerPolicySnapshot } from '../../services/policy/workerPolicySource.js'
 import {
+  assertWorkerPolicyIdentity,
   parsePolicyEpochEnvironment,
   readCurrentPolicyEpochState,
+  type WorkerPolicyIdentity,
 } from '../../services/policy/index.js'
 import type { AppState } from '../../state/AppState.js'
 import { logForDebugging } from '../debug.js'
@@ -24,28 +26,52 @@ import {
 import { readTeamFile, setMemberActive } from './teamHelpers.js'
 import {
   buildWorkerTeamReportFromMessages,
-  isWorkerReportCompletionEligible,
+  isWorkerReportCompletionEligibleForPolicy,
   serializeWorkerTeamReportMessage,
 } from './workerTeamReport.js'
 
 export const WORKER_LIFECYCLE_RUN_ID_ENV = 'MINDCODE_WORKER_RUN_ID'
 
-function resolveWorkerPolicySnapshot() {
-  const snapshot = getCompiledWorkerPolicySnapshot()
-  const inherited = parsePolicyEpochEnvironment()
+export function requireInheritedWorkerPolicyIdentity(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): WorkerPolicyIdentity {
+  const inherited = parsePolicyEpochEnvironment(environment)
+  if (!inherited) {
+    throw new Error(
+      'Inherited Worker policy epoch and source digest are required',
+    )
+  }
+  return assertWorkerPolicyIdentity(
+    {
+      policyEpoch: inherited.epoch,
+      policyDigest: inherited.digest,
+    },
+    'Teammate Worker',
+  )
+}
+
+function resolveWorkerPolicySnapshot(
+  admittedPolicy: WorkerPolicyIdentity,
+) {
+  const inherited = requireInheritedWorkerPolicyIdentity()
   if (
-    inherited &&
-    (inherited.epoch !== snapshot.policyEpoch ||
-      inherited.digest !== snapshot.sourceDigest)
+    inherited.policyEpoch !== admittedPolicy.policyEpoch ||
+    inherited.policyDigest !== admittedPolicy.policyDigest
+  ) {
+    throw new Error('Admitted Worker policy epoch/digest mismatch')
+  }
+  const snapshot = getCompiledWorkerPolicySnapshot()
+  if (
+    snapshot.policyEpoch !== admittedPolicy.policyEpoch ||
+    snapshot.sourceDigest !== admittedPolicy.policyDigest
   ) {
     throw new Error('Inherited Worker policy epoch/digest mismatch')
   }
   const persisted = readCurrentPolicyEpochState()
   if (
-    inherited &&
     persisted &&
-    (persisted.epoch !== inherited.epoch ||
-      persisted.digest !== inherited.digest)
+    (persisted.epoch !== admittedPolicy.policyEpoch ||
+      persisted.digest !== admittedPolicy.policyDigest)
   ) {
     throw new Error('Inherited Worker policy epoch is stale')
   }
@@ -87,9 +113,18 @@ export function initializeTeammateHooks(
     agentName: string
     taskId?: string
     effort?: WorkerEffortInput
+    policyEpoch: number
+    policyDigest: string
   },
 ): void {
   const { teamName, agentId, agentName } = teamInfo
+  const admittedPolicy = assertWorkerPolicyIdentity(
+    {
+      policyEpoch: teamInfo.policyEpoch,
+      policyDigest: teamInfo.policyDigest,
+    },
+    'Teammate Worker',
+  )
 
   // Read team file to get leader ID
   const teamFile = readTeamFile(teamName)
@@ -99,7 +134,7 @@ export function initializeTeammateHooks(
   }
 
   const leadAgentId = teamFile.leadAgentId
-  const workerPolicy = resolveWorkerPolicySnapshot()
+  const workerPolicy = resolveWorkerPolicySnapshot(admittedPolicy)
   const reportTaskId = teamInfo.taskId ?? agentId
   const workerRunId =
     process.env[WORKER_LIFECYCLE_RUN_ID_ENV] ?? createWorkerLifecycleRunId()
@@ -177,6 +212,7 @@ export function initializeTeammateHooks(
         runId: workerRunId,
         workerId: agentId,
         policyEpoch: workerPolicy.policyEpoch,
+        policyDigest: workerPolicy.sourceDigest,
         effortUsed: workerEffort,
         messages,
       })
@@ -184,7 +220,10 @@ export function initializeTeammateHooks(
       // Send idle notification to the team leader using agent name (not UUID)
       // Must await to ensure the write completes before process shutdown
       const notification = createIdleNotification(agentName, {
-        idleReason: isWorkerReportCompletionEligible(report)
+        idleReason: isWorkerReportCompletionEligibleForPolicy(report, {
+          policyEpoch: workerPolicy.policyEpoch,
+          policyDigest: workerPolicy.sourceDigest,
+        })
           ? 'available'
           : 'failed',
         report,

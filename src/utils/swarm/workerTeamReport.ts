@@ -5,12 +5,17 @@ import {
   buildWorkerReport,
   deriveWorkerReportId,
   isWorkerReportCompletionEligible,
+  isWorkerReportCompletionEligibleForPolicy,
   serializeWorkerReport,
   workerReportSchema,
 } from '../../tools/AgentTool/workerReport.js'
 import type { WorkerEffort } from './backends/types.js'
 
-export { deriveWorkerReportId, isWorkerReportCompletionEligible }
+export {
+  deriveWorkerReportId,
+  isWorkerReportCompletionEligible,
+  isWorkerReportCompletionEligibleForPolicy,
+}
 
 const WORKER_TEAM_REPORT_IDLE_REASONS = [
   'available',
@@ -35,6 +40,7 @@ export type BuildWorkerTeamReportInput = {
   runId?: string
   workerId?: string
   policyEpoch?: number
+  policyDigest?: string
   status: WorkerReport['status']
   effortUsed?: WorkerEffort
   tokensUsed: number
@@ -56,6 +62,7 @@ export function buildWorkerTeamReport(
     runId: input.runId,
     workerId: input.workerId,
     policyEpoch: input.policyEpoch,
+    policyDigest: input.policyDigest,
     status: input.status,
     declaredChangedFiles: input.changedFiles,
     finalText: input.finalText,
@@ -199,6 +206,7 @@ export function buildWorkerTeamReportFromMessages(
     runId: input.runId,
     workerId: input.workerId,
     policyEpoch: input.policyEpoch,
+    policyDigest: input.policyDigest,
     status: isApiError ? 'failed' : (input.status ?? 'completed'),
     effortUsed: input.effortUsed,
     tokensUsed:

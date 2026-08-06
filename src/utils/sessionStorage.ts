@@ -176,7 +176,6 @@ function isLegacyProgressEntry(entry: unknown): entry is LegacyProgressEntry {
     typeof entry.uuid === 'string'
   )
 }
-
 /**
  * High-frequency tool progress ticks (1/sec for Sleep, per-chunk for Bash).
  * These are UI-only: not sent to the API, not rendered after the tool
@@ -194,11 +193,9 @@ const EPHEMERAL_PROGRESS_TYPES = new Set([
 export function isEphemeralToolProgress(dataType: unknown): boolean {
   return typeof dataType === 'string' && EPHEMERAL_PROGRESS_TYPES.has(dataType)
 }
-
 export function getProjectsDir(): string {
   return join(getMindCodeConfigHomeDir(), 'projects')
 }
-
 export function getTranscriptPath(): string {
   const projectDir = getSessionProjectDir() ?? getProjectDir(getOriginalCwd())
   return join(projectDir, `${getSessionId()}.jsonl`)
@@ -271,6 +268,9 @@ export type AgentMetadata = {
   description?: string
   /** Explicit per-worker reasoning effort; absent means leader fallback. */
   effort?: EffortValue
+  /** Worker policy identity captured at admission for resume correlation. */
+  policyEpoch?: number
+  policyDigest?: string
 }
 
 /**

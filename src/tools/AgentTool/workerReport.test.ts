@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   appendWorkerReportEvidence,
-  buildWorkerReport,
+  buildWorkerReport as buildWorkerReportProduction,
   buildWorkerReportInstruction,
   deriveWorkerReportId,
   isWorkerReportCompletionEligible,
@@ -9,6 +9,21 @@ import {
   workerReportSchema,
   type WorkerReport,
 } from './workerReport.js'
+
+const STABLE_POLICY_IDENTITY = {
+  policyEpoch: 7,
+  policyDigest: 'a'.repeat(64),
+} as const
+
+function buildWorkerReport(
+  input: Parameters<typeof buildWorkerReportProduction>[0],
+): WorkerReport {
+  return buildWorkerReportProduction({
+    ...input,
+    policyEpoch: input.policyEpoch ?? STABLE_POLICY_IDENTITY.policyEpoch,
+    policyDigest: input.policyDigest ?? STABLE_POLICY_IDENTITY.policyDigest,
+  })
+}
 
 function candidate(overrides: Partial<WorkerReport> = {}): WorkerReport {
   const report = {
@@ -19,6 +34,7 @@ function candidate(overrides: Partial<WorkerReport> = {}): WorkerReport {
     model: 'gpt-5.6-luna',
     effort_used: 'medium',
     policy_epoch: 7,
+    policy_digest: 'a'.repeat(64),
     status: 'completed',
     summary: 'Implemented the requested change and verified it.',
     changed_files: ['src/worker.ts'],
@@ -94,7 +110,7 @@ describe('WorkerReport v1', () => {
     expect(report.report_id).toBe(
       deriveWorkerReportId('runtime-task', 'runtime-run', 'runtime-worker'),
     )
-    expect(isWorkerReportCompletionEligible(report)).toBe(true)
+    expect(isWorkerReportCompletionEligible(report, STABLE_POLICY_IDENTITY)).toBe(true)
   })
 
   test('rejects missing and tampered report identities on the wire', () => {
@@ -108,10 +124,13 @@ describe('WorkerReport v1', () => {
       }).success,
     ).toBe(false)
     expect(
-      isWorkerReportCompletionEligible({
-        ...valid,
-        report_id: '0'.repeat(64),
-      }),
+      isWorkerReportCompletionEligible(
+        {
+          ...valid,
+          report_id: '0'.repeat(64),
+        },
+        STABLE_POLICY_IDENTITY,
+      ),
     ).toBe(false)
   })
 
@@ -129,6 +148,7 @@ describe('WorkerReport v1', () => {
       runId: 'runtime-run',
       workerId: 'runtime-worker',
       policyEpoch: 11,
+      policyDigest: 'a'.repeat(64),
       status: 'completed',
       declaredChangedFiles: ['src/declared.ts'],
       finalText: JSON.stringify(
@@ -154,12 +174,30 @@ describe('WorkerReport v1', () => {
         worker_id: 'runtime-worker',
         effort_used: 'low',
         policy_epoch: 11,
+        policy_digest: report.policy_digest,
         tokens_used: 321,
         changed_files: ['src/declared.ts', 'src/reported.ts'],
       }),
     })
     expect(workerReportSchema.parse(report)).toEqual(report)
-    expect(isWorkerReportCompletionEligible(report)).toBe(true)
+    expect(
+      isWorkerReportCompletionEligible(report, {
+        policyEpoch: 11,
+        policyDigest: 'a'.repeat(64),
+      }),
+    ).toBe(true)
+  })
+
+  test('keeps the explicitly supplied policy identity on the runtime-owned report', () => {
+    const report = buildWorkerReportProduction({
+      taskId: 'explicit-policy',
+      status: 'failed',
+      tokensUsed: 0,
+      policyEpoch: STABLE_POLICY_IDENTITY.policyEpoch,
+      policyDigest: STABLE_POLICY_IDENTITY.policyDigest,
+    })
+    expect(report.policy_epoch).toBe(STABLE_POLICY_IDENTITY.policyEpoch)
+    expect(report.policy_digest).toBe(STABLE_POLICY_IDENTITY.policyDigest)
   })
 
   test('keeps every exact Luna effort and defaults missing effort to medium', () => {
@@ -203,7 +241,7 @@ describe('WorkerReport v1', () => {
     expect(report.validation.verdict).toBe('fail')
     expect(report.evidence).toEqual([])
     expect(report.blockers).toContain('worker_report_invalid')
-    expect(isWorkerReportCompletionEligible(report)).toBe(false)
+    expect(isWorkerReportCompletionEligible(report, STABLE_POLICY_IDENTITY)).toBe(false)
     expect(serializeWorkerReport(report)).not.toContain(transcript)
   })
 
@@ -225,7 +263,7 @@ describe('WorkerReport v1', () => {
       effortUsed: 'medium',
     })
     expect(stringEvidence.status).toBe('completed')
-    expect(isWorkerReportCompletionEligible(stringEvidence)).toBe(true)
+    expect(isWorkerReportCompletionEligible(stringEvidence, STABLE_POLICY_IDENTITY)).toBe(true)
 
     const invalidEvidence = buildWorkerReport({
       taskId: 'invalid-evidence',
@@ -331,7 +369,7 @@ describe('WorkerReport v1', () => {
     })
     expect(notRun.status).toBe('partial')
     expect(blocked.status).toBe('blocked')
-    expect(isWorkerReportCompletionEligible(notRun)).toBe(false)
-    expect(isWorkerReportCompletionEligible(blocked)).toBe(false)
+    expect(isWorkerReportCompletionEligible(notRun, STABLE_POLICY_IDENTITY)).toBe(false)
+    expect(isWorkerReportCompletionEligible(blocked, STABLE_POLICY_IDENTITY)).toBe(false)
   })
 })

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod/v4'
+import type { WorkerPolicyIdentity } from '../../services/policy/policyEpoch.js'
 import type { WorkerEffort } from '../../utils/swarm/backends/types.js'
 import { getConfiguredSubagentModel } from '../../utils/model/subagentModel.js'
 
@@ -109,6 +110,9 @@ const workerReportShapeSchema = z
       ),
     effort_used: z.enum(WORKER_REPORT_EFFORTS),
     policy_epoch: z.number().int().nonnegative().finite(),
+    policy_digest: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/, 'policy_digest must be a lowercase SHA-256 digest'),
     status: z.enum(WORKER_REPORT_STATUSES),
     summary: z.string().trim().min(1).max(MAX_SUMMARY_CHARS),
     changed_files: z.array(relativePath).max(MAX_CHANGED_FILES),
@@ -148,10 +152,12 @@ export type WorkerReportValidationVerdict = WorkerReport['validation']['verdict'
  * values captured by the runtime before the report reaches the Leader.
  */
 export const workerReportCandidateSchema = workerReportShapeSchema
-  .omit({ report_id: true })
+  .omit({ report_id: true, policy_epoch: true, policy_digest: true })
   .extend({
     // The model may emit this field, but it is never trusted.
     report_id: z.unknown().optional(),
+    policy_epoch: z.unknown().optional(),
+    policy_digest: z.unknown().optional(),
   })
   .strict()
 
@@ -164,6 +170,7 @@ export type BuildWorkerReportInput = {
   workerId?: string
   model?: string
   policyEpoch?: number
+  policyDigest?: string
   declaredChangedFiles?: readonly string[]
   finalText?: string
   tokensUsed: number
@@ -267,6 +274,7 @@ const WORKER_REPORT_KEYS = [
   'model',
   'effort_used',
   'policy_epoch',
+  'policy_digest',
   'status',
   'summary',
   'changed_files',
@@ -373,13 +381,7 @@ export function buildWorkerReport(input: BuildWorkerReportInput): WorkerReport {
   const runtimeStatus = input.status
   const candidate = parseCandidate(input.finalText)
   const candidateIsValid = candidate !== null
-  const suppliedPolicyEpoch = input.policyEpoch
-  const policyEpoch =
-    suppliedPolicyEpoch !== undefined &&
-    Number.isSafeInteger(suppliedPolicyEpoch) &&
-    suppliedPolicyEpoch >= 0
-      ? suppliedPolicyEpoch
-      : 0
+  const policyIdentity = resolveReportPolicyIdentity(input)
   const declaredChangedFiles = normalizePathList(
     input.declaredChangedFiles,
     MAX_CHANGED_FILES,
@@ -413,7 +415,8 @@ export function buildWorkerReport(input: BuildWorkerReportInput): WorkerReport {
     report_id: deriveWorkerReportId(taskId, runId, workerId),
     model: getConfiguredSubagentModel(),
     effort_used: normalizeEffort(input.effortUsed),
-    policy_epoch: policyEpoch,
+    policy_epoch: policyIdentity.policyEpoch,
+    policy_digest: policyIdentity.policyDigest,
     status,
     summary: candidate?.summary ?? invalidReportSummary(status),
     changed_files: changedFiles,
@@ -426,10 +429,22 @@ export function buildWorkerReport(input: BuildWorkerReportInput): WorkerReport {
   return workerReportSchema.parse(report)
 }
 
-export function isWorkerReportCompletionEligible(report: WorkerReport): boolean {
+export function isWorkerReportCompletionEligible(
+  report: WorkerReport,
+  expected: WorkerPolicyIdentity,
+): boolean {
+  return isWorkerReportCompletionEligibleForPolicy(report, expected)
+}
+
+export function isWorkerReportCompletionEligibleForPolicy(
+  report: WorkerReport,
+  expected: WorkerPolicyIdentity,
+): boolean {
   const parsed = workerReportSchema.safeParse(report)
   return (
     parsed.success &&
+    parsed.data.policy_epoch === expected.policyEpoch &&
+    parsed.data.policy_digest === expected.policyDigest &&
     parsed.data.status === 'completed' &&
     parsed.data.validation.verdict === 'pass' &&
     parsed.data.blockers.length === 0
@@ -449,8 +464,14 @@ export function persistValidatedWorkerReport<
     complete: (result: T) => void
     reject: (result: T) => void
   },
+  expectedPolicy: WorkerPolicyIdentity,
 ): boolean {
-  if (!isWorkerReportCompletionEligible(result.workerReport)) {
+  if (
+    !isWorkerReportCompletionEligibleForPolicy(
+      result.workerReport,
+      expectedPolicy,
+    )
+  ) {
     callbacks.reject(result)
     return false
   }
@@ -499,6 +520,7 @@ export type WorkerReportInstructionContext = {
   runId?: string
   workerId?: string
   policyEpoch?: number
+  policyDigest?: string
 }
 
 export function buildWorkerReportInstruction(
@@ -515,6 +537,7 @@ export function buildWorkerReportInstruction(
     model: getConfiguredSubagentModel(),
     effort_used: effort,
     policy_epoch: context.policyEpoch ?? 0,
+    policy_digest: context.policyDigest ?? '0'.repeat(64),
     status: 'completed',
     summary: 'concise bounded result',
     changed_files: [],
@@ -533,6 +556,30 @@ export function buildWorkerReportInstruction(
   return `<worker-report-contract>
 Return exactly one JSON object as your final answer and no prose outside it:
 ${JSON.stringify(sample)}
-Use exactly the top-level keys shown in the sample; put task-specific details only in summary and never add custom top-level fields. report_id is runtime-owned: include the key if requested, but never calculate, replace, or rely on it. Use effort_used exactly as provided. List only workspace-relative files actually changed. Each evidence object may contain only id, type, path, command, exit_code, and digest; type must be file, diff, command, test, or artifact. Do not invent additional evidence keys; use an empty evidence array when none of those fields applies. Set validation.verdict to pass only after the declared checks pass. Use partial, blocked, or failed when completion is not justified. Never include prompts, tool calls, or the worker transcript.
+Use exactly the top-level keys shown in the sample; put task-specific details only in summary and never add custom top-level fields. report_id, policy_epoch, and policy_digest are runtime-owned: include the keys if requested, but never calculate, replace, or rely on them. Use effort_used exactly as provided. List only workspace-relative files actually changed. Each evidence object may contain only id, type, path, command, exit_code, and digest; type must be file, diff, command, test, or artifact. Do not invent additional evidence keys; use an empty evidence array when none of those fields applies. Set validation.verdict to pass only after the declared checks pass. Use partial, blocked, or failed when completion is not justified. Never include prompts, tool calls, or the worker transcript.
 </worker-report-contract>`
+}
+
+function resolveReportPolicyIdentity(
+  input: BuildWorkerReportInput,
+): WorkerPolicyIdentity {
+  const { policyEpoch, policyDigest } = input
+  if ((policyEpoch === undefined) !== (policyDigest === undefined)) {
+    throw new Error(
+      'Worker report policy identity requires policyEpoch with policyDigest',
+    )
+  }
+  if (policyEpoch === undefined || policyDigest === undefined) {
+    throw new Error(
+      'Worker report policy epoch and source digest are required at the production boundary',
+    )
+  }
+  if (
+    !Number.isSafeInteger(policyEpoch) ||
+    policyEpoch < 0 ||
+    !/^[a-f0-9]{64}$/.test(policyDigest)
+  ) {
+    throw new Error('Worker report policy identity is malformed')
+  }
+  return Object.freeze({ policyEpoch, policyDigest })
 }

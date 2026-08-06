@@ -15,11 +15,26 @@ mock.module(
 const { isWorkerReportFreshAndCorrelated, resolveWorkerReportTerminalStatus } =
   await import('../../../utils/teammateMailbox.js')
 const {
-  buildWorkerTeamReport,
+  buildWorkerTeamReport: buildWorkerTeamReportProduction,
   deriveWorkerReportId,
   isWorkerReportCompletionEligible,
 } = await import('../workerTeamReport.js')
 const { WORKER_EFFORT_LEVELS } = await import('./types.js')
+
+const expectedPolicy = {
+  policyEpoch: 0,
+  policyDigest: 'a'.repeat(64),
+} as const
+
+function buildWorkerTeamReport(
+  input: Parameters<typeof buildWorkerTeamReportProduction>[0],
+) {
+  return buildWorkerTeamReportProduction({
+    ...input,
+    policyEpoch: input.policyEpoch ?? expectedPolicy.policyEpoch,
+    policyDigest: input.policyDigest ?? expectedPolicy.policyDigest,
+  })
+}
 
 function reportCandidate(overrides: Partial<WorkerReport> = {}): WorkerReport {
   const report = {
@@ -30,6 +45,7 @@ function reportCandidate(overrides: Partial<WorkerReport> = {}): WorkerReport {
     model: 'gpt-5.6-luna',
     effort_used: 'medium',
     policy_epoch: 0,
+    policy_digest: expectedPolicy.policyDigest,
     status: 'completed',
     summary: 'The worker completed the requested operation.',
     changed_files: [],
@@ -79,14 +95,14 @@ describe('worker runtime completion gate', () => {
   ] as const
 
   test('valid reports are eligible and invalid reports fail closed', () => {
-    expect(isWorkerReportCompletionEligible(validReport)).toBe(true)
-    expect(isWorkerReportCompletionEligible(invalidReport)).toBe(false)
-    expect(isWorkerReportCompletionEligible(failedReport)).toBe(false)
+    expect(isWorkerReportCompletionEligible(validReport, expectedPolicy)).toBe(true)
+    expect(isWorkerReportCompletionEligible(invalidReport, expectedPolicy)).toBe(false)
+    expect(isWorkerReportCompletionEligible(failedReport, expectedPolicy)).toBe(false)
   })
 
   for (const [name, report, expected] of terminalCases) {
     test(`${name} in-process report maps to ${expected}`, () => {
-      expect(resolveWorkerReportTerminalStatus(report)).toBe(expected)
+      expect(resolveWorkerReportTerminalStatus(report, expectedPolicy)).toBe(expected)
     })
   }
 
@@ -110,14 +126,15 @@ describe('worker runtime completion gate', () => {
         ),
       })
       expect(report.effort_used).toBe(effort)
-      expect(resolveWorkerReportTerminalStatus(report)).toBe('completed')
+      expect(resolveWorkerReportTerminalStatus(report, expectedPolicy)).toBe('completed')
     }
   })
 
   test('crash or missing report cannot complete a pane task', () => {
-    expect(resolveWorkerReportTerminalStatus(null)).toBe('failed')
-    expect(resolveWorkerReportTerminalStatus(undefined)).toBe('failed')
-    expect(resolveWorkerReportTerminalStatus(failedReport)).toBe('failed')
+    expect(resolveWorkerReportTerminalStatus(validReport)).toBe('failed')
+    expect(resolveWorkerReportTerminalStatus(null, expectedPolicy)).toBe('failed')
+    expect(resolveWorkerReportTerminalStatus(undefined, expectedPolicy)).toBe('failed')
+    expect(resolveWorkerReportTerminalStatus(failedReport, expectedPolicy)).toBe('failed')
   })
 
   test('stale and mismatched reports fail lifecycle correlation closed', () => {
@@ -127,6 +144,8 @@ describe('worker runtime completion gate', () => {
       taskId: 'runtime-task',
       runId: 'runtime-run',
       startedAtMs,
+      policyEpoch: expectedPolicy.policyEpoch,
+      policyDigest: expectedPolicy.policyDigest,
     }
     const envelope = (report: WorkerReport, timestamp: string) => ({
       report,
@@ -143,6 +162,8 @@ describe('worker runtime completion gate', () => {
       { ...validReport, worker_id: 'other-worker' },
       { ...validReport, task_id: 'other-task' },
       { ...validReport, run_id: 'old-run' },
+      { ...validReport, policy_epoch: expectedPolicy.policyEpoch + 1 },
+      { ...validReport, policy_digest: 'b'.repeat(64) },
     ]) {
       expect(
         isWorkerReportFreshAndCorrelated(
@@ -151,6 +172,15 @@ describe('worker runtime completion gate', () => {
         ),
       ).toBe(false)
     }
+    expect(
+      isWorkerReportFreshAndCorrelated(
+        envelope(
+          { ...validReport, policy_digest: undefined } as unknown as WorkerReport,
+          '2026-08-06T12:00:01.000Z',
+        ),
+        expected,
+      ),
+    ).toBe(false)
     expect(
       isWorkerReportFreshAndCorrelated(
         envelope(validReport, '2026-08-06T11:59:59.999Z'),

@@ -1,4 +1,5 @@
 import type { ToolUseContext } from '../../../Tool.js'
+import { assertWorkerPolicyIdentity } from '../../../services/policy/index.js'
 import {
   findTeammateTaskByAgentId,
   requestTeammateShutdown,
@@ -88,6 +89,13 @@ export class InProcessBackend implements TeammateExecutor {
     const { model: workerModel, effort: workerEffort } = resolveWorkerRuntime(
       config.effort,
     )
+    const workerPolicy = assertWorkerPolicyIdentity(
+      {
+        policyEpoch: config.policyEpoch,
+        policyDigest: config.policyDigest,
+      },
+      'In-process Worker',
+    )
     const result = await spawnInProcessTeammate(
       {
         name: config.name,
@@ -95,8 +103,10 @@ export class InProcessBackend implements TeammateExecutor {
         prompt: config.prompt,
         color: config.color,
         planModeRequired: config.planModeRequired ?? false,
-        model: workerModel,
+        // Worker model is resolved inside spawnInProcessTeammate.
         effort: workerEffort,
+        policyEpoch: workerPolicy.policyEpoch,
+        policyDigest: workerPolicy.policyDigest,
       },
       this.context,
     )
@@ -130,6 +140,8 @@ export class InProcessBackend implements TeammateExecutor {
         concurrencyLeaseId: result.concurrencyLeaseId,
         model: workerModel,
         effort: workerEffort,
+        policyEpoch: workerPolicy.policyEpoch,
+        policyDigest: workerPolicy.policyDigest,
         systemPrompt: config.systemPrompt,
         systemPromptMode: config.systemPromptMode,
         allowedTools: config.permissions,

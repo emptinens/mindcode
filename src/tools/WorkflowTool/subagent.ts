@@ -8,6 +8,7 @@ import type { ToolUseContext } from '../../Tool.js'
 import { createAgentId } from '../../utils/uuid.js'
 import { createUserMessage, extractTextContent } from '../../utils/messages.js'
 import { getQuerySourceForAgent } from '../../utils/promptCategory.js'
+import { getWorkerPolicyIdentity } from '../../services/policy/index.js'
 import type {
   AgentDefinition,
   BuiltInAgentDefinition,
@@ -15,7 +16,7 @@ import type {
 import { finalizeAgentTool } from '../AgentTool/agentToolUtils.js'
 import { runAgent } from '../AgentTool/runAgent.js'
 import { WORKFLOW_SUBAGENT_TYPE } from './constants.js'
-
+import { resolveWorkerRuntime } from '../../utils/swarm/backends/types.js'
 const SUBAGENT_PREAMBLE =
   'You are a subagent spawned by a workflow orchestration script. Use the tools available to complete the task.'
 
@@ -53,7 +54,7 @@ export type SubagentRunOptions = {
   prompt: string
   schema?: unknown
   agentType?: string
-  model?: string
+  // Worker model is fixed by resolveWorkerRuntime at admission.
   effort?: string
   toolUseContext: ToolUseContext
   canUseTool: CanUseToolFn
@@ -69,7 +70,6 @@ export type SubagentRunResult = {
   skipped: boolean
   error?: string
 }
-
 function parseStructured(text: string): unknown {
   let t = text.trim()
   // strip ```json ... ``` fences
@@ -125,10 +125,10 @@ function resolveAgentDefinition(
   }
   return def
 }
-
 export async function runWorkflowSubagent(
   opts: SubagentRunOptions,
 ): Promise<SubagentRunResult> {
+  const workerRuntime = resolveWorkerRuntime(opts.effort)
   const agentDefinition = resolveAgentDefinition(opts)
   const agentId = createAgentId()
 
@@ -146,10 +146,10 @@ export async function runWorkflowSubagent(
     workerPermissionContext,
     appState.mcp.tools,
   )
-
   const promptMessages: Message[] = [createUserMessage({ content: opts.prompt })]
   const startTime = Date.now()
   const messages: Message[] = []
+  const workerPolicy = getWorkerPolicyIdentity()
   try {
     for await (const msg of runAgent({
       agentDefinition,
@@ -159,7 +159,9 @@ export async function runWorkflowSubagent(
       isAsync: true,
       canShowPermissionPrompts: false,
       querySource: getQuerySourceForAgent(agentDefinition.agentType, true),
-      model: opts.model as never,
+      effort: workerRuntime.effort,
+      policyEpoch: workerPolicy.policyEpoch,
+      policyDigest: workerPolicy.policyDigest,
       availableTools,
       override: { agentId, abortController: opts.abortController },
       transcriptSubdir: opts.transcriptSubdir,
@@ -172,20 +174,20 @@ export async function runWorkflowSubagent(
     }
     return { text: '', tokens: 0, skipped: false, error: (e as Error).message }
   }
-
   if (opts.abortController.signal.aborted) {
     return { text: '', tokens: 0, skipped: true }
   }
-
   let result
   try {
     result = finalizeAgentTool(messages, agentId, {
       prompt: opts.prompt,
-      resolvedAgentModel: opts.model ?? opts.toolUseContext.options.mainLoopModel,
+      resolvedAgentModel: workerRuntime.model,
       isBuiltInAgent: true,
       startTime,
       agentType: agentDefinition.agentType,
       isAsync: true,
+      policyEpoch: workerPolicy.policyEpoch,
+      policyDigest: workerPolicy.policyDigest,
     })
   } catch (e) {
     return { text: '', tokens: 0, skipped: false, error: (e as Error).message }

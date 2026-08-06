@@ -8,6 +8,10 @@ import type {
   TaskIsolation,
   TaskRecord,
 } from '../../tasks/graph/index.js'
+import {
+  assertWorkerPolicyIdentity,
+  type WorkerPolicyIdentity,
+} from '../../services/policy/policyEpoch.js'
 import { AbortError } from '../../utils/errors.js'
 import type { WorkerEffort } from '../../utils/swarm/backends/types.js'
 import {
@@ -55,7 +59,7 @@ export class WorkerLifecycleTimeoutError extends Error {
 export type WorkerCompletionEvidence = {
   reportId: string
   policyEpoch: number
-  policyDigest?: string
+  policyDigest: string
 }
 
 export type WorkerExecutionInput = {
@@ -98,6 +102,11 @@ export type WorkerExecutionDependencies = {
     heartbeat: () => void | Promise<void>,
     intervalMs: number,
   ) => () => void
+  /**
+   * Deliberate compatibility seam for direct graph unit tests only. The
+   * production daemon-backed execution path never enables this flag.
+   */
+  testOnlyAllowMissingPolicyIdentity?: boolean
 }
 
 export type WorkerExecutionLease = {
@@ -164,21 +173,13 @@ const WORKER_REPORT_ID_PATTERN = /^[a-f0-9]{64}$/
 function validatePolicyIdentity(
   policyEpoch: number | undefined,
   policyDigest: string | undefined,
-): void {
-  if (policyEpoch === undefined && policyDigest === undefined) return
-  if (
-    policyEpoch === undefined ||
-    !Number.isSafeInteger(policyEpoch) ||
-    policyEpoch < 0
-  ) {
-    throw new Error('worker policy epoch must be a nonnegative safe integer')
+  allowMissing = false,
+): WorkerPolicyIdentity | undefined {
+  if (policyEpoch === undefined && policyDigest === undefined) {
+    if (allowMissing) return undefined
+    throw new Error('Worker policy epoch and source digest are required')
   }
-  if (
-    policyDigest === undefined ||
-    !WORKER_REPORT_ID_PATTERN.test(policyDigest)
-  ) {
-    throw new Error('worker policy digest must be a lowercase SHA-256 digest')
-  }
+  return assertWorkerPolicyIdentity({ policyEpoch, policyDigest })
 }
 
 function validateTerminalEvidence(
@@ -199,10 +200,7 @@ function validateTerminalEvidence(
         'worker report policy epoch must be a nonnegative safe integer',
       )
     }
-    if (
-      evidence.policyDigest !== undefined &&
-      !WORKER_REPORT_ID_PATTERN.test(evidence.policyDigest)
-    ) {
+    if (!WORKER_REPORT_ID_PATTERN.test(evidence.policyDigest)) {
       throw new Error(
         'worker report policy digest must be a lowercase SHA-256 digest',
       )
@@ -224,7 +222,7 @@ function validateTerminalEvidence(
     )
   }
   if (
-    expectedPolicyDigest !== undefined &&
+    expectedPolicyDigest === undefined ||
     evidence.policyDigest !== expectedPolicyDigest
   ) {
     throw new Error('stale or mismatched worker report policy digest')
@@ -568,7 +566,21 @@ export async function acquireWorkerExecution(
   )
   const runtimeScope = input.runtimeScope?.trim() || undefined
   const targetScope = input.targetScope?.trim() || undefined
-  validatePolicyIdentity(input.policyEpoch, input.policyDigest)
+  const allowMissingPolicyIdentity =
+    dependencies.testOnlyAllowMissingPolicyIdentity === true
+  if (
+    dependencies.testOnlyAllowMissingPolicyIdentity === true &&
+    dependencies.graph === undefined
+  ) {
+    throw new Error(
+      'testOnlyAllowMissingPolicyIdentity requires an injected test graph',
+    )
+  }
+  const policyIdentity = validatePolicyIdentity(
+    input.policyEpoch,
+    input.policyDigest,
+    allowMissingPolicyIdentity,
+  )
   const storedTaskId = namespaceTaskId(taskId, runtimeScope)
   const dependencyPollMs = positiveInteger(
     dependencies.dependencyPollMs,
@@ -724,17 +736,26 @@ export async function acquireWorkerExecution(
       write_set: namespaceTargets(input.writeSet, targetScope),
       blocked_by: resolvedBlockedBy,
       isolation: input.isolation ?? 'shared',
-      policy_epoch: input.policyEpoch,
+      policy_epoch: policyIdentity?.policyEpoch,
+      policy_digest: policyIdentity?.policyDigest,
     }, undefined, input.signal)
     if (!routed.task || !routed.decision.allowed) {
       throw new Error(`Task ${taskId} was rejected by overlap validation`)
     }
     if (
-      input.policyEpoch !== undefined &&
-      routed.task.policy_epoch !== input.policyEpoch
+      policyIdentity !== undefined &&
+      routed.task.policy_epoch !== policyIdentity.policyEpoch
     ) {
       throw new Error(
-        `Task ${taskId} has stale worker policy epoch ${routed.task.policy_epoch}; expected ${input.policyEpoch}`,
+        `Task ${taskId} has stale worker policy epoch ${routed.task.policy_epoch}; expected ${policyIdentity.policyEpoch}`,
+      )
+    }
+    if (
+      policyIdentity !== undefined &&
+      routed.task.policy_digest !== policyIdentity.policyDigest
+    ) {
+      throw new Error(
+        `Task ${taskId} has stale worker policy digest ${routed.task.policy_digest ?? 'missing'}; expected ${policyIdentity.policyDigest}`,
       )
     }
     routedCreated = routed.created
@@ -804,8 +825,8 @@ export async function acquireWorkerExecution(
       if (terminal) return Promise.resolve()
       const terminalEvidence = validateTerminalEvidence(
         evidence,
-        input.policyEpoch,
-        input.policyDigest,
+        policyIdentity?.policyEpoch,
+        policyIdentity?.policyDigest,
       )
       terminal = true
       stopHeartbeat()
@@ -827,6 +848,7 @@ export async function acquireWorkerExecution(
                   ...(terminalEvidence
                     ? {
                         policy_epoch: terminalEvidence.policyEpoch,
+                        policy_digest: terminalEvidence.policyDigest,
                         report_id: terminalEvidence.reportId,
                       }
                     : {}),
@@ -891,8 +913,8 @@ export async function acquireWorkerExecution(
       taskId,
       owner,
       effort: input.effort,
-      policyEpoch: input.policyEpoch,
-      policyDigest: input.policyDigest,
+      policyEpoch: policyIdentity?.policyEpoch,
+      policyDigest: policyIdentity?.policyDigest,
       routeDecision: publicOverlapDecision(
         routed.decision,
         runtimeScope,

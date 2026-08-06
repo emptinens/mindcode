@@ -61,10 +61,10 @@ test('agent configuration exposes only the configured validated Worker model', (
   ])
 })
 
-test('Agent input schema hides the legacy model selector', () => {
+test('Agent input schema removes the legacy model selector', () => {
   const source = readFileSync(new URL('./AgentTool.tsx', import.meta.url), 'utf8')
-  expect(source).toContain(')).omit({ model: true })')
-  expect(source).toContain("model: z.enum(['sonnet', 'opus', 'haiku']).optional()")
+  expect(source).not.toContain(')).omit({ model: true })')
+  expect(source).not.toContain("model: z.enum(['sonnet', 'opus', 'haiku']).optional()")
 })
 
 test('renderToolUseTag ignores the legacy model input', () => {

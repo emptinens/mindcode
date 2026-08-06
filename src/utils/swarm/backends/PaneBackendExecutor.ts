@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import { getSessionId } from '../../../bootstrap/state.js'
+import {
+  assertWorkerPolicyIdentity,
+  type WorkerPolicyIdentity,
+} from '../../../services/policy/index.js'
 import type { WorkerReport } from '../../../tools/AgentTool/workerReport.js'
 import type { ToolUseContext } from '../../../Tool.js'
 import type { TaskState } from '../../../tasks/types.js'
@@ -80,6 +84,8 @@ export type ExistingPaneTrackingConfig = {
   effort?: WorkerEffortInput
   taskId?: string
   workerRunId?: string
+  policyEpoch?: number
+  policyDigest?: string
   lifecycleStartedAtMs?: number
 }
 
@@ -91,9 +97,22 @@ export type ExistingPaneTrackingConfig = {
 export function resolvePaneTeammateTerminalStatus(
   report: WorkerReport | null | undefined,
   requestedStatus: 'completed' | 'killed' = 'completed',
+  expectedPolicy?: WorkerPolicyIdentity,
 ): PaneTeammateTerminalStatus {
   if (requestedStatus === 'killed') return 'killed'
-  return resolveWorkerReportTerminalStatus(report)
+  return resolveWorkerReportTerminalStatus(report, expectedPolicy)
+}
+
+function resolvePanePolicyIdentity(
+  policyEpoch: number | undefined,
+  policyDigest: string | undefined,
+): WorkerPolicyIdentity {
+  if (policyEpoch === undefined && policyDigest === undefined) {
+    throw new Error(
+      'Pane Worker policy epoch and source digest are required at the production boundary',
+    )
+  }
+  return assertWorkerPolicyIdentity({ policyEpoch, policyDigest }, 'Pane Worker')
 }
 
 export class PaneBackendExecutor implements TeammateExecutor {
@@ -117,6 +136,8 @@ export class PaneBackendExecutor implements TeammateExecutor {
       workerEffort: WorkerEffort
       taskId: string
       workerRunId?: string
+      policyEpoch: number
+      policyDigest: string
       lifecycleStartedAtMs: number
     }
   >
@@ -171,6 +192,10 @@ export class PaneBackendExecutor implements TeammateExecutor {
 
     const { model: workerModel, effort: workerEffort } = resolveWorkerRuntime(
       config.effort,
+    )
+    const workerPolicy = resolvePanePolicyIdentity(
+      config.policyEpoch,
+      config.policyDigest,
     )
     const workerLease = await acquireSwarmWorkerSlot(config.teamName, {
       effort: workerEffort,
@@ -242,7 +267,7 @@ export class PaneBackendExecutor implements TeammateExecutor {
 
       // Build environment variables to forward to teammate
       const envStr = [
-        buildInheritedEnvVars(),
+        buildInheritedEnvVars(undefined, workerPolicy),
         `${WORKER_LIFECYCLE_RUN_ID_ENV}=${quote([workerRunId])}`,
       ]
         .filter(Boolean)
@@ -263,6 +288,8 @@ export class PaneBackendExecutor implements TeammateExecutor {
         effort: workerEffort,
         taskId: agentId,
         workerRunId,
+        policyEpoch: workerPolicy.policyEpoch,
+        policyDigest: workerPolicy.policyDigest,
         lifecycleStartedAtMs,
       })
 
@@ -320,6 +347,10 @@ export class PaneBackendExecutor implements TeammateExecutor {
    */
   trackExistingPane(config: ExistingPaneTrackingConfig): void {
     const { effort: workerEffort } = resolveWorkerRuntime(config.effort)
+    const workerPolicy = resolvePanePolicyIdentity(
+      config.policyEpoch,
+      config.policyDigest,
+    )
     this.spawnedTeammates.set(config.agentId, {
       paneId: config.paneId,
       insideTmux: config.insideTmux,
@@ -329,6 +360,8 @@ export class PaneBackendExecutor implements TeammateExecutor {
       workerEffort,
       taskId: config.taskId ?? config.agentId,
       workerRunId: config.workerRunId,
+      policyEpoch: workerPolicy.policyEpoch,
+      policyDigest: workerPolicy.policyDigest,
       lifecycleStartedAtMs: config.lifecycleStartedAtMs ?? Date.now(),
     })
     this.startLifecycleWatcher(config.agentId)
@@ -646,6 +679,8 @@ export class PaneBackendExecutor implements TeammateExecutor {
           taskId: teammateInfo.taskId,
           runId: teammateInfo.workerRunId,
           startedAtMs: teammateInfo.lifecycleStartedAtMs,
+          policyEpoch: teammateInfo.policyEpoch,
+          policyDigest: teammateInfo.policyDigest,
         })
           ? reportEnvelope.report
           : null
@@ -654,6 +689,8 @@ export class PaneBackendExecutor implements TeammateExecutor {
           taskId: teammateInfo.taskId,
           runId: teammateInfo.workerRunId ?? createWorkerLifecycleRunId(),
           workerId: agentId,
+          policyEpoch: teammateInfo.policyEpoch,
+          policyDigest: teammateInfo.policyDigest,
           status: 'failed',
           effortUsed: teammateInfo.workerEffort,
           tokensUsed: 0,
@@ -676,6 +713,10 @@ export class PaneBackendExecutor implements TeammateExecutor {
       terminalStatus = resolvePaneTeammateTerminalStatus(
         report,
         requestedStatus ?? 'completed',
+        {
+          policyEpoch: teammateInfo.policyEpoch,
+          policyDigest: teammateInfo.policyDigest,
+        },
       )
     } catch (error) {
       logForDebugging(

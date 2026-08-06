@@ -7,6 +7,7 @@
  */
 
 import type { Tool, ToolUseContext } from '../../Tool.js'
+import { getWorkerPolicyIdentity } from '../policy/index.js'
 import type { BuiltInAgentDefinition } from '../../tools/AgentTool/loadAgentsDir.js'
 import { runAgent } from '../../tools/AgentTool/runAgent.js'
 import { FILE_EDIT_TOOL_NAME } from '../../tools/FileEditTool/constants.js'
@@ -58,7 +59,6 @@ export function detectMagicDocHeader(
   }
 
   const title = match[1].trim()
-
   // Look for italics on the next line after the header (allow one optional blank line)
   const headerEndIndex = match.index! + match[0].length
   const afterHeader = content.slice(headerEndIndex)
@@ -151,7 +151,6 @@ async function updateMagicDoc(
     }
     throw e
   }
-
   // Re-detect title and instructions from latest file content
   const detected = detectMagicDocHeader(currentDoc)
   if (!detected) {
@@ -159,7 +158,6 @@ async function updateMagicDoc(
     trackedMagicDocs.delete(docInfo.path)
     return
   }
-
   // Build update prompt with latest title and instructions
   const userPrompt = await buildMagicDocsUpdatePrompt(
     currentDoc,
@@ -167,7 +165,6 @@ async function updateMagicDoc(
     detected.title,
     detected.instructions,
   )
-
   // Create a custom canUseTool that only allows Edit for magic doc files
   const canUseTool = async (tool: Tool, input: unknown) => {
     if (
@@ -192,6 +189,7 @@ async function updateMagicDoc(
   }
 
   // Run Magic Docs update using runAgent with forked context
+  const workerPolicy = getWorkerPolicyIdentity()
   for await (const _message of runAgent({
     agentDefinition: getMagicDocsAgent(),
     promptMessages: [createUserMessage({ content: userPrompt })],
@@ -200,6 +198,8 @@ async function updateMagicDoc(
     isAsync: true,
     forkContextMessages: messages,
     querySource: 'magic_docs',
+    policyEpoch: workerPolicy.policyEpoch,
+    policyDigest: workerPolicy.policyDigest,
     override: {
       systemPrompt,
       userContext,
