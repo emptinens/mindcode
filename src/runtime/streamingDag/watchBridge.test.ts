@@ -216,7 +216,11 @@ describe("StreamingDagWatchBridge", () => {
     ]);
     expect(dag.getState().leaderConnected).toBe(false);
     expect(() =>
-      dag.createTask({ id: "new", dependencies: [], payload: {} }),
+      dag.createTask({
+        id: "new",
+        dependencies: [],
+        payload: { ...task, id: "new" },
+      }),
     ).toThrow("leader is disconnected");
     expect(calls).toHaveLength(3);
   });

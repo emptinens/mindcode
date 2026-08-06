@@ -142,10 +142,11 @@ export class StreamingDagWatchBridge<TTask = unknown, TResult = unknown> {
         for await (const event of stream) {
           if (this.controller.signal.aborted) return;
 
-          const normalized = normalizeDaemonWatchChunk<TaskRecord, TTask>(
-            event,
-            adapterOptions(this.options),
-          );
+          const normalized = normalizeDaemonWatchChunk<
+            unknown,
+            TTask,
+            TaskRecord
+          >(event, adapterOptions(this.options));
           const snapshot = normalized.snapshot as StreamingDagSnapshot<
             TTask,
             TResult
@@ -244,7 +245,7 @@ function watchParams<TTask, TResult>(
 
 function adapterOptions<TTask, TResult>(
   options: StreamingDagWatchBridgeOptions<TTask, TResult>,
-): DaemonSnapshotAdapterOptions<TaskRecord, TTask> {
+): DaemonSnapshotAdapterOptions<unknown, TTask, TaskRecord> {
   return {
     limits: options.limits,
     payload: options.payload,
@@ -299,9 +300,9 @@ function maxVersion(current: number | undefined, candidate: number): number {
   return current === undefined ? candidate : Math.max(current, candidate);
 }
 
-function retryDelay(
+function retryDelay<TTask, TResult>(
   attempt: number,
-  options: StreamingDagWatchBridgeOptions,
+  options: StreamingDagWatchBridgeOptions<TTask, TResult>,
 ): number {
   const base = options.retryBaseMs ?? DEFAULT_RETRY_BASE_MS;
   const maximum = options.retryMaxMs ?? DEFAULT_RETRY_MAX_MS;

@@ -73,13 +73,7 @@ import { registerTask } from '../../utils/task/framework.js'
 import { writeToMailbox } from '../../utils/teammateMailbox.js'
 import type { CustomAgentDefinition } from '../AgentTool/loadAgentsDir.js'
 import { isCustomAgent } from '../AgentTool/loadAgentsDir.js'
-import {
-  acquireInProcessWorker,
-  bindInProcessWorker,
-  decideInProcessWorkerSpawn,
-  isWarmInProcessDecision,
-  type InProcessWorkerLease,
-} from '../../runtime/workerPool/spawnRouting.js'
+import { acquireSpawnedInProcessWorker, bindSpawnedInProcessWorker, createWorkerPoolSpawnRequest, decideInProcessWorkerSpawn, isWarmInProcessDecision } from './workerPoolSpawnLifecycle.js'
 
 /**
  * Resolve every Agent/teammate spawn to the configured VEXZY Worker model.
@@ -123,10 +117,7 @@ export type SpawnTeammateConfig = {
   /** Per-worker effort; omitted values resolve to medium, never Leader effort. */
   effort?: WorkerEffortInput
   /** Explicit overlap/isolation signals from task validation. */
-  writeOverlap?: boolean
-  hasWriteOverlap?: boolean
-  overlap?: boolean
-  isolation?: 'shared' | 'isolated' | 'worktree'
+  writeOverlap?: boolean; hasWriteOverlap?: boolean; overlap?: boolean; isolation?: 'shared' | 'isolated' | 'worktree'
   agent_type?: string
   description?: string
   /** request_id of the API call whose response contained the tool_use that
@@ -145,95 +136,10 @@ type SpawnInput = {
   plan_mode_required?: boolean
   model?: string
   effort?: WorkerEffortInput
-  writeOverlap?: boolean
-  hasWriteOverlap?: boolean
-  overlap?: boolean
-  isolation?: 'shared' | 'isolated' | 'worktree'
+  writeOverlap?: boolean; hasWriteOverlap?: boolean; overlap?: boolean; isolation?: 'shared' | 'isolated' | 'worktree'
   agent_type?: string
   description?: string
   invokingRequestId?: string
-}
-
-function createWorkerPoolSpawnRequest(
-  input: SpawnInput,
-  workerRuntime: WorkerRuntime,
-) {
-  return {
-    projectId: input.cwd || getCwd(),
-    sessionId: String(getSessionId()),
-    model: workerRuntime.model,
-    effort: workerRuntime.effort,
-    writeOverlap: input.writeOverlap,
-    hasWriteOverlap: input.hasWriteOverlap,
-    overlap: input.overlap,
-    isolation: input.isolation,
-  } as const
-}
-
-function bindWorkerPoolLeaseToLifecycle(
-  taskId: string,
-  context: ToolUseContext,
-  lease: InProcessWorkerLease,
-  abortSignal: AbortSignal,
-): void {
-  let released = false
-  const release = () => {
-    if (released) return
-    released = true
-    abortSignal.removeEventListener('abort', onAbort)
-    void lease.release().catch(error => {
-      logForDebugging(
-        `[handleSpawnInProcess] WorkerPool reset failed for ${taskId}: ${String(error)}`,
-      )
-    })
-  }
-  const onAbort = () => release()
-  const lifecycleCallback = () => {
-    queueMicrotask(() => {
-      const task = context.getAppState().tasks[taskId]
-      if (!task || task.status !== 'running') {
-        release()
-        return
-      }
-
-      // The runner clears callbacks after each idle turn. Re-attach this
-      // lifecycle callback without polling; terminal completion invokes it
-      // again and the microtask sees the committed terminal state.
-      context.setAppState(prev => {
-        const current = prev.tasks[taskId]
-        if (!current || current.type !== 'in_process_teammate') return prev
-        return {
-          ...prev,
-          tasks: {
-            ...prev.tasks,
-            [taskId]: {
-              ...current,
-              onIdleCallbacks: [
-                ...(current.onIdleCallbacks ?? []),
-                lifecycleCallback,
-              ],
-            },
-          },
-        }
-      })
-    })
-  }
-
-  abortSignal.addEventListener('abort', onAbort, { once: true })
-  context.setAppState(prev => {
-    const task = prev.tasks[taskId]
-    if (!task || task.type !== 'in_process_teammate') return prev
-    return {
-      ...prev,
-      tasks: {
-        ...prev.tasks,
-        [taskId]: {
-          ...task,
-          onIdleCallbacks: [...(task.onIdleCallbacks ?? []), lifecycleCallback],
-        },
-      },
-    }
-  })
 }
 
 // ============================================================================
@@ -924,11 +830,7 @@ function registerOutOfProcessTeammateTask(
 async function handleSpawnInProcess(
   input: SpawnInput,
   context: ToolUseContext,
-  workerRuntime: WorkerRuntime,
-  warmDecision: Extract<
-    ReturnType<typeof decideInProcessWorkerSpawn>,
-    { kind: 'warm' }
-  >,
+  workerRuntime: WorkerRuntime, warmDecision: Extract<ReturnType<typeof decideInProcessWorkerSpawn>, { kind: 'warm' }>,
 ): Promise<{ data: SpawnOutput }> {
   const { setAppState, getAppState } = context
   const { name, prompt, agent_type, plan_mode_required } = input
@@ -985,25 +887,9 @@ async function handleSpawnInProcess(
     effort,
   }
 
-  const poolRequest = createWorkerPoolSpawnRequest(input, workerRuntime)
-  if (!isWarmInProcessDecision(warmDecision)) {
-    throw new Error('WorkerPool route changed before in-process spawn')
-  }
-  // The pool is a warm routing/runtime boundary only. Scheduler authority is
-  // acquired later by spawnInProcessTeammate and remains the sole scheduler
-  // lease for this worker.
-  const warmWorkerLease = await acquireInProcessWorker(poolRequest)
-
-  let result: Awaited<ReturnType<typeof spawnInProcessTeammate>>
-  try {
-    result = await spawnInProcessTeammate(config, context)
-  } catch (error) {
-    await warmWorkerLease.release().catch(() => false)
-    throw error
-  }
+  const { result, lease: warmWorkerLease } = await acquireSpawnedInProcessWorker(input, workerRuntime, warmDecision, () => spawnInProcessTeammate(config, context))
 
   if (!result.success) {
-    await warmWorkerLease.release().catch(() => false)
     throw new Error(result.error ?? 'Failed to spawn in-process teammate')
   }
 
@@ -1013,17 +899,7 @@ async function handleSpawnInProcess(
   )
 
   // Start the agent execution loop (fire-and-forget)
-  if (result.taskId && result.teammateContext && result.abortController) {
-    bindInProcessWorker(warmWorkerLease, result.taskId, {
-      context: result.teammateContext,
-      tools: context.options.tools,
-    })
-    bindWorkerPoolLeaseToLifecycle(
-      result.taskId,
-      context,
-      warmWorkerLease,
-      result.abortController.signal,
-    )
+  if (result.taskId && result.teammateContext && result.abortController) { bindSpawnedInProcessWorker(warmWorkerLease, result.taskId, result.teammateContext, context, result.abortController.signal)
     startInProcessTeammate({
       identity: {
         agentId: teammateId,
@@ -1052,8 +928,6 @@ async function handleSpawnInProcess(
     logForDebugging(
       `[handleSpawnInProcess] Started agent execution for ${teammateId}`,
     )
-  } else {
-    await warmWorkerLease.release().catch(() => false)
   }
 
   // Track the teammate in AppState's teamContext

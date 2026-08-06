@@ -274,8 +274,10 @@ export class StreamingDagCoordinator<TTask = unknown, TResult = unknown> {
         if (this.tasks.size >= this.limits.maxTasks) {
           invalidEvent("task count exceeds the configured limit");
         }
-        const task = internalTask(event.task, "pending");
-        const candidate = new Map(this.tasks);
+        const task = internalTask<TTask, TResult>(event.task, "pending");
+        const candidate = new Map<string, InternalTask<TTask, TResult>>(
+          this.tasks,
+        );
         candidate.set(task.id, task);
         if (totalDependencies(candidate) > this.limits.maxTotalDependencies) {
           invalidEvent("total dependencies exceed the configured limit");

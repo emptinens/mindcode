@@ -145,7 +145,7 @@ export class WorkerPoolIneligibleError extends Error {
 }
 
 export class WorkerPoolSlotError extends Error {
-  readonly cause: unknown;
+  override readonly cause: unknown;
 
   constructor(message: string, cause?: unknown) {
     super(message);

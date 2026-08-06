@@ -505,7 +505,7 @@ describe('Agent worker lifecycle', () => {
       teamName: string
       effort: WorkerEffort
       weight: number
-      release: () => boolean
+      release: () => boolean; releaseWithCost: (actualCost?: number) => boolean
     }) => void) | undefined
     let releaseCount = 0
     const lateLease = new Promise<{
@@ -513,7 +513,7 @@ describe('Agent worker lifecycle', () => {
       teamName: string
       effort: WorkerEffort
       weight: number
-      release: () => boolean
+      release: () => boolean; releaseWithCost: (actualCost?: number) => boolean
     }>(resolve => {
       resolveLateLease = resolve
     })
@@ -546,7 +546,7 @@ describe('Agent worker lifecycle', () => {
       release: () => {
         releaseCount += 1
         return true
-      },
+      }, releaseWithCost: () => { releaseCount += 1; return true },
     })
     await Bun.sleep(1)
     expect(releaseCount).toBe(1)

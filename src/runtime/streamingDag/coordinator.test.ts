@@ -4,6 +4,7 @@ import {
   StreamingDagCoordinator,
   StreamingDagError,
   type StreamingDagSnapshot,
+  type StreamingDagSnapshotTask,
   type StreamingDagTask,
   normalizeDaemonSnapshot,
   normalizeDaemonWatchChunk,
@@ -30,7 +31,7 @@ function task(
 }
 
 function snapshot(
-  tasks: readonly StreamingDagTask<Payload>[],
+  tasks: readonly StreamingDagSnapshotTask<Payload, Result>[],
   sequence = 0,
   graphVersion = 1,
 ): StreamingDagSnapshot<Payload, Result> {

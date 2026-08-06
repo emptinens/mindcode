@@ -62,7 +62,9 @@ describe("TaskGraphDaemonClient watch", () => {
     const events: unknown[] = [];
     const result = await client.watch(
       { after_version: 0, poll_interval_ms: 10, idle_timeout_ms: 100 },
-      (event) => events.push(event),
+      (event) => {
+        events.push(event);
+      },
     );
 
     expect(calls).toEqual([

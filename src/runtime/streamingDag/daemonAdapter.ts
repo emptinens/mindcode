@@ -24,26 +24,43 @@ export type DaemonTaskRecord<TPayload = unknown, TResult = unknown> = {
   payload?: TPayload;
   result?: TResult;
   error?: unknown;
-  [key: string]: unknown;
 };
 
-export type DaemonTaskGraphSnapshot<TPayload = unknown, TResult = unknown> = {
+export type DaemonTaskGraphSnapshot<
+  TPayload = unknown,
+  TResult = unknown,
+  TRecord extends DaemonTaskRecord<TPayload, TResult> = DaemonTaskRecord<
+    TPayload,
+    TResult
+  >,
+> = {
   version: number;
   graph_version: number;
   captured_at?: string;
-  tasks: readonly DaemonTaskRecord<TPayload, TResult>[];
+  tasks: readonly TRecord[];
 };
 
-export type DaemonTaskGraphWatchChunk<TPayload = unknown, TResult = unknown> = {
+export type DaemonTaskGraphWatchChunk<
+  TPayload = unknown,
+  TResult = unknown,
+  TRecord extends DaemonTaskRecord<TPayload, TResult> = DaemonTaskRecord<
+    TPayload,
+    TResult
+  >,
+> = {
   schema_version: typeof STREAMING_DAG_DAEMON_SCHEMA_VERSION;
   kind: "snapshot" | "changed" | "resync";
   graph_version: number;
-  snapshot: DaemonTaskGraphSnapshot<TPayload, TResult>;
+  snapshot: DaemonTaskGraphSnapshot<TPayload, TResult, TRecord>;
 };
 
-export type DaemonSnapshotAdapterOptions<TPayload, TTask> = {
+export type DaemonSnapshotAdapterOptions<
+  TPayload,
+  TTask,
+  TRecord extends DaemonTaskRecord<TPayload> = DaemonTaskRecord<TPayload>,
+> = {
   limits?: Partial<StreamingDagLimits>;
-  payload?: (task: DaemonTaskRecord<TPayload>) => TTask;
+  payload?: (task: TRecord) => TTask;
 };
 
 /**
@@ -51,13 +68,17 @@ export type DaemonSnapshotAdapterOptions<TPayload, TTask> = {
  * coordinator contract. The daemon's `blocked_by` list is the dependency
  * edge list; completed is the coordinator's succeeded state.
  */
-export function normalizeDaemonSnapshot<TPayload = unknown, TTask = unknown>(
-  source: DaemonTaskGraphSnapshot<TPayload>,
-  options: DaemonSnapshotAdapterOptions<TPayload, TTask> = {},
+export function normalizeDaemonSnapshot<
+  TPayload = unknown,
+  TTask = unknown,
+  TRecord extends DaemonTaskRecord<TPayload> = DaemonTaskRecord<TPayload>,
+>(
+  source: DaemonTaskGraphSnapshot<TPayload, unknown, TRecord>,
+  options: DaemonSnapshotAdapterOptions<TPayload, TTask, TRecord> = {},
 ): StreamingDagSnapshot<TTask, unknown> {
   validateDaemonSnapshot(source, options.limits);
   const payload =
-    options.payload ?? ((task: DaemonTaskRecord<TPayload>) => task as TTask);
+    options.payload ?? ((task: TRecord) => task as unknown as TTask);
   return {
     sequence: source.version,
     graphVersion: source.graph_version,
@@ -72,9 +93,13 @@ export function normalizeDaemonSnapshot<TPayload = unknown, TTask = unknown>(
   };
 }
 
-export function normalizeDaemonWatchChunk<TPayload = unknown, TTask = unknown>(
-  source: DaemonTaskGraphWatchChunk<TPayload>,
-  options: DaemonSnapshotAdapterOptions<TPayload, TTask> = {},
+export function normalizeDaemonWatchChunk<
+  TPayload = unknown,
+  TTask = unknown,
+  TRecord extends DaemonTaskRecord<TPayload> = DaemonTaskRecord<TPayload>,
+>(
+  source: DaemonTaskGraphWatchChunk<TPayload, unknown, TRecord>,
+  options: DaemonSnapshotAdapterOptions<TPayload, TTask, TRecord> = {},
 ): {
   kind: DaemonTaskGraphWatchChunk["kind"];
   graphVersion: number;
@@ -109,7 +134,7 @@ export function daemonStatusToCoordinatorStatus(
 }
 
 function validateDaemonSnapshot(
-  source: DaemonTaskGraphSnapshot<unknown>,
+  source: DaemonTaskGraphSnapshot,
   limits: Partial<StreamingDagLimits> = DEFAULT_STREAMING_DAG_LIMITS,
 ): void {
   if (!isObject(source)) invalidDaemonSnapshot("snapshot");
@@ -147,7 +172,7 @@ function validateDaemonSnapshot(
     if (
       !Array.isArray(task.blocked_by) ||
       task.blocked_by.some(
-        (dependency) =>
+        (dependency: unknown) =>
           typeof dependency !== "string" || dependency.length === 0,
       )
     ) {
@@ -177,7 +202,7 @@ function validateDaemonSnapshot(
 }
 
 function validateDaemonWatchChunk(
-  source: DaemonTaskGraphWatchChunk<unknown>,
+  source: DaemonTaskGraphWatchChunk,
   limits?: Partial<StreamingDagLimits>,
 ): void {
   if (!isObject(source)) invalidDaemonSnapshot("watch chunk");
@@ -206,7 +231,7 @@ const DAEMON_STATUSES: readonly DaemonTaskStatus[] = [
 
 const WATCH_KINDS = ["snapshot", "changed", "resync"] as const;
 
-function isObject(value: unknown): value is Record<string, unknown> {
+function isObject<T>(value: T): value is T & Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
