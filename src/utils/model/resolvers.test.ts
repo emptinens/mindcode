@@ -81,6 +81,56 @@ describe('public model and effort resolver boundaries', () => {
     )
   })
 
+  test('LeaderModelResolver validates an explicit ID exactly and preserves Luna', async () => {
+    await loadCatalog(luna(), terra())
+    const resolver = new LeaderModelResolver()
+
+    expect(resolver.resolveSelectedModel('gpt-5.6-luna')).toBe('gpt-5.6-luna')
+    expect(resolver.resolveSelectedModel('gpt-5.6-luna[1m]')).toBe(
+      'gpt-5.6-luna[1m]',
+    )
+    expect(() => resolver.resolveSelectedModel('GPT-5.6-LUNA')).toThrow(
+      /absent from the ready VEXZY catalog/,
+    )
+  })
+
+  test('LeaderModelResolver rejects an explicit ID before catalog readiness', () => {
+    resetVexzyModelCatalog()
+    expect(() => new LeaderModelResolver().resolveSelectedModel('opaque-id')).toThrow(
+      /catalog is not ready/,
+    )
+  })
+
+  test('LeaderModelResolver rejects absent and unavailable explicit IDs without fallback', async () => {
+    await loadCatalog(luna(), terra())
+    const resolver = new LeaderModelResolver()
+
+    expect(() => resolver.resolveSelectedModel('missing-provider-model')).toThrow(
+      /absent from the ready VEXZY catalog/,
+    )
+
+    resetVexzyModelCatalog()
+    await loadCatalog(luna(), { ...terra(), id: 'maintenance/model:v2', available: false })
+    expect(() => resolver.resolveSelectedModel('maintenance/model:v2')).toThrow(
+      /unavailable/,
+    )
+  })
+
+  test('LeaderModelResolver preserves opaque provider IDs and catalog order', async () => {
+    const opaque = {
+      ...luna(),
+      id: 'vendor/model:v2.beta+tools',
+      display_name: 'Opaque Provider Model',
+    }
+    await loadCatalog(opaque, terra())
+    const resolver = new LeaderModelResolver()
+
+    expect(resolver.resolveDefaultModel()).toBe('vendor/model:v2.beta+tools')
+    expect(resolver.resolveSelectedModel('vendor/model:v2.beta+tools')).toBe(
+      'vendor/model:v2.beta+tools',
+    )
+  })
+
   test('LeaderModelResolver allows Luna when it is the only available model', async () => {
     await loadCatalog(luna())
     expect(new LeaderModelResolver().resolveDefaultModel()).toBe('gpt-5.6-luna')

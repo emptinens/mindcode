@@ -22,6 +22,10 @@ export const WORKER_EFFORT_LEVELS = [
 export const DEFAULT_WORKER_EFFORT: WorkerEffort = 'medium'
 export type WorkerEffortInput = WorkerEffort | EffortValue
 
+function stripClientContextSuffix(model: string): string {
+  return model.replace(/\[(?:1|2)m\]$/i, '')
+}
+
 export class FixedSubagentModelUnavailableError extends Error {
   readonly code = 'FIXED_SUBAGENT_MODEL_UNAVAILABLE'
 
@@ -69,6 +73,34 @@ export class LeaderModelResolver {
     }
 
     return model.id
+  }
+
+  /**
+   * Validate a user-selected Leader model against the ready VEXZY catalog.
+   * Provider IDs are opaque: lookup is exact and the selected value is
+   * returned unchanged. No aliasing, case folding, or fallback is allowed.
+   */
+  resolveSelectedModel(selectedModel: string): string {
+    const catalog = getVexzyModelCatalogState()
+    if (catalog.state !== 'ready' || catalog.registry === undefined) {
+      throw new LeaderModelUnavailableError(
+        `cannot validate selected model ${JSON.stringify(selectedModel)} because the VEXZY model catalog is not ready (state: ${catalog.state})`,
+      )
+    }
+
+    const model = catalog.registry.get(stripClientContextSuffix(selectedModel))
+    if (model === undefined) {
+      throw new LeaderModelUnavailableError(
+        `selected model ${JSON.stringify(selectedModel)} is absent from the ready VEXZY catalog`,
+      )
+    }
+    if (model.available !== true) {
+      throw new LeaderModelUnavailableError(
+        `selected model ${JSON.stringify(selectedModel)} is unavailable`,
+      )
+    }
+
+    return selectedModel
   }
 }
 

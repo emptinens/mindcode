@@ -22,24 +22,150 @@ const { createVexzyModelClient } = await import(
 )
 
 describe('model environment selection', () => {
-  test('prefers MINDCODE_MODEL over the legacy environment variable', () => {
+  test('prefers an exact MINDCODE_MODEL over the legacy environment variable', async () => {
     const previousModel = process.env.MINDCODE_MODEL
     const previousLegacyModel = process.env.ANTHROPIC_MODEL
     const previousOverride = getMainLoopModelOverride()
+    const catalog = configureVexzyModelCatalog(
+      createVexzyModelClient({
+        apiKey: 'forge-test-key',
+        fetch: async () =>
+          new Response(
+            JSON.stringify({
+              object: 'list',
+              data: [
+                {
+                  id: 'opaque-leader:v2',
+                  object: 'model',
+                  owned_by: 'vexzy',
+                  display_name: 'Opaque Leader',
+                  available: true,
+                  context_length: 1_000_000,
+                  supported_reasoning_efforts: ['low', 'medium', 'high'],
+                  input_modalities: ['text'],
+                  output_modalities: ['text'],
+                  capabilities: {
+                    reasoning: true,
+                    tools: true,
+                    vision: false,
+                  },
+                },
+              ],
+            }),
+          ),
+      }),
+    )
 
     try {
+      await catalog.load()
       setMainLoopModelOverride(undefined)
-      process.env.MINDCODE_MODEL = 'sonnet'
-      process.env.ANTHROPIC_MODEL = 'opus'
+      process.env.MINDCODE_MODEL = 'opaque-leader:v2'
+      process.env.ANTHROPIC_MODEL = 'legacy-provider-model'
 
-      expect(getUserSpecifiedModelSetting()).toBe('sonnet')
+      expect(getUserSpecifiedModelSetting()).toBe('opaque-leader:v2')
+    } finally {
+      resetVexzyModelCatalog()
+      setMainLoopModelOverride(previousOverride)
+      if (previousModel === undefined) {
+        // biome-ignore lint/performance/noDelete: restore the exact process environment state
+        delete process.env.MINDCODE_MODEL
+      } else process.env.MINDCODE_MODEL = previousModel
+      if (previousLegacyModel === undefined) {
+        // biome-ignore lint/performance/noDelete: restore the exact process environment state
+        delete process.env.ANTHROPIC_MODEL
+      } else process.env.ANTHROPIC_MODEL = previousLegacyModel
+    }
+  })
+
+  test('does not preserve or silently replace an invalid explicit model', async () => {
+    const previousModel = process.env.MINDCODE_MODEL
+    const previousOverride = getMainLoopModelOverride()
+    const catalog = configureVexzyModelCatalog(
+      createVexzyModelClient({
+        apiKey: 'forge-test-key',
+        fetch: async () =>
+          new Response(
+            JSON.stringify({
+              object: 'list',
+              data: [
+                {
+                  id: 'available-leader',
+                  object: 'model',
+                  owned_by: 'vexzy',
+                  display_name: 'Available Leader',
+                  available: true,
+                  context_length: 1_000_000,
+                  supported_reasoning_efforts: ['medium'],
+                  input_modalities: ['text'],
+                  output_modalities: ['text'],
+                  capabilities: {
+                    reasoning: true,
+                    tools: true,
+                    vision: false,
+                  },
+                },
+                {
+                  id: 'unavailable-leader',
+                  object: 'model',
+                  owned_by: 'vexzy',
+                  display_name: 'Unavailable Leader',
+                  available: false,
+                  context_length: 1_000_000,
+                  supported_reasoning_efforts: ['medium'],
+                  input_modalities: ['text'],
+                  output_modalities: ['text'],
+                  capabilities: {
+                    reasoning: true,
+                    tools: true,
+                    vision: false,
+                  },
+                },
+              ],
+            }),
+          ),
+      }),
+    )
+
+    try {
+      await catalog.load()
+      setMainLoopModelOverride(undefined)
+      process.env.MINDCODE_MODEL = 'missing-leader'
+      expect(() => getUserSpecifiedModelSetting()).toThrow(
+        /selected model.*absent from the ready VEXZY catalog/,
+      )
+
+      process.env.MINDCODE_MODEL = 'unavailable-leader'
+      expect(() => getUserSpecifiedModelSetting()).toThrow(
+        /selected model.*unavailable/,
+      )
+    } finally {
+      resetVexzyModelCatalog()
+      setMainLoopModelOverride(previousOverride)
+      if (previousModel === undefined) {
+        // biome-ignore lint/performance/noDelete: restore the exact process environment state
+        delete process.env.MINDCODE_MODEL
+      } else process.env.MINDCODE_MODEL = previousModel
+    }
+  })
+
+  test('rejects an explicit model while the VEXZY catalog is not ready', () => {
+    const previousModel = process.env.MINDCODE_MODEL
+    const previousOverride = getMainLoopModelOverride()
+
+    try {
+      resetVexzyModelCatalog()
+      setMainLoopModelOverride(undefined)
+      process.env.MINDCODE_MODEL = 'opaque-leader:v2'
+
+      expect(() => getUserSpecifiedModelSetting()).toThrow(
+        /catalog is not ready/,
+      )
     } finally {
       setMainLoopModelOverride(previousOverride)
-      if (previousModel === undefined) delete process.env.MINDCODE_MODEL
-      else process.env.MINDCODE_MODEL = previousModel
-      if (previousLegacyModel === undefined)
-        delete process.env.ANTHROPIC_MODEL
-      else process.env.ANTHROPIC_MODEL = previousLegacyModel
+      if (previousModel === undefined) {
+        // biome-ignore lint/performance/noDelete: restore the exact process environment state
+        delete process.env.MINDCODE_MODEL
+      } else process.env.MINDCODE_MODEL = previousModel
     }
   })
 

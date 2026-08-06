@@ -41,6 +41,8 @@ describe('main.tsx VEXZY-only startup regression', () => {
       'launchRepl',
       'getMindCodeMcpConfigs',
       'prefetchAllMcpResources',
+      'leaderModelResolver.resolveSelectedModel(requestedModel)',
+      'leaderModelResolver.resolveSelectedModel(fallbackModel)',
     ]) {
       expect(runtimeSource).toContain(retained)
     }

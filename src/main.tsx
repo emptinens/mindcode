@@ -104,6 +104,7 @@ import { safeParseJSON } from './utils/json.js';
 import { logError } from './utils/log.js';
 import { getModelDeprecationWarning } from './utils/model/deprecation.js';
 import { getDefaultMainLoopModel, getUserSpecifiedModelSetting, normalizeModelStringForAPI, parseUserSpecifiedModel } from './utils/model/model.js';
+import { leaderModelResolver } from './utils/model/resolvers.js';
 import { setConfiguredSubagentModel } from './utils/model/subagentModel.js';
 import { PERMISSION_MODES } from './utils/permissions/PermissionMode.js';
 import { checkAndDisableBypassPermissions, getAutoModeEnabledStateIfCached, initializeToolPermissionContext, initialPermissionModeFromCLI, isDefaultPermissionModeAuto, parseToolListFromCLI, stripDangerousPermissionsForAutoMode, verifyAutoModeGateAccess } from './utils/permissions/permissionSetup.js';
@@ -1530,8 +1531,16 @@ async function run(): Promise<CommanderCommand> {
 
     // Special case the default model with the null keyword
     const requestedModel = options.model ?? process.env.MINDCODE_MODEL;
-    const userSpecifiedModel = requestedModel === 'default' ? getDefaultMainLoopModel() : requestedModel;
-    const userSpecifiedFallbackModel = fallbackModel === 'default' ? getDefaultMainLoopModel() : fallbackModel;
+    const userSpecifiedModel = requestedModel === 'default'
+      ? getDefaultMainLoopModel()
+      : requestedModel === undefined
+        ? undefined
+        : leaderModelResolver.resolveSelectedModel(requestedModel);
+    const userSpecifiedFallbackModel = fallbackModel === 'default'
+      ? getDefaultMainLoopModel()
+      : fallbackModel === undefined
+        ? undefined
+        : leaderModelResolver.resolveSelectedModel(fallbackModel);
 
     // Reuse preSetupCwd unless setup() chdir'd (worktreeEnabled). Saves a
     // getCwd() syscall in the common path.

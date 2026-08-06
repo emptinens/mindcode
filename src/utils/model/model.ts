@@ -4,7 +4,6 @@ import { has1mContext, modelSupports1M } from '../context.js'
 import type { PermissionMode } from '../permissions/PermissionMode.js'
 import { getSettings_DEPRECATED } from '../settings/settings.js'
 import type { ModelAlias } from './aliases.js'
-import { isModelAllowed } from './modelAllowlist.js'
 import { leaderModelResolver } from './resolvers.js'
 
 export type ModelShortName = string
@@ -50,11 +49,7 @@ export function getUserSpecifiedModelSetting(): ModelSetting | undefined {
 
   if (!specifiedModel) return undefined
 
-  const catalogState = getVexzyModelCatalogState()
-  if (catalogState.state === 'ready' && !isModelAllowed(specifiedModel)) {
-    return undefined
-  }
-  return specifiedModel
+  return leaderModelResolver.resolveSelectedModel(specifiedModel)
 }
 
 export function getMainLoopModel(): ModelName {
