@@ -66,7 +66,7 @@ export function sanitizeDaemonEnvironment(
   return sanitized;
 }
 
-/** Explicit opt-in helper. The client never invokes this automatically. */
+/** Spawn the detached sidecar used by the lazy daemon manager. */
 export function spawnMindcodeDaemon(
   options: DaemonSpawnOptions = {},
 ): DaemonSpawnResult {
@@ -83,6 +83,10 @@ export function spawnMindcodeDaemon(
       MINDCODE_DAEMON_SOCKET: socketPath,
     },
   });
+  // Detached children do not have a parent to consume an asynchronous spawn
+  // error. Keep an error listener installed even when callers do not need the
+  // event; the manager adds its own listener for lifecycle accounting.
+  child.once("error", () => undefined);
   child.unref();
   return { executablePath, socketPath, process: child };
 }

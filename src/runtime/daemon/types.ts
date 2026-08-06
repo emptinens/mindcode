@@ -64,3 +64,5 @@ export type DaemonSpawnResult = {
 };
 
 export type DaemonMessageHandler = (message: DaemonWireMessage) => void;
+
+export type DaemonManagerRequestOptions = DaemonRequestOptions;

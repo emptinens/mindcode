@@ -32,6 +32,13 @@ export class DaemonDisconnectedError extends DaemonClientError {
   }
 }
 
+export class DaemonDisabledError extends DaemonClientError {
+  constructor() {
+    super("DAEMON_DISABLED", "MindCode daemon is disabled");
+    this.name = "DaemonDisabledError";
+  }
+}
+
 export class DaemonCancelledError extends DaemonClientError {
   constructor() {
     super("DAEMON_CANCELLED", "Daemon request was cancelled");
@@ -52,6 +59,7 @@ export class DaemonRemoteError extends DaemonClientError {
 }
 
 export function classifyDaemonFallback(error: unknown): DaemonFallbackReason {
+  if (error instanceof DaemonDisabledError) return "disabled";
   if (error instanceof DaemonTimeoutError) {
     return `${error.kind}_timeout`;
   }

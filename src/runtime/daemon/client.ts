@@ -119,12 +119,14 @@ export class DaemonClient {
         reject(error);
       };
 
-      timers.connect = setTimeout(() => {
-        rejectConnection(
-          new DaemonTimeoutError("connect", this.options.connectTimeoutMs),
-        );
-        socket?.destroy();
-      }, this.options.connectTimeoutMs);
+      timers.connect = unrefTimer(
+        setTimeout(() => {
+          rejectConnection(
+            new DaemonTimeoutError("connect", this.options.connectTimeoutMs),
+          );
+          socket?.destroy();
+        }, this.options.connectTimeoutMs),
+      );
 
       socket.on("data", (chunk: Buffer) => {
         if (!this.owns(connection)) return;
@@ -171,18 +173,20 @@ export class DaemonClient {
               generation: connection.generation,
               resolve: (value) => resolveHandshake(value as DaemonWireMessage),
               reject: rejectHandshake,
-              timer: setTimeout(() => {
-                this.settlePending(
-                  id,
-                  new DaemonTimeoutError(
-                    "handshake",
-                    this.options.handshakeTimeoutMs,
-                  ),
-                  undefined,
-                  connection.generation,
-                );
-                socket?.destroy();
-              }, this.options.handshakeTimeoutMs),
+              timer: unrefTimer(
+                setTimeout(() => {
+                  this.settlePending(
+                    id,
+                    new DaemonTimeoutError(
+                      "handshake",
+                      this.options.handshakeTimeoutMs,
+                    ),
+                    undefined,
+                    connection.generation,
+                  );
+                  socket?.destroy();
+                }, this.options.handshakeTimeoutMs),
+              ),
             };
             this.pending.set(id, pending);
           },
@@ -254,15 +258,17 @@ export class DaemonClient {
         signal: options.signal,
         resolve: (value) => resolve(value as T),
         reject,
-        timer: setTimeout(() => {
-          this.sendCancel(id, connection.generation);
-          this.settlePending(
-            id,
-            new DaemonTimeoutError("request", timeoutMs),
-            undefined,
-            connection.generation,
-          );
-        }, timeoutMs),
+        timer: unrefTimer(
+          setTimeout(() => {
+            this.sendCancel(id, connection.generation);
+            this.settlePending(
+              id,
+              new DaemonTimeoutError("request", timeoutMs),
+              undefined,
+              connection.generation,
+            );
+          }, timeoutMs),
+        ),
       };
       const onAbort = (): void => {
         if (!this.isPending(id, connection.generation)) return;
@@ -539,4 +545,9 @@ type PendingRequest = {
 function boundedTimeout(value: number): number {
   if (!Number.isFinite(value) || value <= 0) return 1;
   return Math.min(Math.floor(value), 2 ** 31 - 1);
+}
+
+function unrefTimer<T extends ReturnType<typeof setTimeout>>(timer: T): T {
+  (timer as T & { unref?: () => void }).unref?.();
+  return timer;
 }

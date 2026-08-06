@@ -1910,6 +1910,10 @@ async function run(): Promise<CommanderCommand> {
     registerCleanup(async () => {
       logForDiagnosticsNoPII('info', 'exited');
     });
+    registerCleanup(async () => {
+      const { cleanupDaemonManager } = await import('./runtime/daemon/index.js');
+      await cleanupDaemonManager();
+    });
     void logTenguInit({
       hasInitialPrompt: Boolean(prompt),
       hasStdin: Boolean(inputPrompt),

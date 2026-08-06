@@ -1,5 +1,6 @@
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 
 export const DEFAULT_DAEMON_SOCKET_PATH = join(
   homedir(),
@@ -7,6 +8,12 @@ export const DEFAULT_DAEMON_SOCKET_PATH = join(
   "run",
   "mindcoded-v1.sock",
 );
+
+export type DaemonRuntimePathOptions = {
+  runtimePath?: string;
+  platform?: NodeJS.Platform;
+  arch?: string;
+};
 
 export function resolveDaemonSocketPath(
   env: NodeJS.ProcessEnv = process.env,
@@ -20,13 +27,32 @@ export function resolveDaemonSocketPath(
 
 export function resolveDaemonExecutablePath(
   env: NodeJS.ProcessEnv = process.env,
+  options: DaemonRuntimePathOptions = {},
 ): string {
   const configured = env.MINDCODE_DAEMON_PATH?.trim();
   if (configured) return configured;
 
-  const executableName =
-    process.platform === "win32" ? "mindcoded.exe" : "mindcoded";
-  const packageLocal = join(dirname(process.execPath), executableName);
-  if (isAbsolute(packageLocal)) return packageLocal;
-  return resolve(homedir(), ".mindcode", "bin", executableName);
+  const platform = options.platform ?? process.platform;
+  const arch = options.arch ?? process.arch;
+  const runtimePath = options.runtimePath ?? process.execPath;
+  const executableName = platform === "win32" ? "mindcoded.exe" : "mindcoded";
+  const target = `${platform}-${normalizeArchitecture(arch)}`;
+  const runtimeDirectory = dirname(runtimePath);
+  const bundleSibling = join(runtimeDirectory, executableName);
+  const qualifiedSibling = join(
+    runtimeDirectory,
+    `${executableName}-${target}`,
+  );
+
+  // Bundles place the sidecar beside the CLI as `mindcoded`; standalone
+  // target-qualified distributions place it beside `mindcode-<target>`.
+  // Keep the order stable and only select an existing candidate so a bundled
+  // CLI cannot accidentally resolve a daemon from another layout.
+  if (existsSync(bundleSibling)) return bundleSibling;
+  if (existsSync(qualifiedSibling)) return qualifiedSibling;
+  return bundleSibling;
+}
+
+function normalizeArchitecture(arch: string): string {
+  return arch === "x86_64" ? "x64" : arch === "aarch64" ? "arm64" : arch;
 }

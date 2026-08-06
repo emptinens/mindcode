@@ -95,6 +95,14 @@ export function showSetupDialog<T = void>(root: Root, renderer: (done: (result: 
 export async function renderAndRun(root: Root, element: React.ReactNode): Promise<void> {
   root.render(element);
   startDeferredPrefetches();
+  // Keep the optional native sidecar out of --print/headless startup. This
+  // callback is reached only by the interactive renderer and is deferred one
+  // turn so the first frame is submitted before any daemon work starts.
+  setImmediate(() => {
+    void import('./runtime/daemon/index.js')
+      .then(({ getDaemonManager }) => getDaemonManager().kickStartup())
+      .catch(() => undefined);
+  });
   await root.waitUntilExit();
   await gracefulShutdown(0);
 }
