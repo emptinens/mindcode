@@ -14,7 +14,6 @@ import { isQueuedCommandEditable, popAllEditable } from 'src/utils/messageQueueM
 import stripAnsi from 'strip-ansi';
 import { companionReservedColumns } from '../../buddy/CompanionSprite.js';
 import { findBuddyTriggerPositions, useBuddyNotification } from '../../buddy/useBuddyNotification.js';
-import { FastModePicker } from '../../commands/fast/fast.js';
 import { isUltrareviewEnabled } from '../../commands/review/ultrareviewEnabled.js';
 import { getNativeCSIuTerminalDisplayName } from '../../commands/terminalSetup/terminalSetup.js';
 import { type Command, hasCommand } from '../../commands.js';
@@ -63,7 +62,7 @@ import type { EffortLevel } from '../../utils/effort.js';
 import { env } from '../../utils/env.js';
 import { errorMessage } from '../../utils/errors.js';
 import { isBilledAsExtraUsage } from '../../utils/extraUsage.js';
-import { getFastModeUnavailableReason, isFastModeAvailable, isFastModeCooldown, isFastModeEnabled, isFastModeSupportedByModel } from '../../utils/fastMode.js';
+import { isFastModeAvailable, isFastModeCooldown, isFastModeEnabled, isFastModeSupportedByModel } from '../../utils/fastMode.js';
 import { isFullscreenEnvEnabled } from '../../utils/fullscreen.js';
 import type { PromptInputHelpers } from '../../utils/handlePromptSubmit.js';
 import { getImageFromClipboard, PASTE_THRESHOLD } from '../../utils/imagePaste.js';
@@ -398,7 +397,6 @@ function PromptInput({
   const [showQuickOpen, setShowQuickOpen] = useState(false);
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
   const [showHistoryPicker, setShowHistoryPicker] = useState(false);
-  const [showFastModePicker, setShowFastModePicker] = useState(false);
   const [showThinkingToggle, setShowThinkingToggle] = useState(false);
   const [showAutoModeOptIn, setShowAutoModeOptIn] = useState(false);
   const [previousModeBeforeAuto, setPreviousModeBeforeAuto] = useState<PermissionMode | null>(null);
@@ -1419,14 +1417,6 @@ function PromptInput({
     }
   }, [helpOpen]);
 
-  // Handler for chat:fastMode - toggle fast mode picker
-  const handleFastModePicker = useCallback(() => {
-    setShowFastModePicker(prev => !prev);
-    if (helpOpen) {
-      setHelpOpen(false);
-    }
-  }, [helpOpen]);
-
   // Handler for chat:thinkingToggle - toggle thinking mode
   const handleThinkingToggle = useCallback(() => {
     setShowThinkingToggle(prev => !prev);
@@ -1706,12 +1696,6 @@ function PromptInput({
   useKeybinding('chat:messageActions', () => onMessageActionsEnter?.(), {
     context: 'Chat',
     isActive: !isModalOverlayActive && !isSearchingHistory
-  });
-
-  // Fast mode keybinding is only active when fast mode is enabled and available
-  useKeybinding('chat:fastMode', handleFastModePicker, {
-    context: 'Chat',
-    isActive: !isModalOverlayActive && isFastModeEnabled() && isFastModeAvailable()
   });
 
   // Handle help:dismiss keybinding (ESC closes help menu)
@@ -2089,26 +2073,6 @@ function PromptInput({
         <ModelPicker initial={mainLoopModel_} sessionModel={mainLoopModelForSession} onSelect={handleModelSelect} onCancel={handleModelCancel} isStandaloneCommand showFastModeNotice={isFastModeEnabled() && isFastMode && isFastModeSupportedByModel(mainLoopModel_) && isFastModeAvailable()} />
       </Box>;
   }, [showModelPicker, mainLoopModel_, mainLoopModelForSession, handleModelSelect, handleModelCancel]);
-  const handleFastModeSelect = useCallback((result?: string) => {
-    setShowFastModePicker(false);
-    if (result) {
-      addNotification({
-        key: 'fast-mode-toggled',
-        jsx: <Text>{result}</Text>,
-        priority: 'immediate',
-        timeoutMs: 3000
-      });
-    }
-  }, [addNotification]);
-
-  // Memoize the fast mode picker element
-  const fastModePickerElement = useMemo(() => {
-    if (!showFastModePicker) return null;
-    return <Box flexDirection="column" marginTop={1}>
-        <FastModePicker onDone={handleFastModeSelect} unavailableReason={getFastModeUnavailableReason()} />
-      </Box>;
-  }, [showFastModePicker, handleFastModeSelect]);
-
   // Memoized callbacks for thinking toggle
   const handleThinkingSelect = useCallback((enabled: boolean) => {
     setAppState(prev => ({
@@ -2181,9 +2145,6 @@ function PromptInput({
   // Show loop mode menu when requested (ant-only, eliminated from external builds)
   if (modelPickerElement) {
     return modelPickerElement;
-  }
-  if (fastModePickerElement) {
-    return fastModePickerElement;
   }
   if (thinkingToggleElement) {
     return thinkingToggleElement;

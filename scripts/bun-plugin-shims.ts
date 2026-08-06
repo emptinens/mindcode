@@ -58,7 +58,7 @@ plugin({
     build.onResolve(
       {
         filter:
-          /^(?:@ant\/|@anthropic-ai\/(?:bedrock-sdk|foundry-sdk|vertex-sdk)$|audio-capture-napi$|modifiers-napi$|sharp$)/,
+          /^(?:audio-capture-napi$|modifiers-napi$|sharp$)/,
       },
       args => ({
         path: args.path,

@@ -385,7 +385,6 @@ export type GlobalConfig = {
 
   messageIdleNotifThresholdMs: number // How long the user has to have been idle to get a notification that Claude is done generating
 
-  githubActionSetupCount?: number // Number of times the user has set up the GitHub Action
   slackAppInstallCount?: number // Number of times the user has clicked to install the Slack app
 
   // File checkpointing configuration

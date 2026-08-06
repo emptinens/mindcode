@@ -93,5 +93,5 @@ test('bridge and remote-control commands are not registered', () => {
 test('provider gating is fail-closed and does not depend on legacy auth/provider helpers', () => {
   expect(registry).not.toContain("from './utils/auth.js'")
   expect(registry).not.toContain("from './utils/model/providers.js'")
-  expect(registry).toContain('return !cmd.availability')
+  expect(registry).toContain('return !cmd.availability || cmd.availability.length === 0')
 })

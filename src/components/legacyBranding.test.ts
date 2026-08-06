@@ -9,7 +9,6 @@ const uiFiles = [
   'components/HelpV2/HelpV2.tsx',
   'components/VexzyApiKeySetup.tsx',
   'components/ModelPicker.tsx',
-  'components/WorkflowMultiselectDialog.tsx',
   'components/permissions/PermissionRequest.tsx',
   'components/permissions/PermissionPrompt.tsx',
   'components/permissions/EnterPlanModePermissionRequest/EnterPlanModePermissionRequest.tsx',

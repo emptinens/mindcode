@@ -188,18 +188,11 @@ async function getSkills(cwd: string): Promise<{
 }
 
 /**
- * Filters commands by their declared `availability` (auth/provider requirement).
- * Commands without `availability` are treated as universal.
- * This runs before `isEnabled()` so that provider-gated commands are hidden
- * regardless of feature-flag state.
- *
- * Not memoized — auth state can change mid-session (e.g. after /login),
- * so this must be re-evaluated on every getCommands() call.
+ * Rejects provider-scoped command metadata in the VEXZY-only runtime.
+ * Commands without availability metadata remain universally available.
  */
 export function meetsAvailabilityRequirement(cmd: Command): boolean {
-  // MindCode is VEXZY-only. Legacy provider availability markers are never
-  // satisfied, so provider-specific commands fail closed without auth imports.
-  return !cmd.availability
+  return !cmd.availability || cmd.availability.length === 0
 }
 
 /**

@@ -729,8 +729,8 @@ async function run(): Promise<CommanderCommand> {
   .option(
     '--model <model>',
     "Vexzy model ID for the current Leader session (for example " +
-      "'gpt-5.6-sol' or 'gpt-5.6-terra'). Worker sessions use the " +
-      "persistent /submodel selection (default: 'gpt-5.6-luna').",
+      "'gpt-5.6-sol' or 'gpt-5.6-terra'). Worker sessions are fixed " +
+      "to 'gpt-5.6-luna'; /submodel reports that invariant.",
   )
   .addOption(
     new Option(
@@ -2903,7 +2903,7 @@ async function run(): Promise<CommanderCommand> {
   }
 
   // Doctor command - check installation health
-  program.command('doctor').description('Check the health of your MindCode auto-updater. Note: The workspace trust dialog is skipped and stdio servers from .mcp.json are spawned for health checks. Only use this command in directories you trust.').action(async () => {
+  program.command('doctor').description('Check the health of the local MindCode installation. The workspace trust dialog is skipped and stdio servers from .mcp.json are spawned for health checks. Only use this command in directories you trust.').action(async () => {
     const [{
       doctorHandler
     }, {
@@ -2919,7 +2919,7 @@ async function run(): Promise<CommanderCommand> {
   // - We perform exact string comparison (including SHA) to detect any change
   // - This ensures users always get the latest build, even when only the SHA changes
   // - UI shows both versions including build metadata for clarity
-  program.command('update').alias('upgrade').description('Check for updates and install if available').action(async () => {
+  program.command('update').alias('upgrade').description('Show local checkout update instructions').action(async () => {
     const {
       update
     } = await import('src/cli/update.js');

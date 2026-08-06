@@ -171,7 +171,7 @@ const nativeShimPlugin = {
     build.onResolve(
       {
         filter:
-          /^(?:@ant\/|@anthropic-ai\/(?:bedrock-sdk|foundry-sdk|vertex-sdk)$|audio-capture-napi$|modifiers-napi$|sharp$)/,
+          /^(?:audio-capture-napi$|modifiers-napi$|sharp$)/,
       },
       args => ({
         path: args.path,
@@ -244,9 +244,6 @@ const require = __createRequire(import.meta.url);
 const MACRO = {
   VERSION: "0.1.0",
   BUILD_TIME: ${JSON.stringify(new Date().toISOString())},
-  PACKAGE_URL: undefined,
-  NATIVE_PACKAGE_URL: undefined,
-  FEEDBACK_CHANNEL: "",
   ISSUES_EXPLAINER: "file an issue in the MindCode repository",
   VERSION_CHANGELOG: ""
 };`,

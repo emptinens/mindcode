@@ -472,7 +472,6 @@ export function useVoiceKeybindingHandler({
     // flow through instead of swallowing it into stale refs (#33556).
     // Two distinct unmount/unfocus paths (both needed):
     //   - !isActive: local-jsx command hid PromptInput (shouldHidePromptInput)
-    //     without registering an overlay — e.g. /install-github-app,
     //     /plugin. Mirrors CommandKeybindingHandlers' isActive gate.
     //   - isModalOverlayActive: overlay (permission dialog, Select with
     //     onCancel) has focus; PromptInput is mounted but focus=false.

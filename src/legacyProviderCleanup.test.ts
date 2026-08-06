@@ -5,6 +5,40 @@ import { resolve } from "node:path";
 const root = resolve(import.meta.dir, "..");
 
 const sourceChecks: Record<string, string[]> = {
+  "scripts/build-bundle.mjs": [
+    "@anthropic-ai/",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_API_KEY",
+    "PACKAGE_URL",
+    "NATIVE_PACKAGE_URL",
+  ],
+  "scripts/bun-plugin-shims.ts": ["@anthropic-ai/", "@ant/"],
+  "src/services/api/errorUtils.ts": [
+    "Anthropic",
+    "anthropic.com",
+    "api.openai.com",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+  ],
+  "src/utils/betas.ts": [
+    "ANTHROPIC_BETAS",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+  ],
+  "src/cli/update.ts": [
+    "@anthropic",
+    "ANTHROPIC_",
+    "OPENAI_",
+    "api.anthropic.com",
+    "api.openai.com",
+    "getLatestVersion",
+    "installGlobalPackage",
+    "installOrUpdateMindCodePackage",
+    "installLatestNative",
+    "removeInstalledSymlink",
+    "localInstallationExists",
+  ],
   "src/services/mcp/normalization.ts": ["CLAUDEAI_SERVER_PREFIX", "claude.ai"],
   "src/constants/product.ts": [
     "CLAUDE_AI_BASE_URL",
@@ -36,9 +70,46 @@ const sourceChecks: Record<string, string[]> = {
   "src/tools/ConfigTool/ConfigTool.ts": ["Claude.ai"],
   "src/utils/plugins/validatePlugin.ts": ["Claude.ai"],
   "src/hooks/useVoice.ts": ["Claude.ai"],
+  "src/tools/PowerShellTool/pathValidation.ts": [
+    "ANTHROPIC_API_KEY",
+    "api.anthropic.com",
+  ],
+  "src/tools/PowerShellTool/powershellPermissions.ts": [
+    "ANTHROPIC_API_KEY",
+    "api.anthropic.com",
+  ],
+  "src/types/command.ts": [
+    "ANTHROPIC_",
+    "api.anthropic.com",
+    "claude-ai",
+    "console",
+  ],
+  "src/utils/proxy.ts": ["ANTHROPIC_", "api.anthropic.com", "forAnthropicAPI"],
+  "src/utils/nativeInstaller/packageManagers.ts": [
+    "@anthropic-ai",
+    "Claude CLI",
+  ],
+  "src/commands.ts": [
+    "install-github-app",
+    "anthropic",
+    "claude-ai",
+    "console",
+  ],
 };
 
 const bundleResidues = [
+  "@anthropic-ai/",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_BASE_URL",
+  "OPENAI_API_KEY",
+  "api.anthropic.com",
+  "api.openai.com",
+  "https://api.anthropic.com",
+  "https://api.openai.com",
+  "npm view @anthropic",
+  "installGlobalPackage",
+  "installOrUpdateMindCodePackage",
+  "installLatestNative",
   "CLAUDEAI_SERVER_PREFIX",
   "https://claude-ai.staging.ant.dev",
   "getClaudeAiBaseUrl",
@@ -73,6 +144,16 @@ describe("bundle-visible legacy provider cleanup", () => {
     }
   });
 
+  test("provider-specific GitHub installer is fully removed", () => {
+    expect(existsSync(resolve(root, "commands/install-github-app"))).toBe(
+      false,
+    );
+    expect(existsSync(resolve(root, "constants/github-app.ts"))).toBe(false);
+    expect(
+      existsSync(resolve(root, "components/WorkflowMultiselectDialog.tsx")),
+    ).toBe(false);
+  });
+
   test("MCP normalization remains generic for local server names", async () => {
     const { normalizeNameForMCP } = await import(
       "./services/mcp/normalization.js"
@@ -91,5 +172,7 @@ describe("bundle-visible legacy provider cleanup", () => {
         `dist/mindcode.js contains ${residue}`,
       ).toBe(-1);
     }
+    expect(bundle).toContain("VEXZY_API_KEY");
+    expect(bundle).toContain("api.echogate.one");
   });
 });
