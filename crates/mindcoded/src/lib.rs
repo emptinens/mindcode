@@ -18,7 +18,7 @@ use mindcode_core_tools::{
 use mindcode_state::{
     ClaimOptions, ConflictMode, ListOptions, SessionIndex, SessionIndexConfig, SessionListOptions,
     SessionRecord, SessionSearchOptions, StateError, TaskGraph, TaskGraphConfig, TaskInput,
-    TaskStatus, DEFAULT_LEASE_TTL_MS,
+    TaskStatus, DEFAULT_LEASE_TTL_MS, JS_MAX_SAFE_INTEGER,
 };
 use protocol::{
     read_message, write_message, ClientMessage, RemoteErrorPayload, ServerMessage, PROTOCOL_VERSION,
@@ -51,8 +51,15 @@ const DEFAULT_IDLE_SECONDS: u64 = 30 * 60;
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_POLL: Duration = Duration::from_millis(250);
 const MAX_SLEEP_MS: u64 = 60_000;
+const DEFAULT_TASK_GRAPH_WATCH_POLL_MS: u64 = 50;
+const DEFAULT_TASK_GRAPH_WATCH_IDLE_MS: u64 = 15_000;
+const MIN_TASK_GRAPH_WATCH_POLL_MS: u64 = 10;
+const MAX_TASK_GRAPH_WATCH_POLL_MS: u64 = 1_000;
+const MIN_TASK_GRAPH_WATCH_IDLE_MS: u64 = 100;
+const MAX_TASK_GRAPH_WATCH_IDLE_MS: u64 = 120_000;
 pub const MAX_DAEMON_CONNECTIONS: usize = 64;
 pub const MAX_DAEMON_IN_FLIGHT_REQUESTS: usize = 128;
+pub const MAX_TASK_GRAPH_WATCHERS: usize = 16;
 pub const MAX_COMPLETED_MUTATION_REPLAY_BYTES: usize = 4 * 1024 * 1024;
 const SERVER_CAPABILITIES: &[&str] = &[
     "request",
@@ -73,6 +80,7 @@ const SERVER_CAPABILITIES: &[&str] = &[
     "task_graph.release_lease",
     "task_graph.recover",
     "task_graph.snapshot",
+    "task_graph.watch",
     "session_index",
     "session_index.upsert",
     "session_index.get",
@@ -175,6 +183,7 @@ struct DaemonState {
     activity: Notify,
     connection_slots: Arc<Semaphore>,
     request_slots: Arc<Semaphore>,
+    task_graph_watch_slots: Arc<Semaphore>,
     started_at: Instant,
 }
 
@@ -242,6 +251,7 @@ impl Daemon {
                 activity: Notify::new(),
                 connection_slots: Arc::new(Semaphore::new(MAX_DAEMON_CONNECTIONS)),
                 request_slots: Arc::new(Semaphore::new(MAX_DAEMON_IN_FLIGHT_REQUESTS)),
+                task_graph_watch_slots: Arc::new(Semaphore::new(MAX_TASK_GRAPH_WATCHERS)),
                 started_at: Instant::now(),
             }),
         }
@@ -374,6 +384,7 @@ const MAX_COMPLETED_MUTATION_REPLAYS: usize = 256;
 struct RequestFingerprint {
     method: String,
     params: Option<Value>,
+    stream: bool,
 }
 
 struct RequestEntry {
@@ -747,11 +758,12 @@ async fn handle_connection_inner(stream: UnixStream, state: Arc<DaemonState>) ->
                             break Err(error);
                         }
                     }
-                    ClientMessage::Request { id, method, params, .. } => {
+                    ClientMessage::Request { id, method, params, stream } => {
                         let request_id = id.clone();
                         let fingerprint = RequestFingerprint {
                             method: method.clone(),
                             params: params.clone(),
+                            stream,
                         };
                         let start = RequestLease::begin(
                             request_id.clone(),
@@ -791,7 +803,16 @@ async fn handle_connection_inner(stream: UnixStream, state: Arc<DaemonState>) ->
                         let task_state = Arc::clone(&state);
                         let task_writer = Arc::clone(&writer);
                         tasks.spawn(async move {
-                            run_request(id, method, params, lease, task_state, task_writer).await
+                            run_request(
+                                id,
+                                method,
+                                params,
+                                stream,
+                                lease,
+                                task_state,
+                                task_writer,
+                            )
+                            .await
                         });
                     }
                 }
@@ -837,12 +858,17 @@ async fn run_request(
     id: String,
     method: String,
     params: Option<Value>,
+    stream: bool,
     lease: RequestLease,
     state: Arc<DaemonState>,
     writer: SharedWriter,
 ) -> Result<()> {
     let cancellation = lease.token.clone();
-    let result = execute_request(&method, params, &state, cancellation).await?;
+    let result = if method == "task_graph.watch" {
+        run_task_graph_watch(&id, params, stream, &state, &writer, cancellation).await?
+    } else {
+        execute_request(&method, params, &state, cancellation).await?
+    };
     let should_shutdown = result.shutdown;
     let replayable = is_mutation_method(&method);
     let mut lease = lease;
@@ -989,6 +1015,14 @@ struct ListParams {
     owner: Option<Value>,
     limit: Option<u64>,
     offset: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskGraphWatchParams {
+    after_version: Option<u64>,
+    poll_interval_ms: Option<u64>,
+    idle_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1226,6 +1260,131 @@ where
             // and return its actual result. A committed mutation must never
             // be reported as an ambiguous cancellation.
             Ok(Some(handle.await.context("join task graph operation")?))
+        }
+    }
+}
+
+async fn run_task_graph_watch(
+    request_id: &str,
+    params: Option<Value>,
+    stream: bool,
+    state: &Arc<DaemonState>,
+    writer: &SharedWriter,
+    cancellation: CancellationToken,
+) -> Result<RequestResult> {
+    if !stream {
+        return Ok(RequestResult::invalid_params(
+            "task_graph.watch requires stream=true",
+        ));
+    }
+    let request = match parse_params::<TaskGraphWatchParams>(params) {
+        Ok(value) => value,
+        Err(error) => return Ok(error),
+    };
+    if request
+        .after_version
+        .is_some_and(|version| version > JS_MAX_SAFE_INTEGER)
+    {
+        return Ok(RequestResult::invalid_params(
+            "after_version exceeds the safe integer bound",
+        ));
+    }
+    let poll_interval_ms = request
+        .poll_interval_ms
+        .unwrap_or(DEFAULT_TASK_GRAPH_WATCH_POLL_MS);
+    if !(MIN_TASK_GRAPH_WATCH_POLL_MS..=MAX_TASK_GRAPH_WATCH_POLL_MS).contains(&poll_interval_ms) {
+        return Ok(RequestResult::invalid_params(format!(
+            "poll_interval_ms must be between {MIN_TASK_GRAPH_WATCH_POLL_MS} and {MAX_TASK_GRAPH_WATCH_POLL_MS}"
+        )));
+    }
+    let idle_timeout_ms = request
+        .idle_timeout_ms
+        .unwrap_or(DEFAULT_TASK_GRAPH_WATCH_IDLE_MS);
+    if !(MIN_TASK_GRAPH_WATCH_IDLE_MS..=MAX_TASK_GRAPH_WATCH_IDLE_MS).contains(&idle_timeout_ms) {
+        return Ok(RequestResult::invalid_params(format!(
+            "idle_timeout_ms must be between {MIN_TASK_GRAPH_WATCH_IDLE_MS} and {MAX_TASK_GRAPH_WATCH_IDLE_MS}"
+        )));
+    }
+    let _watch_permit = match Arc::clone(&state.task_graph_watch_slots).try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(TryAcquireError::NoPermits) => {
+            return Ok(RequestResult::error(
+                "watch_limit",
+                "task graph watch limit reached",
+            ));
+        }
+        Err(TryAcquireError::Closed) => return Ok(RequestResult::cancelled()),
+    };
+
+    let poll_interval = Duration::from_millis(poll_interval_ms);
+    let idle_timeout = Duration::from_millis(idle_timeout_ms);
+    let mut idle_since = Instant::now();
+    let mut last_version = request.after_version;
+    let mut sequence = 0_u64;
+
+    loop {
+        if cancellation.is_cancelled() {
+            return Ok(RequestResult::cancelled());
+        }
+
+        let graph = Arc::clone(&state.task_graph);
+        let version_result = run_state_call(&cancellation, move || graph.graph_version()).await?;
+        let current_version = match version_result {
+            None => return Ok(RequestResult::cancelled()),
+            Some(Ok(value)) => value,
+            Some(Err(error)) => return Ok(RequestResult::state_error(error)),
+        };
+        if last_version != Some(current_version) {
+            let graph = Arc::clone(&state.task_graph);
+            let snapshot_result = run_state_call(&cancellation, move || graph.snapshot()).await?;
+            let snapshot = match snapshot_result {
+                None => return Ok(RequestResult::cancelled()),
+                Some(Ok(value)) => value,
+                Some(Err(error)) => return Ok(RequestResult::state_error(error)),
+            };
+            if cancellation.is_cancelled() {
+                return Ok(RequestResult::cancelled());
+            }
+            let kind = match last_version {
+                None => "snapshot",
+                Some(previous)
+                    if snapshot.graph_version < previous
+                        || snapshot.graph_version > previous.saturating_add(1) =>
+                {
+                    "resync"
+                }
+                Some(_) => "changed",
+            };
+            write_server_message(
+                writer,
+                &ServerMessage::Stream {
+                    id: request_id.to_owned(),
+                    seq: sequence,
+                    data: json!({
+                        "schema_version": 1,
+                        "kind": kind,
+                        "graph_version": snapshot.graph_version,
+                        "snapshot": snapshot,
+                    }),
+                },
+            )
+            .await?;
+            sequence = sequence.saturating_add(1);
+            last_version = Some(snapshot.graph_version);
+            idle_since = Instant::now();
+        }
+
+        let elapsed = idle_since.elapsed();
+        if elapsed >= idle_timeout {
+            return Ok(RequestResult::ok(json!({
+                "reason": "idle_timeout",
+                "last_version": last_version.unwrap_or(current_version),
+            })));
+        }
+        let wait = poll_interval.min(idle_timeout.saturating_sub(elapsed));
+        tokio::select! {
+            _ = cancellation.cancelled() => return Ok(RequestResult::cancelled()),
+            _ = sleep(wait) => {}
         }
     }
 }
@@ -2329,6 +2488,7 @@ mod tests {
         let fingerprint = RequestFingerprint {
             method: "task_graph.update".into(),
             params: Some(json!({"task_id":"id"})),
+            stream: false,
         };
         let first = match RequestLease::begin(
             "id".into(),
@@ -2382,6 +2542,7 @@ mod tests {
         let fingerprint = RequestFingerprint {
             method: "sleep".into(),
             params: None,
+            stream: false,
         };
         let first = match RequestLease::begin(
             "first".into(),
@@ -2421,6 +2582,7 @@ mod tests {
                 RequestFingerprint {
                     method: "task_graph.route".into(),
                     params: Some(json!({"index": index})),
+                    stream: false,
                 },
                 &local_registry,
                 &global_registry,

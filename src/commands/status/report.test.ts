@@ -70,12 +70,31 @@ function fixture(): StatusReportData {
       },
     ],
     scheduler: {
+      workerCap: 64,
       activeWorkers: 3,
       queuedWorkers: 2,
       activeWeight: 12,
       queuedWeight: 6,
       budget: 32,
       availableWeight: 20,
+      credits: {
+        forecastBudget: 32,
+        hardStopAt: 64,
+        criticalReserve: 0,
+        workerCap: 64,
+        consumed: 5,
+        active: 3,
+        queued: 2,
+        estimatedActive: 12,
+        estimatedQueued: 6,
+        activeEstimated: 12,
+        queuedEstimated: 6,
+        available: 14,
+        committed: 23,
+        hardStopRemaining: 41,
+        forecastRemaining: 14,
+        stopped: false,
+      },
     },
     context: {
       effectiveWindow: 1_030_000,
@@ -127,6 +146,9 @@ describe("status HTML report", () => {
     expect(html).toContain("875,500 tokens");
     expect(html).toContain("Session credits");
     expect(html).toContain("Input credits");
+    expect(html).toContain("Credits policy");
+    expect(html).toContain("5 consumed · 23 committed");
+    expect(html).toContain("64 active");
   });
 
   test("renders bounded role, weighted task, error, and timeline telemetry", () => {

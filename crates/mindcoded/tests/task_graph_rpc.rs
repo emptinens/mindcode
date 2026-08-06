@@ -1,6 +1,6 @@
 use mindcoded::{
     protocol::{read_message, write_message, ClientMessage, ServerMessage, PROTOCOL_VERSION},
-    Daemon, DaemonConfig,
+    Daemon, DaemonConfig, MAX_TASK_GRAPH_WATCHERS,
 };
 use serde_json::{json, Value};
 use std::{path::Path, time::Duration};
@@ -44,6 +44,9 @@ async fn connect(path: &Path) -> UnixStream {
             assert!(capabilities
                 .iter()
                 .any(|capability| capability == "task_graph.list_dependents"));
+            assert!(capabilities
+                .iter()
+                .any(|capability| capability == "task_graph.watch"));
         }
         other => panic!("unexpected handshake response: {other:?}"),
     }
@@ -63,6 +66,20 @@ async fn rpc(stream: &mut UnixStream, id: &str, method: &str, params: Value) -> 
     .await
     .unwrap();
     read_message(stream).await.unwrap().unwrap()
+}
+
+async fn start_watch(stream: &mut UnixStream, id: &str, params: Value) {
+    write_message(
+        stream,
+        &ClientMessage::Request {
+            id: id.into(),
+            method: "task_graph.watch".into(),
+            params: Some(params),
+            stream: true,
+        },
+    )
+    .await
+    .unwrap();
 }
 
 async fn shutdown(stream: &mut UnixStream) {
@@ -631,5 +648,272 @@ async fn concurrent_claim_rpc_has_exactly_one_winner() {
     let mut shutdown = connect(&socket).await;
     let _ = ok_result(rpc(&mut shutdown, "shutdown", "shutdown", json!({})).await);
     drop(shutdown);
+    daemon.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn task_graph_watch_streams_initial_snapshot_and_times_out_when_idle() {
+    let directory = tempdir().unwrap();
+    let socket = directory.path().join("run/mindcoded.sock");
+    let daemon = tokio::spawn(
+        Daemon::new(DaemonConfig {
+            socket: socket.clone(),
+            state_dir: Some(directory.path().join("state")),
+            idle_seconds: Some(60),
+            handshake_timeout: Duration::from_secs(2),
+            build_id: "task-graph-watch-initial".into(),
+        })
+        .run(),
+    );
+    wait_for_socket(&socket).await;
+    let mut stream = connect(&socket).await;
+
+    assert_invalid_code(
+        rpc(
+            &mut stream,
+            "watch-without-stream",
+            "task_graph.watch",
+            json!({"poll_interval_ms":10,"idle_timeout_ms":100}),
+        )
+        .await,
+        "INVALID_PARAMS",
+    );
+
+    start_watch(
+        &mut stream,
+        "watch-initial",
+        json!({"poll_interval_ms":10,"idle_timeout_ms":100}),
+    )
+    .await;
+    let first = timeout(
+        Duration::from_secs(2),
+        read_message::<_, ServerMessage>(&mut stream),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    match first {
+        ServerMessage::Stream { id, seq, data } => {
+            assert_eq!(id, "watch-initial");
+            assert_eq!(seq, 0);
+            assert_eq!(data["schema_version"], 1);
+            assert_eq!(data["kind"], "snapshot");
+            assert_eq!(data["graph_version"], data["snapshot"]["graph_version"]);
+        }
+        other => panic!("expected initial watch chunk, got {other:?}"),
+    }
+    let completed = timeout(
+        Duration::from_secs(2),
+        read_message::<_, ServerMessage>(&mut stream),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    let terminal = ok_result(completed);
+    assert_eq!(terminal["reason"], "idle_timeout");
+    assert!(terminal["last_version"].is_u64());
+
+    shutdown(&mut stream).await;
+    daemon.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn task_graph_watch_reports_resync_change_and_cancellation() {
+    let directory = tempdir().unwrap();
+    let socket = directory.path().join("run/mindcoded.sock");
+    let daemon = tokio::spawn(
+        Daemon::new(DaemonConfig {
+            socket: socket.clone(),
+            state_dir: Some(directory.path().join("state")),
+            idle_seconds: Some(60),
+            handshake_timeout: Duration::from_secs(2),
+            build_id: "task-graph-watch-change".into(),
+        })
+        .run(),
+    );
+    wait_for_socket(&socket).await;
+    let mut mutator = connect(&socket).await;
+    for task_id in ["watch-a", "watch-b"] {
+        let _ = ok_result(
+            rpc(
+                &mut mutator,
+                &format!("route-{task_id}"),
+                "task_graph.route",
+                json!({"task":{"id":task_id,"files_touched":[format!("src/{task_id}.rs")]}}),
+            )
+            .await,
+        );
+    }
+
+    let mut resync = connect(&socket).await;
+    start_watch(
+        &mut resync,
+        "watch-resync",
+        json!({"after_version":0,"poll_interval_ms":10,"idle_timeout_ms":100}),
+    )
+    .await;
+    let resync_chunk = timeout(
+        Duration::from_secs(2),
+        read_message::<_, ServerMessage>(&mut resync),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    let resync_version = match resync_chunk {
+        ServerMessage::Stream { data, .. } => {
+            assert_eq!(data["kind"], "resync");
+            data["graph_version"].as_u64().unwrap()
+        }
+        other => panic!("expected resync chunk, got {other:?}"),
+    };
+    let _ = ok_result(
+        timeout(
+            Duration::from_secs(2),
+            read_message::<_, ServerMessage>(&mut resync),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap(),
+    );
+
+    let mut changed = connect(&socket).await;
+    start_watch(
+        &mut changed,
+        "watch-changed",
+        json!({
+            "after_version":resync_version,
+            "poll_interval_ms":10,
+            "idle_timeout_ms":5_000
+        }),
+    )
+    .await;
+    let _ = ok_result(
+        rpc(
+            &mut mutator,
+            "route-watch-c",
+            "task_graph.route",
+            json!({"task":{"id":"watch-c","files_touched":["src/watch-c.rs"]}}),
+        )
+        .await,
+    );
+    let changed_chunk = timeout(
+        Duration::from_secs(2),
+        read_message::<_, ServerMessage>(&mut changed),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    match changed_chunk {
+        ServerMessage::Stream { seq, data, .. } => {
+            assert_eq!(seq, 0);
+            assert_eq!(data["kind"], "changed");
+            assert_eq!(data["graph_version"], resync_version + 1);
+        }
+        other => panic!("expected changed chunk, got {other:?}"),
+    }
+
+    write_message(
+        &mut changed,
+        &ClientMessage::Cancel {
+            id: "watch-changed".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let mut saw_cancel_ack = false;
+    let mut saw_cancelled_terminal = false;
+    for _ in 0..2 {
+        let message = timeout(
+            Duration::from_secs(2),
+            read_message::<_, ServerMessage>(&mut changed),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        match message {
+            ServerMessage::Response {
+                ok: true,
+                result: Some(result),
+                ..
+            } if result["cancelled"] == true => saw_cancel_ack = true,
+            ServerMessage::Response {
+                ok: false,
+                error: Some(error),
+                ..
+            } if error.code == "cancelled" => saw_cancelled_terminal = true,
+            other => panic!("unexpected cancellation response: {other:?}"),
+        }
+    }
+    assert!(saw_cancel_ack);
+    assert!(saw_cancelled_terminal);
+
+    shutdown(&mut mutator).await;
+    daemon.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn task_graph_watch_rejects_connections_over_the_bounded_limit() {
+    let directory = tempdir().unwrap();
+    let socket = directory.path().join("run/mindcoded.sock");
+    let daemon = tokio::spawn(
+        Daemon::new(DaemonConfig {
+            socket: socket.clone(),
+            state_dir: Some(directory.path().join("state")),
+            idle_seconds: Some(60),
+            handshake_timeout: Duration::from_secs(2),
+            build_id: "task-graph-watch-limit".into(),
+        })
+        .run(),
+    );
+    wait_for_socket(&socket).await;
+
+    let mut watchers = Vec::new();
+    for index in 0..MAX_TASK_GRAPH_WATCHERS {
+        let mut stream = connect(&socket).await;
+        start_watch(
+            &mut stream,
+            &format!("watch-{index}"),
+            json!({"poll_interval_ms":50,"idle_timeout_ms":5_000}),
+        )
+        .await;
+        let first = timeout(
+            Duration::from_secs(2),
+            read_message::<_, ServerMessage>(&mut stream),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert!(matches!(first, ServerMessage::Stream { .. }));
+        watchers.push(stream);
+    }
+
+    let mut overflow = connect(&socket).await;
+    start_watch(
+        &mut overflow,
+        "watch-overflow",
+        json!({"poll_interval_ms":50,"idle_timeout_ms":5_000}),
+    )
+    .await;
+    let response = timeout(
+        Duration::from_secs(2),
+        read_message::<_, ServerMessage>(&mut overflow),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    assert_invalid_code(response, "watch_limit");
+
+    drop(watchers);
+    drop(overflow);
+    let mut control = connect(&socket).await;
+    shutdown(&mut control).await;
     daemon.await.unwrap().unwrap();
 }

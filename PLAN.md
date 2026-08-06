@@ -474,5 +474,15 @@ src/commands.ts
    только explicit MCP credentials и никогда не наследует `VEXZY_API_KEY`.
 6. `DONE`: model-native VEXZY catalog broker/cache, keyless daemon snapshots,
    background refresh и memory-only immutable request/prompt snapshots.
-7. `TODO`: streaming DAG, credits-first tuning и тёплый worker pool.
-8. `TODO`: Ratatui input/status/tasks migration и release performance gates.
+7. `DONE`: streaming DAG, credits-first tuning и тёплый worker pool.
+   `task_graph.watch` передаёт bounded snapshot/changed/resync stream; TS
+   coordinator восстанавливает authoritative DAG после reconnect и продолжает
+   уже validated работу без Leader. Scheduler учитывает predictive credits,
+   weighted budget и hard cap `64`. Low/medium направляются в bounded тёплый
+   in-process pool, а high/xhigh/max, overlap и explicit isolation — в холодный
+   изолированный runtime. Lifecycle освобождает lease по событиям abort/idle без
+   polling и возвращает usage-aware стоимость через `releaseWithCost`.
+8. `IN PROGRESS`: Ratatui input/status/tasks migration и release performance
+   gates. Зафиксирован отдельный Unix control socket с MessagePack, PTY только
+   для terminal stdin/stdout, TypeScript как единственный state authority,
+   `MINDCODE_NATIVE_TUI=auto|on|off` и Ink fallback на Windows/ошибках запуска.

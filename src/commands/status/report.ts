@@ -43,6 +43,7 @@ import {
   getSwarmConcurrencySnapshot,
   getSwarmWorkerWeight,
 } from "../../utils/swarm/concurrencyPolicy.js";
+import type { CreditsSnapshot } from "../../utils/swarm/creditsPolicy.js";
 
 const number = new Intl.NumberFormat("en-US");
 
@@ -107,12 +108,15 @@ export type StatusReportData = {
   linesRemoved: number;
   models: StatusReportModel[];
   scheduler: {
+    /** Maximum concurrently running workers; queued requests are separate. */
+    workerCap?: number;
     activeWorkers: number;
     queuedWorkers: number;
     activeWeight: number;
     queuedWeight: number;
     budget: number;
     availableWeight: number;
+    credits?: CreditsSnapshot;
   };
   context: {
     effectiveWindow: number | null;
@@ -429,6 +433,14 @@ function creditTransparencyRows(credits: CreditBreakdown): string {
     .join("");
 }
 
+function creditsPolicyRows(snapshot: CreditsSnapshot | undefined): string {
+  if (!snapshot) {
+    return '<tr><th>Credits policy</th><td colspan="3">unavailable</td></tr>';
+  }
+  const state = snapshot.stopped ? "hard-stop" : "admitting";
+  return `<tr><th>Credits policy</th><td>${escapeHtml(state)}</td><td>${escapeHtml(`${number.format(snapshot.consumed)} consumed · ${number.format(snapshot.committed)} committed`)}</td><td>${escapeHtml(`${number.format(snapshot.hardStopRemaining)} hard-stop headroom`)}</td></tr><tr><th>Credit reservations</th><td>${escapeHtml(`${number.format(snapshot.active)} active / ${number.format(snapshot.queued)} queued`)}</td><td>${escapeHtml(`${number.format(snapshot.estimatedActive)} active weight · ${number.format(snapshot.estimatedQueued)} queued weight`)}</td><td>${escapeHtml(`${number.format(snapshot.forecastRemaining)} forecast headroom`)}</td></tr>`;
+}
+
 export function renderStatusHtml(data: StatusReportData): string {
   const totalTokens =
     data.inputTokens +
@@ -505,7 +517,7 @@ export function renderStatusHtml(data: StatusReportData): string {
 <section class="panel"><h2>Credit calculation transparency</h2><table><thead><tr><th>Component</th><th>Tokens</th><th>Formula</th><th>Rate / 1M</th><th>Credits</th></tr></thead><tbody>${creditTransparencyRows(credits)}</tbody></table></section>
 <section class="panel"><h2>Per-model details</h2><table><thead><tr><th>Model</th><th>Requests</th><th>Output price / 1M</th><th>Input tokens</th><th>Output tokens</th><th>Cache read</th><th>Cache write</th><th>Reasoning</th><th>Input credits</th><th>Cache credits</th><th>Reasoning credits</th><th>Output credits</th><th>Total credits</th><th>Searches</th><th>Total tokens</th></tr></thead><tbody>${modelRows(data.models)}</tbody></table></section>
 <section class="panel"><h2>Leader vs Worker</h2><p>Role attribution is reported only when runtime counters provide it; model totals remain below.</p><table><thead><tr><th>Role</th><th>Requests</th><th>Input tokens</th><th>Output tokens</th><th>Reasoning tokens</th><th>Effort</th></tr></thead><tbody>${roleRows(data)}</tbody></table></section>
-<section class="panel"><h2>Runtime and context</h2><table><tbody>${contextRows(data.context)}<tr><th>API with retries</th><td>${escapeHtml(duration(data.apiDurationMs))}</td><th>API without retries</th><td>${escapeHtml(duration(data.apiDurationWithoutRetriesMs))}</td></tr><tr><th>Retry overhead</th><td>${escapeHtml(duration(retryOverhead))}</td><th>API utilization</th><td>${escapeHtml(`${apiUtilization}% of wall time`)}</td></tr><tr><th>Active worker weight</th><td>${escapeHtml(`${number.format(data.scheduler.activeWeight)} / ${number.format(data.scheduler.budget)}`)}</td><th>Queued worker weight</th><td>${escapeHtml(number.format(data.scheduler.queuedWeight))}</td></tr></tbody></table></section>
+<section class="panel"><h2>Runtime and context</h2><table><tbody>${contextRows(data.context)}<tr><th>API with retries</th><td>${escapeHtml(duration(data.apiDurationMs))}</td><th>API without retries</th><td>${escapeHtml(duration(data.apiDurationWithoutRetriesMs))}</td></tr><tr><th>Retry overhead</th><td>${escapeHtml(duration(retryOverhead))}</td><th>API utilization</th><td>${escapeHtml(`${apiUtilization}% of wall time`)}</td></tr><tr><th>Worker cap</th><td>${escapeHtml(data.scheduler.workerCap === undefined ? "unavailable" : `${number.format(data.scheduler.workerCap)} active`)}</td><th>Queue semantics</th><td>queued requests are not active workers</td></tr><tr><th>Active worker weight</th><td>${escapeHtml(`${number.format(data.scheduler.activeWeight)} / ${number.format(data.scheduler.budget)}`)}</td><th>Queued worker weight</th><td>${escapeHtml(number.format(data.scheduler.queuedWeight))}</td></tr>${creditsPolicyRows(data.scheduler.credits)}</tbody></table></section>
 <section class="panel"><h2>Task and lease observability</h2><table><thead><tr><th>Metric</th><th>Count</th><th>Weight / detail</th></tr></thead><tbody>${taskCountRows(taskMetrics)}<tr><th>Active leases</th><td>${escapeHtml(displayNumber(taskMetrics.activeLeases))}</td><td>persistent task leases</td></tr><tr><th>Runtime errors</th><td>${escapeHtml(displayNumber(errors.runtime))}</td><td>error log not exposed to status</td></tr><tr><th>Failed tasks</th><td>${escapeHtml(number.format(errors.taskFailures))}</td><td>task graph failures</td></tr><tr><th>Total errors</th><td>${escapeHtml(displayNumber(errors.total))}</td><td>unavailable unless role/runtime counters expose it</td></tr></tbody></table></section>
 <section class="panel"><h2>Task lifecycle / timeline</h2><table><thead><tr><th>Task</th><th>Status</th><th>Owner</th><th>Effort</th><th>Claimed</th><th>Started</th><th>Finished</th></tr></thead><tbody>${timelineRows(taskMetrics)}</tbody></table></section>
 <section class="panel"><h2>Compact thresholds and history</h2><table><thead><tr><th>Time</th><th>Event</th><th>Status</th></tr></thead><tbody>${compactHistoryRows(data.compactHistory)}</tbody></table></section>

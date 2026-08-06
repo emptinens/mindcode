@@ -20,19 +20,15 @@ import { quote } from '../../utils/bash/shellQuote.js'
 import { isInBundledMode } from '../../utils/bundledMode.js'
 import { getCwd } from '../../utils/cwd.js'
 import { logForDebugging } from '../../utils/debug.js'
-import { errorMessage } from '../../utils/errors.js'
 import { execFileNoThrow } from '../../utils/execFileNoThrow.js'
 import type { PermissionMode } from '../../utils/permissions/PermissionMode.js'
 import { isTmuxAvailable } from '../../utils/swarm/backends/detection.js'
 import {
   detectAndGetBackend,
   getBackendByType,
-  isInProcessEnabled,
-  markInProcessFallback,
   resetBackendDetection,
 } from '../../utils/swarm/backends/registry.js'
 import { createPaneBackendExecutor } from '../../utils/swarm/backends/PaneBackendExecutor.js'
-import { getTeammateModeFromSnapshot } from '../../utils/swarm/backends/teammateModeSnapshot.js'
 import {
   resolveWorkerRuntime,
   type BackendType,
@@ -77,6 +73,13 @@ import { registerTask } from '../../utils/task/framework.js'
 import { writeToMailbox } from '../../utils/teammateMailbox.js'
 import type { CustomAgentDefinition } from '../AgentTool/loadAgentsDir.js'
 import { isCustomAgent } from '../AgentTool/loadAgentsDir.js'
+import {
+  acquireInProcessWorker,
+  bindInProcessWorker,
+  decideInProcessWorkerSpawn,
+  isWarmInProcessDecision,
+  type InProcessWorkerLease,
+} from '../../runtime/workerPool/spawnRouting.js'
 
 /**
  * Resolve every Agent/teammate spawn to the configured VEXZY Worker model.
@@ -119,6 +122,11 @@ export type SpawnTeammateConfig = {
   model?: string
   /** Per-worker effort; omitted values resolve to medium, never Leader effort. */
   effort?: WorkerEffortInput
+  /** Explicit overlap/isolation signals from task validation. */
+  writeOverlap?: boolean
+  hasWriteOverlap?: boolean
+  overlap?: boolean
+  isolation?: 'shared' | 'isolated' | 'worktree'
   agent_type?: string
   description?: string
   /** request_id of the API call whose response contained the tool_use that
@@ -137,9 +145,95 @@ type SpawnInput = {
   plan_mode_required?: boolean
   model?: string
   effort?: WorkerEffortInput
+  writeOverlap?: boolean
+  hasWriteOverlap?: boolean
+  overlap?: boolean
+  isolation?: 'shared' | 'isolated' | 'worktree'
   agent_type?: string
   description?: string
   invokingRequestId?: string
+}
+
+function createWorkerPoolSpawnRequest(
+  input: SpawnInput,
+  workerRuntime: WorkerRuntime,
+) {
+  return {
+    projectId: input.cwd || getCwd(),
+    sessionId: String(getSessionId()),
+    model: workerRuntime.model,
+    effort: workerRuntime.effort,
+    writeOverlap: input.writeOverlap,
+    hasWriteOverlap: input.hasWriteOverlap,
+    overlap: input.overlap,
+    isolation: input.isolation,
+  } as const
+}
+
+function bindWorkerPoolLeaseToLifecycle(
+  taskId: string,
+  context: ToolUseContext,
+  lease: InProcessWorkerLease,
+  abortSignal: AbortSignal,
+): void {
+  let released = false
+  const release = () => {
+    if (released) return
+    released = true
+    abortSignal.removeEventListener('abort', onAbort)
+    void lease.release().catch(error => {
+      logForDebugging(
+        `[handleSpawnInProcess] WorkerPool reset failed for ${taskId}: ${String(error)}`,
+      )
+    })
+  }
+  const onAbort = () => release()
+  const lifecycleCallback = () => {
+    queueMicrotask(() => {
+      const task = context.getAppState().tasks[taskId]
+      if (!task || task.status !== 'running') {
+        release()
+        return
+      }
+
+      // The runner clears callbacks after each idle turn. Re-attach this
+      // lifecycle callback without polling; terminal completion invokes it
+      // again and the microtask sees the committed terminal state.
+      context.setAppState(prev => {
+        const current = prev.tasks[taskId]
+        if (!current || current.type !== 'in_process_teammate') return prev
+        return {
+          ...prev,
+          tasks: {
+            ...prev.tasks,
+            [taskId]: {
+              ...current,
+              onIdleCallbacks: [
+                ...(current.onIdleCallbacks ?? []),
+                lifecycleCallback,
+              ],
+            },
+          },
+        }
+      })
+    })
+  }
+
+  abortSignal.addEventListener('abort', onAbort, { once: true })
+  context.setAppState(prev => {
+    const task = prev.tasks[taskId]
+    if (!task || task.type !== 'in_process_teammate') return prev
+    return {
+      ...prev,
+      tasks: {
+        ...prev.tasks,
+        [taskId]: {
+          ...task,
+          onIdleCallbacks: [...(task.onIdleCallbacks ?? []), lifecycleCallback],
+        },
+      },
+    }
+  })
 }
 
 // ============================================================================
@@ -831,6 +925,10 @@ async function handleSpawnInProcess(
   input: SpawnInput,
   context: ToolUseContext,
   workerRuntime: WorkerRuntime,
+  warmDecision: Extract<
+    ReturnType<typeof decideInProcessWorkerSpawn>,
+    { kind: 'warm' }
+  >,
 ): Promise<{ data: SpawnOutput }> {
   const { setAppState, getAppState } = context
   const { name, prompt, agent_type, plan_mode_required } = input
@@ -887,9 +985,25 @@ async function handleSpawnInProcess(
     effort,
   }
 
-  const result = await spawnInProcessTeammate(config, context)
+  const poolRequest = createWorkerPoolSpawnRequest(input, workerRuntime)
+  if (!isWarmInProcessDecision(warmDecision)) {
+    throw new Error('WorkerPool route changed before in-process spawn')
+  }
+  // The pool is a warm routing/runtime boundary only. Scheduler authority is
+  // acquired later by spawnInProcessTeammate and remains the sole scheduler
+  // lease for this worker.
+  const warmWorkerLease = await acquireInProcessWorker(poolRequest)
+
+  let result: Awaited<ReturnType<typeof spawnInProcessTeammate>>
+  try {
+    result = await spawnInProcessTeammate(config, context)
+  } catch (error) {
+    await warmWorkerLease.release().catch(() => false)
+    throw error
+  }
 
   if (!result.success) {
+    await warmWorkerLease.release().catch(() => false)
     throw new Error(result.error ?? 'Failed to spawn in-process teammate')
   }
 
@@ -900,6 +1014,16 @@ async function handleSpawnInProcess(
 
   // Start the agent execution loop (fire-and-forget)
   if (result.taskId && result.teammateContext && result.abortController) {
+    bindInProcessWorker(warmWorkerLease, result.taskId, {
+      context: result.teammateContext,
+      tools: context.options.tools,
+    })
+    bindWorkerPoolLeaseToLifecycle(
+      result.taskId,
+      context,
+      warmWorkerLease,
+      result.abortController.signal,
+    )
     startInProcessTeammate({
       identity: {
         agentId: teammateId,
@@ -928,6 +1052,8 @@ async function handleSpawnInProcess(
     logForDebugging(
       `[handleSpawnInProcess] Started agent execution for ${teammateId}`,
     )
+  } else {
+    await warmWorkerLease.release().catch(() => false)
   }
 
   // Track the teammate in AppState's teamContext
@@ -1023,42 +1149,32 @@ async function handleSpawnInProcess(
 }
 
 /**
- * Handle spawn operation - creates a new MindCode instance.
- * Uses in-process mode when enabled, otherwise uses tmux/iTerm2 split-pane view.
- * Falls back to in-process if pane backend detection fails (e.g., iTerm2 without
- * it2 CLI or tmux installed).
+ * Handle spawn operation - routes eligible workers to the persistent in-process
+ * runtime and all expensive/conflicting workers to an isolated pane runtime.
+ * The WorkerPool performs no scheduler acquire/release; the existing backend
+ * lifecycle remains the only owner of scheduler leases.
  */
 async function handleSpawn(
   input: SpawnInput,
   context: ToolUseContext,
   workerRuntime: WorkerRuntime,
 ): Promise<{ data: SpawnOutput }> {
-  // Check if in-process mode is enabled via feature flag
-  if (isInProcessEnabled()) {
-    return handleSpawnInProcess(input, context, workerRuntime)
+  const workerDecision = decideInProcessWorkerSpawn(
+    createWorkerPoolSpawnRequest(input, workerRuntime),
+  )
+
+  if (isWarmInProcessDecision(workerDecision)) {
+    return handleSpawnInProcess(
+      input,
+      context,
+      workerRuntime,
+      workerDecision,
+    )
   }
 
-  // Pre-flight: ensure a pane backend is available before attempting pane-based spawn.
-  // This handles auto-mode cases like iTerm2 without it2 or tmux installed, where
-  // isInProcessEnabled() returns false but detectAndGetBackend() has no viable backend.
-  // Narrowly scoped so user cancellation and other spawn errors propagate normally.
-  try {
-    await detectAndGetBackend()
-  } catch (error) {
-    // Only fall back silently in auto mode. If the user explicitly configured
-    // teammateMode: 'tmux', let the error propagate so they see the actionable
-    // install instructions from getTmuxInstallInstructions().
-    if (getTeammateModeFromSnapshot() !== 'auto') {
-      throw error
-    }
-    logForDebugging(
-      `[handleSpawn] No pane backend available, falling back to in-process: ${errorMessage(error)}`,
-    )
-    // Record the fallback so isInProcessEnabled() reflects the actual mode
-    // (fixes banner and other UI that would otherwise show tmux attach commands).
-    markInProcessFallback()
-    return handleSpawnInProcess(input, context, workerRuntime)
-  }
+  // Cold routes must stay isolated. In particular, do not fall back to the
+  // persistent in-process lifecycle when no pane backend is available.
+  await detectAndGetBackend()
 
   // Backend is available (and now cached) - proceed with pane spawning.
   // Any errors here (user cancellation, validation, etc.) propagate to the caller.

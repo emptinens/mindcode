@@ -1,14 +1,14 @@
 import { spawn } from "node:child_process";
 import { access, mkdtemp, rm } from "node:fs/promises";
-import { createConnection, type Socket } from "node:net";
+import { type Socket, createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DaemonClient } from "../src/runtime/daemon/client.js";
 import {
   DAEMON_PROTOCOL_VERSION,
-  encodeFrame,
-  FrameDecoder,
   type DaemonWireMessage,
+  FrameDecoder,
+  encodeFrame,
 } from "../src/runtime/daemon/protocol.js";
 import { SessionIndexDaemonClient } from "../src/runtime/sessionIndex/client.js";
 import { TaskGraphDaemonClient } from "../src/runtime/taskGraph/client.js";
@@ -110,6 +110,40 @@ try {
   ) {
     throw new Error(
       `unexpected task graph response: ${JSON.stringify({ completed, snapshot })}`,
+    );
+  }
+
+  const watchEvents: Array<{ kind: string; graphVersion: number }> = [];
+  let resolveInitialWatch!: () => void;
+  const initialWatch = new Promise<void>((resolveWatch) => {
+    resolveInitialWatch = resolveWatch;
+  });
+  const watch = graph.watch(
+    { poll_interval_ms: 10, idle_timeout_ms: 200 },
+    (event) => {
+      watchEvents.push({
+        kind: event.kind,
+        graphVersion: event.graph_version,
+      });
+      if (watchEvents.length === 1) resolveInitialWatch();
+    },
+    { timeoutMs: 2_000 },
+  );
+  await initialWatch;
+  await graph.route({
+    id: "interop-watch-task",
+    effort: "low",
+    files_touched: ["src/interop-watch.ts"],
+  });
+  const watchResult = await watch;
+  if (
+    watchEvents[0]?.kind !== "snapshot" ||
+    !watchEvents.some((event) => event.kind === "changed") ||
+    watchResult.reason !== "idle_timeout" ||
+    watchResult.last_version !== watchEvents.at(-1)?.graphVersion
+  ) {
+    throw new Error(
+      `unexpected task graph watch response: ${JSON.stringify({ watchEvents, watchResult })}`,
     );
   }
 

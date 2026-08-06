@@ -368,6 +368,12 @@ export const AgentTool = buildTool({
     // reaches the root store so task registration/progress/kill stay visible.
     const rootSetAppState = toolUseContext.setAppStateForTasks ?? toolUseContext.setAppState;
 
+    // Agent tool arguments are model-authored. Only honor worktree isolation
+    // when the latest real user prompt explicitly requested it; skill payloads,
+    // tool results, compact summaries, and agent frontmatter cannot opt in.
+    const latestHumanPrompt = toolUseContext.agentId ? undefined : getLatestHumanPrompt(toolUseContext.messages);
+    const effectiveIsolation = resolveAgentIsolation(isolation, latestHumanPrompt, toolUseContext.agentId !== undefined);
+
     // Check if user is trying to use agent teams without access
     if (team_name && !isAgentSwarmsEnabled()) {
       throw new Error('Agent Teams is not yet available on your plan.');
@@ -406,6 +412,8 @@ export const AgentTool = buildTool({
         plan_mode_required: spawnMode === 'plan',
         model: workerModel,
         effort: resolvedWorkerEffort,
+        cwd,
+        isolation: effectiveIsolation === 'worktree' ? 'worktree' : 'shared',
         agent_type: subagent_type,
         invokingRequestId: assistantMessage?.requestId
       }, toolUseContext);
@@ -537,12 +545,6 @@ export const AgentTool = buildTool({
       is_async: (run_in_background === true || selectedAgent.background === true) && !isBackgroundTasksDisabled,
       is_fork: isForkPath
     });
-
-    // Agent tool arguments are model-authored. Only honor worktree isolation
-    // when the latest real user prompt explicitly requested it; skill payloads,
-    // tool results, compact summaries, and agent frontmatter cannot opt in.
-    const latestHumanPrompt = toolUseContext.agentId ? undefined : getLatestHumanPrompt(toolUseContext.messages);
-    const effectiveIsolation = resolveAgentIsolation(isolation, latestHumanPrompt, toolUseContext.agentId !== undefined);
 
     // System prompt + prompt messages: branch on fork path.
     //

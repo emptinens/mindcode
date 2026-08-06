@@ -33,6 +33,9 @@ import {
   type TaskGraphRequestOptions,
   type TaskGraphRouteParams,
   type TaskGraphRouteUpdateParams,
+  type TaskGraphWatchEvent,
+  type TaskGraphWatchParams,
+  type TaskGraphWatchResult,
   serializeNow,
   validateClaimResult,
   validateLeaseResult,
@@ -43,6 +46,8 @@ import {
   validateRouteResult,
   validateSnapshot,
   validateUpdateResult,
+  validateWatchChunk,
+  validateWatchResult,
 } from "./protocol.js";
 
 export type TaskGraphFallback<T> = () => T | Promise<T>;
@@ -219,6 +224,29 @@ export class TaskGraphDaemonClient {
     options?: TaskGraphRequestOptions,
   ): Promise<TaskGraphSnapshot> {
     return this.call("task_graph.snapshot", {}, validateSnapshot, options);
+  }
+
+  async watch(
+    params: TaskGraphWatchParams,
+    onEvent: (event: TaskGraphWatchEvent) => void | Promise<void>,
+    options: Omit<TaskGraphRequestOptions, "onChunk"> = {},
+  ): Promise<TaskGraphWatchResult> {
+    let eventChain = Promise.resolve();
+    const result = await this.call(
+      "task_graph.watch",
+      serializeWatchParams(params),
+      validateWatchResult,
+      {
+        ...options,
+        onChunk: (data, sequence) => {
+          const chunk = validateWatchChunk(data);
+          eventChain = eventChain.then(() => onEvent({ ...chunk, sequence }));
+          return eventChain;
+        },
+      },
+    );
+    await eventChain;
+    return result;
   }
 
   routeWithFallback(
@@ -663,4 +691,47 @@ function compact<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(
     Object.entries(value).filter(([, item]) => item !== undefined),
   ) as T;
+}
+
+function serializeWatchParams(
+  params: TaskGraphWatchParams,
+): TaskGraphWatchParams {
+  const afterVersion = optionalSafeInteger(
+    params.after_version,
+    "after_version",
+    0,
+    Number.MAX_SAFE_INTEGER,
+  );
+  const pollIntervalMs = optionalSafeInteger(
+    params.poll_interval_ms,
+    "poll_interval_ms",
+    10,
+    1_000,
+  );
+  const idleTimeoutMs = optionalSafeInteger(
+    params.idle_timeout_ms,
+    "idle_timeout_ms",
+    100,
+    120_000,
+  );
+  return compact({
+    after_version: afterVersion,
+    poll_interval_ms: pollIntervalMs,
+    idle_timeout_ms: idleTimeoutMs,
+  });
+}
+
+function optionalSafeInteger(
+  value: number | undefined,
+  name: string,
+  minimum: number,
+  maximum: number,
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new TypeError(
+      `${name} must be a safe integer between ${minimum} and ${maximum}`,
+    );
+  }
+  return value;
 }

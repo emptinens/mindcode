@@ -73,6 +73,30 @@ export type TaskGraphReleaseParams = {
   now?: string | Date;
 };
 
+export type TaskGraphWatchParams = {
+  after_version?: number;
+  poll_interval_ms?: number;
+  idle_timeout_ms?: number;
+};
+
+export type TaskGraphWatchKind = "snapshot" | "changed" | "resync";
+
+export type TaskGraphWatchChunk = {
+  schema_version: 1;
+  kind: TaskGraphWatchKind;
+  graph_version: number;
+  snapshot: TaskGraphSnapshot;
+};
+
+export type TaskGraphWatchEvent = TaskGraphWatchChunk & {
+  sequence: number;
+};
+
+export type TaskGraphWatchResult = {
+  reason: "idle_timeout";
+  last_version: number;
+};
+
 export type TaskGraphRouteParams = {
   task: RouteTaskInput;
   mode?: "block" | "reject";
@@ -185,6 +209,16 @@ function safeInteger(value: unknown, context: string): number {
   if (!Number.isSafeInteger(value))
     throw new TaskGraphProtocolError(`${context} must be a safe integer`);
   return value as number;
+}
+
+function nonNegativeSafeInteger(value: unknown, context: string): number {
+  const parsed = safeInteger(value, context);
+  if (parsed < 0) {
+    throw new TaskGraphProtocolError(
+      `${context} must be a non-negative safe integer`,
+    );
+  }
+  return parsed;
 }
 
 function booleanValue(value: unknown, context: string): boolean {
@@ -588,11 +622,11 @@ export function validateSnapshot(value: unknown): TaskGraphSnapshot {
   if (!Array.isArray(tasks))
     throw new TaskGraphProtocolError("snapshot.tasks must be an array");
   return {
-    version: safeInteger(
+    version: nonNegativeSafeInteger(
       required(object, "version", "snapshot"),
       "snapshot.version",
     ),
-    graph_version: safeInteger(
+    graph_version: nonNegativeSafeInteger(
       required(object, "graph_version", "snapshot"),
       "snapshot.graph_version",
     ),
@@ -602,6 +636,60 @@ export function validateSnapshot(value: unknown): TaskGraphSnapshot {
     ),
     tasks: tasks.map((task, index) =>
       validateTaskRecord(task, `snapshot.tasks[${index}]`),
+    ),
+  };
+}
+
+export function validateWatchChunk(value: unknown): TaskGraphWatchChunk {
+  const object = exact(
+    value,
+    ["schema_version", "kind", "graph_version", "snapshot"],
+    "watch chunk",
+  );
+  const schemaVersion = safeInteger(
+    required(object, "schema_version", "watch chunk"),
+    "watch chunk.schema_version",
+  );
+  if (schemaVersion !== 1) {
+    throw new TaskGraphProtocolError(
+      "watch chunk.schema_version is unsupported",
+    );
+  }
+  const graphVersion = nonNegativeSafeInteger(
+    required(object, "graph_version", "watch chunk"),
+    "watch chunk.graph_version",
+  );
+  const snapshot = validateSnapshot(
+    required(object, "snapshot", "watch chunk"),
+  );
+  if (graphVersion !== snapshot.graph_version) {
+    throw new TaskGraphProtocolError(
+      "watch chunk graph version does not match its snapshot",
+    );
+  }
+  return {
+    schema_version: 1,
+    kind: enumValue(
+      required(object, "kind", "watch chunk"),
+      ["snapshot", "changed", "resync"] as const,
+      "watch chunk.kind",
+    ),
+    graph_version: graphVersion,
+    snapshot,
+  };
+}
+
+export function validateWatchResult(value: unknown): TaskGraphWatchResult {
+  const object = exact(value, ["reason", "last_version"], "watch result");
+  return {
+    reason: enumValue(
+      required(object, "reason", "watch result"),
+      ["idle_timeout"] as const,
+      "watch result.reason",
+    ),
+    last_version: nonNegativeSafeInteger(
+      required(object, "last_version", "watch result"),
+      "watch result.last_version",
     ),
   };
 }
