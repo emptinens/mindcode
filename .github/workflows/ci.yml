@@ -41,6 +41,9 @@ jobs:
       - name: Source hygiene
         run: bun run sources:check
 
+      - name: Provider and report privacy contracts
+        run: bun test --isolate src/legacyProviderCleanup.test.ts src/commands/status/report.test.ts
+
       - name: Rust format, lint, and tests
         run: bun run check:rust
 
@@ -55,6 +58,9 @@ jobs:
 
       - name: Build host bundle and smoke test
         run: bun run build && bun run smoke && bun run test:native-packaging && bun run perf:native-tui
+
+      - name: Verify tracked tree is unchanged
+        run: git diff --exit-code
 
   native:
     name: ${{ matrix.name }}
