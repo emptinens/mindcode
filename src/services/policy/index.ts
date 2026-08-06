@@ -23,6 +23,7 @@ export {
   POLICY_SOURCE_DIGEST_SCHEMA,
   POLICY_DIGEST_ENV_VAR,
   PolicyEpochError,
+  assertWorkerPolicyIdentity,
   getCurrentPolicyEpochState,
   getPolicyEpochFromEnvironment,
   parseInheritedPolicyEpoch,
@@ -41,11 +42,21 @@ export type {
   PolicyEpochState,
   PolicyJailbreakLevel,
   PolicySourceSection,
+  WorkerPolicyIdentity,
   ResolvedPolicyEpoch,
 } from "./policyEpoch.js";
 export {
   getCompiledWorkerPolicySnapshot,
+  getWorkerPolicyIdentity,
   getWorkerPolicySourceDigest,
   getWorkerPolicySourceSections,
 } from "./workerPolicySource.js";
 export type { CompiledWorkerPolicySnapshot } from "./workerPolicySource.js";
+export {
+  compilePromptBoundary,
+  getCompiledCompactPolicySnapshot,
+  getCompiledLeaderPolicySnapshot,
+  getCompiledResumePolicySnapshot,
+  getCompiledWorkerPolicySnapshot as getCompiledWorkerPromptBoundary,
+} from "./promptBoundary.js";
+export type { CompiledPromptBoundarySnapshot } from "./promptBoundary.js";

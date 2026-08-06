@@ -65,10 +65,7 @@ import {
   type JailbreakLevel,
 } from '../utils/jailbreak.js'
 import { getPinnedMessages } from '../utils/pinnedMessages.js'
-import {
-  MINDCODE_LEADER_WORKER_ARCHITECTURE,
-  MINDCODE_WORKER_PROMPT,
-} from './prompts/mindcodeArchitecture.js'
+import { MINDCODE_WORKER_PROMPT } from './prompts/mindcodeArchitecture.js'
 import {
   getContentHandlingSection as getStaticContentHandlingSection,
   getInjectionHandlingSection as getStaticInjectionHandlingSection,
@@ -78,7 +75,10 @@ import {
   getWorkerPolicySourceDigest as getCanonicalWorkerPolicySourceDigest,
   type CompiledWorkerPolicySnapshot,
 } from '../services/policy/workerPolicySource.js'
+import { getCompiledLeaderPolicySnapshot } from '../services/policy/promptBoundary.js'
 export type { CompiledWorkerPolicySnapshot } from '../services/policy/workerPolicySource.js'
+
+
 
 // Dead code elimination: conditional imports for feature-gated modules
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -327,7 +327,7 @@ export function getAgentToolSection(): string {
 
   return `${forkGuidance}
 
-${MINDCODE_LEADER_WORKER_ARCHITECTURE}`
+${getCompiledLeaderPolicySnapshot().prompt}`
 }
 
 /**

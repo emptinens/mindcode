@@ -114,6 +114,7 @@ import {
 } from '../api/modelRuntime.js'
 import { notifyCompaction } from '../api/promptCacheBreakDetection.js'
 import { APIUserAbortError } from '../api/vexzy/errors.js'
+import { getCompiledCompactPolicySnapshot } from '../policy/promptBoundary.js'
 import { getRetryDelay } from '../api/withRetry.js'
 import { logPermissionContextForAnts } from '../internalLogging.js'
 import {
@@ -187,7 +188,6 @@ export function stripImagesFromMessages(messages: Message[]): Message[] {
     if (!Array.isArray(content)) {
       return message
     }
-
     let hasMediaBlock = false
     const newContent = content.flatMap(block => {
       if (block.type === 'image') {
@@ -1239,6 +1239,9 @@ async function streamCompactSummary({
   // Falls back to regular streaming path on failure.
   // 3P default: true — see comment at the other tengu_compact_cache_prefix read above.
   const compactModel = getCompactModel(context.options.mainLoopModel)
+  const compactSystemPrompt = getCompiledCompactPolicySnapshot(
+    'You are a helpful AI assistant tasked with summarizing conversations.',
+  )
   const promptCacheSharingEnabled = isCompactCacheSharingEnabled(
     context.options.mainLoopModel,
     compactModel,
@@ -1386,9 +1389,7 @@ async function streamCompactSummary({
           ),
           context.options.tools,
         ),
-        systemPrompt: asSystemPrompt([
-          'You are a helpful AI assistant tasked with summarizing conversations.',
-        ]),
+        systemPrompt: asSystemPrompt([compactSystemPrompt.prompt]),
         thinkingConfig: { type: 'disabled' as const },
         tools,
         signal: context.abortController.signal,
@@ -1535,7 +1536,6 @@ export async function createPostCompactFileAttachments(
       return attachment ? createAttachmentMessage(attachment) : null
     }),
   )
-
   let usedTokens = 0
   return results.filter((result): result is AttachmentMessage => {
     if (result === null) {

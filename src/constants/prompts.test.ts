@@ -38,7 +38,9 @@ describe("MindCode canonical prompts", () => {
 
   test("wires the bounded contract into Leader and Worker prompt entry points", () => {
     expect(PROMPTS_SOURCE).toContain("export function getAgentToolSection()");
-    expect(PROMPTS_SOURCE).toContain("MINDCODE_LEADER_WORKER_ARCHITECTURE");
+    expect(PROMPTS_SOURCE).toContain(
+      "getCompiledLeaderPolicySnapshot().prompt",
+    );
     expect(PROMPTS_SOURCE).toContain(
       "export const DEFAULT_AGENT_PROMPT = MINDCODE_WORKER_PROMPT",
     );

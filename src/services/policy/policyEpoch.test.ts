@@ -15,6 +15,7 @@ import {
   POLICY_EPOCH_ENV_VAR,
   POLICY_EPOCH_SCHEMA,
   PolicyEpochError,
+  assertWorkerPolicyIdentity,
   computePolicySourceDigest,
   getPolicyEpochFromEnvironment,
   parsePolicyEpochEnvironment,
@@ -48,6 +49,30 @@ afterEach(() => {
 });
 
 describe("policy epoch state", () => {
+  test("requires the complete Worker epoch and source digest pair", () => {
+    const identity = assertWorkerPolicyIdentity({
+      policyEpoch: 4,
+      policyDigest: "a".repeat(64),
+    })
+    expect(identity).toEqual({
+      policyEpoch: 4,
+      policyDigest: "a".repeat(64),
+    })
+    expect(Object.isFrozen(identity)).toBe(true)
+    expect(() => assertWorkerPolicyIdentity({ policyDigest: "a".repeat(64) })).toThrow(
+      "policy epoch must be a nonnegative safe integer",
+    )
+    expect(() => assertWorkerPolicyIdentity({ policyEpoch: 4 })).toThrow(
+      "policy source digest must be a lowercase SHA-256 digest",
+    )
+    expect(() =>
+      assertWorkerPolicyIdentity({
+        policyEpoch: 4,
+        policyDigest: "A".repeat(64),
+      }),
+    ).toThrow("policy source digest must be a lowercase SHA-256 digest")
+  })
+
   test("registers an immutable state and is idempotent for the same digest and level", () => {
     useIsolatedSession();
 
@@ -92,12 +117,28 @@ describe("policy epoch state", () => {
     const corrupt = '{"schema_version":"policy-epoch/1","epoch":-1}';
     writeFileSync(path, corrupt, { mode: 0o600 });
 
-    expect(readCurrentPolicyEpochState()).toBeUndefined();
+    expect(() => readCurrentPolicyEpochState()).toThrow(
+      "could not parse policy epoch state",
+    );
     expect(() => registerCompiledPolicyDigest("digest-a", "lowered")).toThrow(
       PolicyEpochError,
     );
     expect(readFileSync(path, "utf8")).toBe(corrupt);
     expect(parsePolicyEpochState({})).toBeUndefined();
+  });
+
+  test("treats an existing unreadable sidecar as a hard failure", () => {
+    const path = useIsolatedSession();
+    mkdirSync(join(path, ".."), { recursive: true, mode: 0o700 });
+    mkdirSync(path);
+
+    expect(() => readCurrentPolicyEpochState()).toThrow(PolicyEpochError);
+  });
+
+  test("returns no state only when the sidecar is absent", () => {
+    useIsolatedSession();
+
+    expect(readCurrentPolicyEpochState()).toBeUndefined();
   });
 
   test("fails closed for missing, partial, malformed, and unsafe inherited data", () => {

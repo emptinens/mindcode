@@ -34,6 +34,17 @@ export interface InheritedPolicyEpoch {
   readonly digest: string;
 }
 
+/**
+ * Immutable Worker policy identity captured at execution admission.  The
+ * epoch and source digest are a pair: accepting either value independently
+ * would allow a report from a different policy snapshot to cross the
+ * execution boundary.
+ */
+export interface WorkerPolicyIdentity {
+  readonly policyEpoch: number;
+  readonly policyDigest: string;
+}
+
 export interface PolicySourceSection {
   readonly id: string;
   readonly content: string;
@@ -54,6 +65,7 @@ const JAILBREAK_LEVELS: readonly PolicyJailbreakLevel[] = [
   "full",
 ];
 const MAX_DIGEST_LENGTH = 256;
+const POLICY_SOURCE_DIGEST_PATTERN = /^[a-f0-9]{64}$/;
 export const POLICY_SOURCE_DIGEST_SCHEMA = "policy-source/1" as const;
 const STATE_KEYS = [
   "schema_version",
@@ -76,6 +88,32 @@ function isDigest(value: unknown): value is string {
     value.length <= MAX_DIGEST_LENGTH &&
     /^[A-Za-z0-9._:-]+$/.test(value)
   );
+}
+
+/** Strict runtime validation for production Worker policy boundaries. */
+export function assertWorkerPolicyIdentity(
+  value: unknown,
+  boundary = "Worker",
+): WorkerPolicyIdentity {
+  if (!isRecord(value)) {
+    throw new PolicyEpochError(`${boundary} policy identity is required`);
+  }
+  const policyEpoch = value.policyEpoch;
+  const policyDigest = value.policyDigest;
+  if (!isEpoch(policyEpoch)) {
+    throw new PolicyEpochError(
+      `${boundary} policy epoch must be a nonnegative safe integer`,
+    );
+  }
+  if (
+    typeof policyDigest !== "string" ||
+    !POLICY_SOURCE_DIGEST_PATTERN.test(policyDigest)
+  ) {
+    throw new PolicyEpochError(
+      `${boundary} policy source digest must be a lowercase SHA-256 digest`,
+    );
+  }
+  return Object.freeze({ policyEpoch, policyDigest });
 }
 
 function isUpdatedAt(value: unknown): value is string {
@@ -209,11 +247,7 @@ function readStoredStateOrMissing(path: string): PolicyEpochState | undefined {
 
 /** Reads the current session state without replacing malformed or unreadable data. */
 export function readCurrentPolicyEpochState(): PolicyEpochState | undefined {
-  try {
-    return parseJsonState(readFileSync(statePath(), "utf8"));
-  } catch {
-    return undefined;
-  }
+  return readStoredStateOrMissing(statePath());
 }
 
 export const readPolicyEpochState = readCurrentPolicyEpochState;
