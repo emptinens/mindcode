@@ -3,7 +3,9 @@
 Дата аудита: `2026-08-06`
 Каталог проекта: `/Users/x32db/PROJECTS/mindcode`
 
-Документ является одновременно текущим baseline, зафиксированным контрактом и списком оставшихся работ. Формулировки `DONE`, `PARTIAL`, `TODO` и `BLOCKED` относятся к состоянию исходного дерева на дату аудита. Все последующие изменения должны обновлять этот файл в том же коммите, что и затронутый контракт.
+Документ является одновременно текущим baseline, зафиксированным контрактом и
+итоговым release-отчётом. Все последующие изменения должны обновлять этот файл
+в том же коммите, что и затронутый контракт.
 
 ## 1. Контракт handoff
 
@@ -51,7 +53,7 @@
 
 - `package.json` уже содержит `name: "mindcode"`, `version: "0.1.0"`, bin `mindcode` и Bun scripts.
 - `tsconfig.json` существует, содержит `strict: true`, `noEmit: true` и включает `src/**/*` и `scripts/**/*.ts`.
-- `bun run sources:check` проверяет `2030` исходных файлов; полный Bun test-run,
+- `bun run sources:check` проверяет `2048` исходных файлов; полный Bun test-run,
   coverage, build и smoke текущего прохода завершены успешно.
 - Команда `/copycon` существует и зарегистрирована в `src/commands.ts`.
 - `git remote -v` не выводит remote.
@@ -64,13 +66,13 @@
 
 | Проверка | Результат |
 |---|---|
-| Rust gates | PASS: `93` workspace tests + `9` native TUI tests; fmt, clippy `-D warnings` и locked manifest gates |
+| Rust gates | PASS: `99` workspace tests + `9` native TUI tests; fmt, clippy `-D warnings` и locked manifest gates |
 | Focused TS tests | PASS для TaskGraph/RPC, lifecycle, policy/report, compact и VEXZY limits |
-| Полный Bun test-run | `865 pass`, `4 skip`, `0 fail`, `159 files` |
-| Architectural coverage | `93.68%` (`10758/11484`), required `>=85%` across `41` allowlisted files |
+| Полный Bun test-run | `933 pass`, `4 skip`, `0 fail`, `170 files` |
+| Architectural coverage | `93.79%` (`10926/11650`), required `>=85%` across `41` allowlisted files |
 | `bun run typecheck` | PASS; baseline `4062` diagnostics |
 | `bun run lint` | PASS; baseline `7948` diagnostics |
-| `bun run sources:check` | `2030 files`, `0 trailers` |
+| `bun run sources:check` | `2048 files`, `0 trailers` |
 | Production build/smoke | PASS для `dist/mindcode.js`, native CLI и `mindcoded` sidecar |
 | Bundle legacy scan | PASS; targeted provider endpoints/credentials отсутствуют |
 | `git remote -v` | remote отсутствует |
@@ -154,12 +156,16 @@
 - `inProcessRunner.ts`: worker runtime resolves Luna before the loop;
 - worker completion and resolver tests.
 
-TODO:
+Завершено в финальном проходе:
 
-- удалить или переименовать legacy `model: sonnet|opus|haiku` input fields после миграционного периода; до этого поля должны оставаться compatibility-only и не документироваться как рабочий выбор;
-- сделать один общий runtime assertion для persistent teammate и AgentTool paths, чтобы новые spawn paths не обходили resolver.
+- публичные Worker ingress больше не принимают legacy model aliases; внутренние
+  `model` metadata формируются только из результата `resolveWorkerRuntime()`;
+- AgentTool, Workflow, fork/resume, background, in-process и pane routes
+  используют общий catalog-gated runtime assertion;
+- route integration tests проверяют fixed Luna, policy identity и отсутствие
+  наследования Leader model во всех backend paths.
 
-### 3.5 Worker effort — DONE на worker boundary, PARTIAL в общей UI-модели
+### 3.5 Worker effort — DONE
 
 Worker boundary использует только:
 
@@ -169,13 +175,12 @@ none | low | medium | high | xhigh | max
 
 `resolveWorkerEffort()` из `src/utils/swarm/backends/types.ts` нормализует неизвестное/отсутствующее значение в `medium`. `TaskGraph`, WorkerReport и worker tests используют тот же enum.
 
-В общей `src/utils/effort.ts` по-прежнему присутствуют provider-level `minimal`, `auto` и numeric compatibility values. Они допустимы только для Leader/provider UI и не должны достигать Worker scheduler или WorkerReport.
-
-TODO:
-
-- добавить compile/runtime test, который проверяет запрет `minimal`, `auto` и numeric effort на каждом worker ingress;
-- явно отобразить в `/effort` разделение Leader effort и Worker effort;
-- не преобразовывать Worker `max` в `high` или другое значение.
+В общей `src/utils/effort.ts` по-прежнему присутствуют provider-level `minimal`,
+`auto` и numeric compatibility values. Они допустимы только для Leader/provider
+UI. Worker ingress отклоняет их до scheduler/runtime/WorkerReport; `/effort`
+явно описан как Leader-only, а Worker `max` сохраняется без понижения. Прямые
+Workflow/AgentTool/backend tests покрывают default `medium`, все шесть значений
+и invalid Leader/provider values.
 
 ### 3.6 Weighted scheduler и budget — DONE
 
@@ -210,11 +215,11 @@ TODO:
 - immutable graph snapshot;
 - `src/tools/AgentTool/workerLifecycle.ts`: route → claim → weighted scheduler lease → running → complete/fail/release.
 
-TODO:
-
-- завершить единую интеграцию всех legacy task command paths с SQLite graph adapter;
-- покрыть multi-process SQLite contention и crash recovery отдельными integration tests;
-- запретить completion без соответствующего validated WorkerReport во всех persistent teammate paths, не только в AgentTool boundary.
+Финальный проход завершил persistent lifecycle: AgentTool, resume, in-process и
+pane backends используют daemon-backed graph boundary, policy epoch/digest и
+validated WorkerReport. Multi-process SQLite contention, abrupt-process lease
+recovery, concurrent claim и completion-without-report покрыты Rust/TypeScript
+integration tests.
 
 ### 3.8 WorkerReport и Leader context — DONE
 
@@ -271,7 +276,8 @@ Focused compact tests и полный Bun/coverage/build verification пройд
 - Status report показывает model usage, token/cache metrics, scheduler active/queued weights, budget и compact thresholds.
 - Sakura/MindCode report branding покрыт tests.
 
-TODO: проверить, что все новые report fields не сериализуют `VEXZY_API_KEY`, raw response body или абсолютные секретные пути.
+Privacy suite подтверждает, что report fields не сериализуют `VEXZY_API_KEY`,
+Bearer credentials, raw response body или абсолютные секретные пути.
 
 ### 3.12 Локальный Git — DONE как runtime constraint, bootstrap migration не нужна
 
@@ -316,8 +322,9 @@ Focused command/cleanup tests и полный Bun test/build прогон про
   enrich, stale-path removal, secret redaction и filesystem fallback;
 - Rust↔TypeScript interop проверяет полный SessionIndex lifecycle.
 
-Проверено: Rust — `83 pass`, Bun — `737 pass`, `4 skip`, focused native
-catalog/core-tools/MCP interop — `4 pass`, полный build/smoke — pass.
+Проверено финальным CI-equivalent проходом: Rust workspace — `99 pass`, native
+TUI — `9 pass`, Bun — `933 pass`, `4 skip`; daemon/TaskGraph/SessionIndex
+interop, build, smoke и native packaging — pass.
 
 ### 3.15 Model-native VEXZY broker и immutable request snapshots — DONE
 
@@ -335,22 +342,25 @@ catalog/core-tools/MCP interop — `4 pass`, полный build/smoke — pass.
   stream или tool responses;
 - cross-language digest и Rust↔TypeScript RPC покрыты реальным interop test.
 
-## 4. Оставшийся план реализации
+## 4. Итоговый статус реализации
 
-### Фаза A — закрыть contract gaps
+### Фаза A — contract gaps — DONE
 
-1. Свести все worker ingress к `resolveWorkerRuntime()` и закрыть обходы compile/runtime assertions.
-2. Завершить `policy_epoch` lifecycle и связать его с Worker policy snapshot.
-3. Зафиксировать exact output-limit policy: provider dynamic field first; exact overrides только для значений, подтверждённых handoff.
+1. Все worker ingress сведены к `resolveWorkerRuntime()` и закрыты runtime tests.
+2. `policy_epoch` и SHA-256 `policy_digest` проходят через task graph, Worker
+   run/report, daemon RPC, compact/resume; stale run/report отклоняются.
+3. Output-limit policy использует provider dynamic field first; exact overrides
+   остаются только подтверждённым fallback.
 
-### Фаза B — unified runtime boundaries
+### Фаза B — unified runtime boundaries — DONE
 
-1. Выделить VEXZY transport interface без provider-specific imports в domain modules.
-2. Выделить `LeaderModelResolver`, `WorkerModelResolver` и `WorkerEffortResolver` в отдельные public boundaries.
-3. Ввести pure `PromptCompiler` для Leader, Worker, compact и resume.
-4. Сделать task graph adapter единственным persistent task state path.
-5. Подключить validated WorkerReport к completion всех teammate backends.
-6. Добавить integration lifecycle test для AgentTool, fork, resume, in-process, tmux/iTerm и background.
+1. VEXZY transport interface не протаскивает provider-specific imports в domain modules.
+2. Leader/Worker model и Worker effort имеют отдельные public resolver boundaries.
+3. Pure `PromptCompiler` применяется к Leader, Worker, compact и resume.
+4. Daemon-backed task graph adapter является persistent task authority.
+5. Completion teammate backends требует validated WorkerReport.
+6. Integration lifecycle tests покрывают AgentTool, fork, resume, in-process,
+   tmux/iTerm и background routes.
 
 ### Фаза C — legacy cleanup — DONE
 
@@ -363,21 +373,20 @@ catalog/core-tools/MCP interop — `4 pass`, полный build/smoke — pass.
 5. Production bundle проверен на old endpoints, stale branding, home path и
    credentials.
 
-### Фаза D — quality gates
+### Фаза D — quality gates — DONE
 
-1. Сохранять passing baseline gates `bun run lint` и `bun run typecheck`.
-2. Постепенно свести baseline debt (`8167` lint, `4184` typecheck) к нулю, не
-   ослабляя strict-конфигурацию.
-3. После domain migration запускать focused tests, source check и smoke; перед
-   release — полный test/coverage/lint/typecheck/build pipeline.
-4. Integration/race tests для SQLite leases, scheduler, compact и VEXZY
-   retry/abort добавлены; расширять их при новых backend paths.
-5. Golden tests для model catalog, prompts, report schema и compact summary
-   остаются обязательными для изменения соответствующих контрактов.
-6. CI проверяет отсутствие regressions; remote и secret leakage остаются
-   отдельными release checks.
+1. `bun run lint`: PASS, неизменный baseline `7948` diagnostics,
+   `3ccd0394c1e70061ef7d442c62eb4e6dc55ab5b7fa86d369b32187948a1892f5`.
+2. `bun run typecheck`: PASS, неизменный baseline `4062` diagnostics,
+   `1f2d56b024b50063912c646c2e37206cfaf9378cce19ec8b12580c67eff595c2`.
+3. Full Bun tests, architectural coverage, source hygiene, Rust gates,
+   daemon interop, build/smoke, native packaging/TUI и performance gates — PASS.
+4. Integration/race tests покрывают SQLite leases/claim/recovery, scheduler,
+   compact и VEXZY retry/abort.
+5. Golden tests для catalog, prompts, report schema и compact summary пройдены.
+6. Локальный CI pipeline настроен; remote отсутствует, privacy checks пройдены.
 
-### Фаза E — release acceptance
+### Фаза E — release acceptance — PASS
 
 Release `0.1.0` считается готовым только при выполнении всех пунктов:
 
@@ -489,7 +498,7 @@ src/commands.ts
    и раннем завершении native process. Проверки: `58` native TS tests, `3` REPL
    integration tests, `9` Rust TUI tests, `4` target/layout packaging tests,
    native sidecar packaging smoke и реальный Rust TUI + TS control/session smoke.
-   Финальный performance gate (`20` запусков): input-ready p95 `401.85ms`
-   (`<500ms`), cold dispatch p95 `12.56ms` (`<100ms`), warm dispatch p95
-   `19.90ms` (`<50ms`). Полный Bun suite: `865 pass`, `4 skip`, `0 fail`;
-   architectural coverage с native TUI allowlist: `93.68%` (`10758/11484`).
+   Финальный performance gate (`20` запусков): input-ready p95 `151.59ms`
+   (`<500ms`), cold dispatch p95 `5.05ms` (`<100ms`), warm dispatch p95
+   `3.01ms` (`<50ms`). Полный Bun suite: `933 pass`, `4 skip`, `0 fail`;
+   architectural coverage с native TUI allowlist: `93.79%` (`10926/11650`).
