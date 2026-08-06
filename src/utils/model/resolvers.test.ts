@@ -19,6 +19,7 @@ const {
   FixedSubagentModelUnavailableError,
   InvalidWorkerEffortError,
   LeaderModelResolver,
+  LeaderModelUnavailableError,
   WorkerEffortResolver,
   WorkerModelResolver,
   WORKER_EFFORT_LEVELS,
@@ -66,17 +67,24 @@ afterEach(() => {
 })
 
 describe('public model and effort resolver boundaries', () => {
-  test('LeaderModelResolver selects the first available catalog model', async () => {
-    await loadCatalog(terra(), luna({ available: false }))
+  test('LeaderModelResolver selects an available catalog model, never Worker Luna', async () => {
+    await loadCatalog(luna(), terra())
     expect(new LeaderModelResolver().resolveDefaultModel()).toBe(
       'gpt-5.6-terra',
     )
   })
 
-  test('LeaderModelResolver falls back to the fixed model before catalog readiness', () => {
+  test('LeaderModelResolver fails closed before catalog readiness', () => {
     resetVexzyModelCatalog()
-    expect(new LeaderModelResolver().resolveDefaultModel()).toBe(
-      'gpt-5.6-luna',
+    expect(() => new LeaderModelResolver().resolveDefaultModel()).toThrow(
+      LeaderModelUnavailableError,
+    )
+  })
+
+  test('LeaderModelResolver fails closed when Luna is the only available model', async () => {
+    await loadCatalog(luna())
+    expect(() => new LeaderModelResolver().resolveDefaultModel()).toThrow(
+      /no available non-Worker model/,
     )
   })
 

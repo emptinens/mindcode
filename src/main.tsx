@@ -1523,6 +1523,11 @@ async function run(): Promise<CommanderCommand> {
       cacheSessionTitle(sessionNameArg);
     }
 
+    // Leader defaults are catalog-gated. Wait for the VEXZY registry before
+    // any caller can resolve the default, so startup never substitutes the
+    // fixed Worker model when the catalog is still loading or unavailable.
+    await fetchBootstrapData();
+
     // Special case the default model with the null keyword
     const requestedModel = options.model ?? process.env.MINDCODE_MODEL;
     const userSpecifiedModel = requestedModel === 'default' ? getDefaultMainLoopModel() : requestedModel;
@@ -1777,12 +1782,6 @@ async function run(): Promise<CommanderCommand> {
       logForDebugging('Graceful shutdown initiated, skipping further initialization');
       return;
     }
-
-    // The Vexzy catalog is required by model options and context resolution.
-    // Await it on every startup path, including --bare and throttled starts.
-    // The catalog client applies its request timeout; fetchBootstrapData logs
-    // catalog failures without rejecting startup.
-    await fetchBootstrapData();
 
     // Initialize LSP manager AFTER trust is established (or in non-interactive mode
     // where trust is implicit). This prevents plugin LSP servers from executing

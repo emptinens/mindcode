@@ -219,24 +219,10 @@ for item in items:
   (( ${#MENU_MODELS} > 0 ))
 }
 
-load_fallback_models() {
-  MENU_MODELS=(gpt-5.6-luna gpt-5.6-terra gpt-5.6-sol)
-  MENU_EFFORTS=(
-    'none,low,medium,high,xhigh,max'
-    'none,low,medium,high,xhigh,max'
-    'none,low,medium,high,xhigh,max'
-  )
-  MENU_DETAILS=(
-    'VEXZY GPT-5.6 Luna | fixed Worker model'
-    'VEXZY GPT-5.6 Terra | Leader candidate'
-    'VEXZY GPT-5.6 Sol | Leader candidate'
-  )
-}
-
 if (( menu_requested )); then
   if ! load_registry_models; then
-    print -u2 -- 'VEXZY model registry unavailable; using curated models.'
-    load_fallback_models
+    print -u2 -- 'VEXZY model registry unavailable; cannot select a Leader model.'
+    exit 1
   fi
 
   selected_model_index=0

@@ -31,6 +31,15 @@ export class FixedSubagentModelUnavailableError extends Error {
   }
 }
 
+export class LeaderModelUnavailableError extends Error {
+  readonly code = 'LEADER_MODEL_UNAVAILABLE'
+
+  constructor(reason: string) {
+    super(`Leader model is unavailable: ${reason}`)
+    this.name = 'LeaderModelUnavailableError'
+  }
+}
+
 export class InvalidWorkerEffortError extends Error {
   readonly code = 'INVALID_WORKER_EFFORT'
 
@@ -47,10 +56,23 @@ export class InvalidWorkerEffortError extends Error {
 /** Public Leader model boundary: catalog-backed, user-selectable model resolution. */
 export class LeaderModelResolver {
   resolveDefaultModel(): string {
-    const models = getVexzyModelCatalogState().registry?.models ?? []
-    return (
-      models.find(model => model.available)?.id ?? VEXZY_FIXED_WORKER_MODEL
+    const catalog = getVexzyModelCatalogState()
+    if (catalog.state !== 'ready' || catalog.registry === undefined) {
+      throw new LeaderModelUnavailableError(
+        `VEXZY model catalog is not ready (state: ${catalog.state})`,
+      )
+    }
+
+    const model = catalog.registry.models.find(
+      entry => entry.available && entry.id !== VEXZY_FIXED_WORKER_MODEL,
     )
+    if (model === undefined) {
+      throw new LeaderModelUnavailableError(
+        'catalog has no available non-Worker model',
+      )
+    }
+
+    return model.id
   }
 }
 
