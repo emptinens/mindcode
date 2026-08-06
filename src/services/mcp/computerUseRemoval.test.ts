@@ -46,7 +46,12 @@ describe('computer-use removal', () => {
       new URL('./client.ts', import.meta.url),
       'utf8',
     )
-    expect(client).toContain('new StdioClientTransport')
+    const adaptiveTransport = readFileSync(
+      new URL('./AdaptiveStdioTransport.ts', import.meta.url),
+      'utf8',
+    )
+    expect(client).toContain('new AdaptiveStdioTransport')
+    expect(adaptiveTransport).toContain('new StdioClientTransport')
     expect(client).toContain('fetchToolsForClient')
     expect(client).not.toContain(internalPackage)
     expect(client).not.toContain(internalFeature)

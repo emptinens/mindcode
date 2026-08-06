@@ -5,17 +5,18 @@ import {
   setCachedMindCodeMdContent,
 } from './bootstrap/state.js'
 import { getLocalISODate } from './constants/common.js'
-import {
-  filterInjectedMemoryFiles,
-  getMindCodeMds,
-  getMemoryFiles,
-} from './utils/mindcodemd.js'
+import { readGitStatusWithFallback } from './utils/coreToolsGit.js'
 import { logForDiagnosticsNoPII } from './utils/diagLogs.js'
 import { isBareMode, isEnvTruthy } from './utils/envUtils.js'
 import { execFileNoThrow } from './utils/execFileNoThrow.js'
 import { getBranch, getDefaultBranch, getIsGit, gitExe } from './utils/git.js'
 import { shouldIncludeGitInstructions } from './utils/gitSettings.js'
 import { logError } from './utils/log.js'
+import {
+  filterInjectedMemoryFiles,
+  getMemoryFiles,
+  getMindCodeMds,
+} from './utils/mindcodemd.js'
 
 const MAX_STATUS_CHARS = 2000
 
@@ -61,9 +62,7 @@ export const getGitStatus = memoize(async (): Promise<string | null> => {
     const [branch, mainBranch, status, log, userName] = await Promise.all([
       getBranch(),
       getDefaultBranch(),
-      execFileNoThrow(gitExe(), ['--no-optional-locks', 'status', '--short'], {
-        preserveOutputOnError: false,
-      }).then(({ stdout }) => stdout.trim()),
+      readGitStatusWithFallback(),
       execFileNoThrow(
         gitExe(),
         ['--no-optional-locks', 'log', '--oneline', '-n', '5'],

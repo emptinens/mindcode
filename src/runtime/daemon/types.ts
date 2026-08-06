@@ -33,6 +33,8 @@ export type DaemonRequestOptions = {
   signal?: AbortSignal;
   timeoutMs?: number;
   onChunk?: (data: unknown, sequence: number) => void | Promise<void>;
+  /** Called exactly once after the request frame is accepted by the socket. */
+  onDispatch?: () => void;
 };
 
 export type DaemonClientOptions = {

@@ -298,6 +298,12 @@ export class DaemonClient {
           ...(params === undefined ? {} : { params }),
           ...(options.onChunk ? { stream: true } : {}),
         });
+        try {
+          options.onDispatch?.();
+        } catch {
+          // Dispatch observers are lifecycle metadata only. The frame has
+          // already been accepted and must not be reported as unsent.
+        }
       } catch (error) {
         this.settlePending(id, error, undefined, connection.generation);
       }

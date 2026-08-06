@@ -1,4 +1,5 @@
 import { feature } from "bun:bundle";
+import type { Stream } from "node:stream";
 import type {
   Base64ImageSource,
   ContentBlockParam,
@@ -9,7 +10,6 @@ import {
   SSEClientTransport,
   type SSEClientTransportOptions,
 } from "@modelcontextprotocol/sdk/client/sse.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
   StreamableHTTPClientTransport,
   type StreamableHTTPClientTransportOptions,
@@ -90,7 +90,6 @@ import {
   getWebSocketProxyUrl,
 } from "../../utils/proxy.js";
 import { recursivelySanitizeUnicode } from "../../utils/sanitization.js";
-import { subprocessEnv } from "../../utils/subprocessEnv.js";
 import {
   isPersistError,
   persistToolResult,
@@ -128,7 +127,9 @@ import {
 } from "./auth.js";
 import { getAllMcpConfigs, isMcpServerDisabled } from "./config.js";
 import { getMcpServerHeaders } from "./headersHelper.js";
+import { AdaptiveStdioTransport } from "./AdaptiveStdioTransport.js";
 import { SdkControlClientTransport } from "./SdkControlTransport.js";
+import { getMcpSdkEnvironment } from "./stdioEnvironment.js";
 import type {
   ConnectedMCPServer,
   MCPServerConnection,
@@ -136,6 +137,12 @@ import type {
   ScopedMcpServerConfig,
   ServerResource,
 } from "./types.js";
+
+type StdioTransportCompatibility = Transport & {
+  readonly stderr?: Stream | null;
+  readonly pid?: number | null;
+  readonly ownsProcess?: boolean;
+};
 
 /**
  * Custom error class to indicate that an MCP tool call failed due to
@@ -522,7 +529,7 @@ export const connectToServer = memoize(
       | { connect(t: Transport): Promise<void>; close(): Promise<void> }
       | undefined;
     try {
-      let transport;
+      let transport: Transport;
 
       if (serverRef.type === "sse") {
         // Create an auth provider for this server
@@ -764,15 +771,16 @@ export const connectToServer = memoize(
         const finalArgs = process.env.MINDCODE_SHELL_PREFIX
           ? [[serverRef.command, ...serverRef.args].join(" ")]
           : serverRef.args;
-        transport = new StdioClientTransport({
-          command: finalCommand,
-          args: finalArgs,
-          env: {
-            ...subprocessEnv(),
-            ...serverRef.env,
-          } as Record<string, string>,
-          stderr: "pipe", // prevents error output from the MCP server from printing to the UI
-        });
+        transport = new AdaptiveStdioTransport(
+          {
+            command: finalCommand,
+            args: finalArgs,
+            ...(serverRef.env === undefined ? {} : { env: serverRef.env }),
+          },
+          {
+            sdkEnv: getMcpSdkEnvironment(serverRef.env),
+          },
+        );
       } else {
         throw new Error(`Unsupported server type: ${serverRef.type}`);
       }
@@ -783,7 +791,7 @@ export const connectToServer = memoize(
       let stderrHandler: ((data: Buffer) => void) | undefined;
       let stderrOutput = "";
       if (serverRef.type === "stdio" || !serverRef.type) {
-        const stdioTransport = transport as StdioClientTransport;
+        const stdioTransport = transport as StdioTransportCompatibility;
         if (stdioTransport.stderr) {
           stderrHandler = (data: Buffer) => {
             // Cap stderr accumulation to prevent unbounded memory growth
@@ -804,7 +812,7 @@ export const connectToServer = memoize(
           name: "mindcode",
           title: "MindCode",
           version: MACRO.VERSION ?? "unknown",
-          description: 'MindCode local agentic coding tool',
+          description: "MindCode local agentic coding tool",
           websiteUrl: PRODUCT_URL,
         },
         {
@@ -1133,10 +1141,7 @@ export const connectToServer = memoize(
 
         // For remote transports (SSE/HTTP), track terminal connection errors
         // and trigger reconnection via close if we see repeated failures.
-        if (
-          transportType === "sse" ||
-          transportType === "http"
-        ) {
+        if (transportType === "sse" || transportType === "http") {
           // The SDK's StreamableHTTP transport fires this after exhausting its
           // own SSE reconnect attempts (default maxRetries: 2) — but it never
           // calls onclose, so pending callTool() promises hang indefinitely.
@@ -1221,16 +1226,19 @@ export const connectToServer = memoize(
 
         // Remove stderr event listener to prevent memory leaks
         if (stderrHandler && (serverRef.type === "stdio" || !serverRef.type)) {
-          const stdioTransport = transport as StdioClientTransport;
+          const stdioTransport = transport as StdioTransportCompatibility;
           stdioTransport.stderr?.off("data", stderrHandler);
         }
 
         // For stdio transports, explicitly terminate the child process with proper signals
         // NOTE: StdioClientTransport.close() only sends an abort signal, but many MCP servers
         // (especially Docker containers) need explicit SIGINT/SIGTERM signals to trigger graceful shutdown
-        if (serverRef.type === "stdio") {
+        if (
+          (serverRef.type === "stdio" || !serverRef.type) &&
+          (transport as StdioTransportCompatibility).ownsProcess
+        ) {
           try {
-            const stdioTransport = transport as StdioClientTransport;
+            const stdioTransport = transport as StdioTransportCompatibility;
             const childPid = stdioTransport.pid;
 
             if (childPid) {
@@ -1241,7 +1249,6 @@ export const connectToServer = memoize(
                 process.kill(childPid, "SIGINT");
               } catch (error) {
                 logMCPDebug(name, `Error sending SIGINT: ${error}`);
-                return;
               }
 
               // Wait for graceful shutdown with rapid escalation (total 500ms to keep CLI responsive)
@@ -3082,7 +3089,7 @@ export async function setupSdkMcpClients(
           name: "mindcode",
           title: "MindCode",
           version: MACRO.VERSION ?? "unknown",
-          description: 'MindCode local agentic coding tool',
+          description: "MindCode local agentic coding tool",
           websiteUrl: PRODUCT_URL,
         },
         {

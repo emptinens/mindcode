@@ -1,10 +1,18 @@
 //! MindCode local daemon lifecycle and protocol service.
 
 mod instance;
+pub mod mcp_stdio;
 pub mod protocol;
 
 use anyhow::{bail, Context, Result};
 use instance::InstanceLock;
+use mcp_stdio::{
+    McpStdioConnectionState, McpStdioError, McpStdioErrorCode, McpStdioStatus, McpStdioSupervisor,
+};
+use mindcode_core_tools::{
+    git_diff, git_rev_parse, git_root, git_status, process_run, CoreToolError, GitDiffRequest,
+    GitRevParseRequest, GitRootRequest, GitStatusRequest, ProcessRunRequest,
+};
 use mindcode_state::{
     ClaimOptions, ConflictMode, ListOptions, SessionIndex, SessionIndexConfig, SessionListOptions,
     SessionRecord, SessionSearchOptions, StateError, TaskGraph, TaskGraphConfig, TaskInput,
@@ -69,6 +77,16 @@ const SERVER_CAPABILITIES: &[&str] = &[
     "session_index.list",
     "session_index.search",
     "session_index.remove",
+    "process.run",
+    "git.root",
+    "git.status",
+    "git.diff",
+    "git.rev_parse",
+    "mcp.stdio.open",
+    "mcp.stdio.send",
+    "mcp.stdio.receive",
+    "mcp.stdio.close",
+    "mcp.stdio.status",
 ];
 
 type SharedWriter = Arc<AsyncMutex<OwnedWriteHalf>>;
@@ -144,6 +162,7 @@ struct DaemonState {
     config: DaemonConfig,
     task_graph: Arc<TaskGraph>,
     session_index: Arc<SessionIndex>,
+    mcp_stdio: Arc<McpStdioSupervisor>,
     request_ledger: Arc<Mutex<RequestLedger>>,
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
@@ -208,6 +227,7 @@ impl Daemon {
             state: Arc::new(DaemonState {
                 task_graph: Arc::new(TaskGraph::new(task_graph_config)),
                 session_index: Arc::new(SessionIndex::new(session_index_config)),
+                mcp_stdio: Arc::new(McpStdioSupervisor::new()),
                 request_ledger: Arc::new(Mutex::new(RequestLedger::default())),
                 config,
                 metrics: Arc::new(Metrics::default()),
@@ -326,6 +346,12 @@ impl Daemon {
             if let Err(error) = result {
                 eprintln!("mindcoded connection task failed during shutdown: {error}");
             }
+        }
+        if let Err(error) = self.state.mcp_stdio.close_all().await {
+            eprintln!(
+                "mindcoded MCP stdio shutdown failed: {}",
+                error.stable_code()
+            );
         }
         drop(listener);
         if runtime_directory_unchanged(parent, runtime_identity) {
@@ -916,6 +942,14 @@ impl RequestResult {
         }
     }
 
+    fn core_tool_error(error: CoreToolError) -> Self {
+        Self::error(&error.code.to_string(), error.message)
+    }
+
+    fn mcp_stdio_error(error: McpStdioError) -> Self {
+        Self::error(error.stable_code(), error.to_string())
+    }
+
     fn invalid_params(message: impl Into<String>) -> Self {
         Self::error("INVALID_PARAMS", message)
     }
@@ -1006,6 +1040,84 @@ struct RecoverParams {
 #[serde(deny_unknown_fields)]
 struct SessionIdParams {
     session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpStdioOpenParams {
+    connection_id: String,
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    cwd: PathBuf,
+    #[serde(default)]
+    env: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpStdioSendParams {
+    connection_id: String,
+    message: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpStdioReceiveParams {
+    connection_id: String,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpStdioConnectionParams {
+    connection_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpStdioStatusParams {
+    connection_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct McpStdioRpcStatus {
+    connection_id: String,
+    pid: u32,
+    state: &'static str,
+    queued_messages: usize,
+    queued_bytes: usize,
+    stderr_bytes: usize,
+}
+
+fn mcp_stdio_rpc_status(
+    status: McpStdioStatus,
+) -> std::result::Result<McpStdioRpcStatus, RequestResult> {
+    let Some(pid) = status.pid else {
+        return Err(RequestResult::error(
+            "invalid_process_state",
+            "MCP stdio process has no pid",
+        ));
+    };
+    if pid > i32::MAX as u32 {
+        return Err(RequestResult::error(
+            "invalid_process_state",
+            "MCP stdio pid exceeds the protocol bound",
+        ));
+    }
+    let state = match status.state {
+        McpStdioConnectionState::Running => "running",
+        McpStdioConnectionState::Terminal => "failed",
+        McpStdioConnectionState::Closed => "closed",
+    };
+    Ok(McpStdioRpcStatus {
+        connection_id: status.connection_id,
+        pid,
+        state,
+        queued_messages: status.queued_messages,
+        queued_bytes: status.queued_bytes,
+        stderr_bytes: status.stderr_bytes,
+    })
 }
 
 fn deserialize_optional_string<'de, D>(
@@ -1121,6 +1233,175 @@ async fn execute_request(
             }
         }
         "shutdown" => Ok(RequestResult::shutdown(json!({ "accepted": true }))),
+        "process.run" => {
+            let request = match parse_params::<ProcessRunRequest>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            match process_run(request, cancellation).await {
+                Ok(value) => RequestResult::serialized(value),
+                Err(error) => Ok(RequestResult::core_tool_error(error)),
+            }
+        }
+        "git.root" => {
+            let request = match parse_params::<GitRootRequest>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            match git_root(request, cancellation).await {
+                Ok(value) => RequestResult::serialized(value),
+                Err(error) => Ok(RequestResult::core_tool_error(error)),
+            }
+        }
+        "git.status" => {
+            let request = match parse_params::<GitStatusRequest>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            match git_status(request, cancellation).await {
+                Ok(value) => RequestResult::serialized(value),
+                Err(error) => Ok(RequestResult::core_tool_error(error)),
+            }
+        }
+        "git.diff" => {
+            let request = match parse_params::<GitDiffRequest>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            match git_diff(request, cancellation).await {
+                Ok(value) => RequestResult::serialized(value),
+                Err(error) => Ok(RequestResult::core_tool_error(error)),
+            }
+        }
+        "git.rev_parse" => {
+            let request = match parse_params::<GitRevParseRequest>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            match git_rev_parse(request, cancellation).await {
+                Ok(value) => RequestResult::serialized(value),
+                Err(error) => Ok(RequestResult::core_tool_error(error)),
+            }
+        }
+        "mcp.stdio.open" => {
+            let request = match parse_params::<McpStdioOpenParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let supervisor = Arc::clone(&state.mcp_stdio);
+            match supervisor
+                .open_with_cancellation(
+                    request.connection_id,
+                    request.command,
+                    request.args,
+                    request.cwd,
+                    request.env,
+                    &cancellation,
+                )
+                .await
+            {
+                Ok(status) => match mcp_stdio_rpc_status(status) {
+                    Ok(status) => RequestResult::serialized(json!({
+                        "connection_id": status.connection_id,
+                        "pid": status.pid,
+                    })),
+                    Err(error) => Ok(error),
+                },
+                Err(error) => Ok(RequestResult::mcp_stdio_error(error)),
+            }
+        }
+        "mcp.stdio.send" => {
+            let request = match parse_params::<McpStdioSendParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            match state
+                .mcp_stdio
+                .send_with_cancellation(&request.connection_id, request.message, &cancellation)
+                .await
+            {
+                Ok(()) => Ok(RequestResult::ok(json!({ "accepted": true }))),
+                Err(error) => Ok(RequestResult::mcp_stdio_error(error)),
+            }
+        }
+        "mcp.stdio.receive" => {
+            let request = match parse_params::<McpStdioReceiveParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let timeout_ms = request.timeout_ms.unwrap_or(30_000);
+            if !(1..=120_000).contains(&timeout_ms) {
+                return Ok(RequestResult::invalid_params(
+                    "timeout_ms must be between 1 and 120000",
+                ));
+            }
+            match state
+                .mcp_stdio
+                .receive_with_cancellation(
+                    &request.connection_id,
+                    &cancellation,
+                    Some(Duration::from_millis(timeout_ms)),
+                )
+                .await
+            {
+                Ok(message) => Ok(RequestResult::ok(json!({
+                    "message": message,
+                    "closed": false,
+                }))),
+                Err(error) if error.code() == McpStdioErrorCode::Timeout => Ok(RequestResult::ok(
+                    json!({ "message": null, "closed": false }),
+                )),
+                Err(error)
+                    if matches!(
+                        error.code(),
+                        McpStdioErrorCode::Closed
+                            | McpStdioErrorCode::ChildExited
+                            | McpStdioErrorCode::NotFound
+                    ) =>
+                {
+                    Ok(RequestResult::ok(json!({
+                        "message": null,
+                        "closed": true,
+                    })))
+                }
+                Err(error) if error.code() == McpStdioErrorCode::Cancelled => {
+                    Ok(RequestResult::cancelled())
+                }
+                Err(error) => Ok(RequestResult::mcp_stdio_error(error)),
+            }
+        }
+        "mcp.stdio.close" => {
+            let request = match parse_params::<McpStdioConnectionParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            match state.mcp_stdio.close(&request.connection_id).await {
+                Ok(()) => Ok(RequestResult::ok(json!({ "closed": true }))),
+                Err(error) => Ok(RequestResult::mcp_stdio_error(error)),
+            }
+        }
+        "mcp.stdio.status" => {
+            let request = match parse_params::<McpStdioStatusParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let statuses = if let Some(connection_id) = request.connection_id {
+                match state.mcp_stdio.status(&connection_id) {
+                    Ok(status) => vec![status],
+                    Err(error) => return Ok(RequestResult::mcp_stdio_error(error)),
+                }
+            } else {
+                state.mcp_stdio.list()
+            };
+            let mut result = Vec::with_capacity(statuses.len());
+            for status in statuses {
+                match mcp_stdio_rpc_status(status) {
+                    Ok(status) => result.push(status),
+                    Err(error) => return Ok(error),
+                }
+            }
+            RequestResult::serialized(json!({ "connections": result }))
+        }
         "session_index.upsert" => {
             let record = match parse_params::<SessionRecord>(params) {
                 Ok(value) => value,
@@ -1418,7 +1699,8 @@ fn cancel_all_requests(registry: &Arc<Mutex<ConnectionRegistry>>) {
 fn is_mutation_method(method: &str) -> bool {
     matches!(
         method,
-        "task_graph.route"
+        "process.run"
+            | "task_graph.route"
             | "task_graph.claim"
             | "task_graph.update"
             | "task_graph.renew_lease"
@@ -1426,6 +1708,9 @@ fn is_mutation_method(method: &str) -> bool {
             | "task_graph.recover"
             | "session_index.upsert"
             | "session_index.remove"
+            | "mcp.stdio.open"
+            | "mcp.stdio.send"
+            | "mcp.stdio.close"
     )
 }
 
@@ -2107,6 +2392,238 @@ mod tests {
         assert!(ledger.completed_bytes <= MAX_COMPLETED_MUTATION_REPLAY_BYTES);
         assert!(ledger.completed_order.len() < 200);
         assert!(ledger.completed_order.len() <= MAX_COMPLETED_MUTATION_REPLAYS);
+    }
+
+    #[test]
+    fn process_run_is_replay_protected_as_a_mutation() {
+        assert!(is_mutation_method("process.run"));
+        assert!(!is_mutation_method("git.status"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn core_tools_rpc_runs_process_and_reads_git_state() {
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&project)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(project.join("tracked.txt"), "one\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-qm", "initial"]);
+        std::fs::write(project.join("tracked.txt"), "two\n").unwrap();
+        std::fs::write(project.join("new.txt"), "new\n").unwrap();
+        let canonical_project = std::fs::canonicalize(&project).unwrap();
+
+        let path = dir.path().join("run/mindcoded.sock");
+        let task = tokio::spawn(Daemon::new(test_config(path.clone())).run());
+        wait_for_socket(&path).await;
+        let mut stream = connect_and_handshake(&path).await;
+
+        let process = request(
+            &mut stream,
+            "process",
+            "process.run",
+            Some(json!({
+                "argv": ["sh", "-c", "printf out; printf err >&2"],
+                "cwd": project,
+                "timeout_ms": 2_000,
+                "max_output_bytes": 4_096
+            })),
+        )
+        .await;
+        assert!(matches!(
+            process,
+            ServerMessage::Response { ok: true, result: Some(result), .. }
+                if result["stdout"] == "out" && result["stderr"] == "err"
+        ));
+
+        let root = request(
+            &mut stream,
+            "root",
+            "git.root",
+            Some(json!({ "cwd": project })),
+        )
+        .await;
+        assert!(matches!(
+            root,
+            ServerMessage::Response { ok: true, result: Some(result), .. }
+                if result["root"] == canonical_project.to_string_lossy().as_ref()
+        ));
+
+        let status = request(
+            &mut stream,
+            "status",
+            "git.status",
+            Some(json!({ "cwd": project, "include_untracked": true })),
+        )
+        .await;
+        assert!(matches!(
+            status,
+            ServerMessage::Response { ok: true, result: Some(result), .. }
+                if result["unstaged"] == json!(["tracked.txt"])
+                    && result["untracked"] == json!(["new.txt"])
+        ));
+
+        let diff = request(
+            &mut stream,
+            "diff",
+            "git.diff",
+            Some(json!({ "cwd": project })),
+        )
+        .await;
+        assert!(matches!(
+            diff,
+            ServerMessage::Response { ok: true, result: Some(result), .. }
+                if result["patch"].as_str().is_some_and(|patch| patch.contains("-one"))
+        ));
+
+        let revision = request(
+            &mut stream,
+            "revision",
+            "git.rev_parse",
+            Some(json!({ "cwd": project, "revision": "HEAD" })),
+        )
+        .await;
+        assert!(matches!(
+            revision,
+            ServerMessage::Response { ok: true, result: Some(result), .. }
+                if result["value"].as_str().is_some_and(|value| value.len() == 40)
+        ));
+
+        shutdown(&mut stream).await;
+        drop(stream);
+        task.await.unwrap().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mcp_stdio_rpc_round_trips_and_closes_idempotently() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let echo_server = dir.path().join("echo-mcp.sh");
+        std::fs::write(
+            &echo_server,
+            "#!/bin/sh\nwhile IFS= read -r line; do printf '%s\\n' \"$line\"; done\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&echo_server).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&echo_server, permissions).unwrap();
+
+        let path = dir.path().join("run/mindcoded.sock");
+        let task = tokio::spawn(Daemon::new(test_config(path.clone())).run());
+        wait_for_socket(&path).await;
+        let mut stream = connect_and_handshake(&path).await;
+
+        let opened = request(
+            &mut stream,
+            "mcp-open",
+            "mcp.stdio.open",
+            Some(json!({
+                "connection_id": "rpc-1",
+                "command": echo_server,
+                "args": [],
+                "cwd": dir.path(),
+                "env": {},
+            })),
+        )
+        .await;
+        assert!(matches!(
+            opened,
+            ServerMessage::Response { ok: true, result: Some(result), .. }
+                if result["connection_id"] == "rpc-1"
+                    && result["pid"].as_u64().is_some_and(|pid| pid > 0)
+        ));
+
+        let message = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "ping",
+            "params": { "value": "hello" },
+        });
+        let sent = request(
+            &mut stream,
+            "mcp-send",
+            "mcp.stdio.send",
+            Some(json!({ "connection_id": "rpc-1", "message": message })),
+        )
+        .await;
+        assert!(matches!(
+            sent,
+            ServerMessage::Response { ok: true, result: Some(result), .. }
+                if result["accepted"] == true
+        ));
+
+        let received = request(
+            &mut stream,
+            "mcp-receive",
+            "mcp.stdio.receive",
+            Some(json!({ "connection_id": "rpc-1", "timeout_ms": 2_000 })),
+        )
+        .await;
+        assert!(matches!(
+            received,
+            ServerMessage::Response { ok: true, result: Some(result), .. }
+                if result["message"] == message && result["closed"] == false
+        ));
+
+        let status = request(
+            &mut stream,
+            "mcp-status",
+            "mcp.stdio.status",
+            Some(json!({ "connection_id": "rpc-1" })),
+        )
+        .await;
+        assert!(matches!(
+            status,
+            ServerMessage::Response { ok: true, result: Some(result), .. }
+                if result["connections"].as_array().is_some_and(|items| {
+                    items.len() == 1 && items[0]["state"] == "running"
+                })
+        ));
+
+        for request_id in ["mcp-close", "mcp-close-again"] {
+            let closed = request(
+                &mut stream,
+                request_id,
+                "mcp.stdio.close",
+                Some(json!({ "connection_id": "rpc-1" })),
+            )
+            .await;
+            assert!(matches!(
+                closed,
+                ServerMessage::Response { ok: true, result: Some(result), .. }
+                    if result["closed"] == true
+            ));
+        }
+
+        let after_close = request(
+            &mut stream,
+            "mcp-after-close",
+            "mcp.stdio.receive",
+            Some(json!({ "connection_id": "rpc-1", "timeout_ms": 10 })),
+        )
+        .await;
+        assert!(matches!(
+            after_close,
+            ServerMessage::Response { ok: true, result: Some(result), .. }
+                if result["message"].is_null() && result["closed"] == true
+        ));
+
+        shutdown(&mut stream).await;
+        drop(stream);
+        task.await.unwrap().unwrap();
     }
 
     #[test]

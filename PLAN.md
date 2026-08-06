@@ -51,7 +51,7 @@
 
 - `package.json` уже содержит `name: "mindcode"`, `version: "0.1.0"`, bin `mindcode` и Bun scripts.
 - `tsconfig.json` существует, содержит `strict: true`, `noEmit: true` и включает `src/**/*` и `scripts/**/*.ts`.
-- `bun run sources:check` проверяет `1948` исходных файлов; полный Bun test-run,
+- `bun run sources:check` проверяет `1979` исходных файлов; полный Bun test-run,
   coverage, build и smoke текущего прохода завершены успешно.
 - Команда `/copycon` существует и зарегистрирована в `src/commands.ts`.
 - `git remote -v` не выводит remote.
@@ -64,9 +64,9 @@
 
 | Проверка | Результат |
 |---|---|
-| Rust gates | PASS: `48` tests; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --all-targets` |
+| Rust gates | PASS: `76` tests; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --all-targets` |
 | Focused TS tests | PASS для TaskGraph/RPC, lifecycle, policy/report, compact и VEXZY limits |
-| Полный Bun test-run | `670 pass`, `0 fail`, `128 files` |
+| Полный Bun test-run | `715 pass`, `3 skip`, `0 fail`, `138 files` |
 | Architectural coverage | `93.41%` (`8069/8638`), required `>=85%` |
 | `bun run typecheck` | PASS; baseline `4062` diagnostics |
 | `bun run lint` | PASS; baseline `7949` diagnostics |
@@ -316,8 +316,8 @@ Focused command/cleanup tests и полный Bun test/build прогон про
   enrich, stale-path removal, secret redaction и filesystem fallback;
 - Rust↔TypeScript interop проверяет полный SessionIndex lifecycle.
 
-Проверено: Rust — `48 pass`, Bun — `670 pass`, focused SessionIndex/bridge —
-`17 pass`, полный build/smoke и native interop — pass.
+Проверено: Rust — `76 pass`, Bun — `715 pass`, `3 skip`, focused native
+core-tools/MCP interop — `3 pass`, полный build/smoke — pass.
 
 ## 4. Оставшийся план реализации
 
@@ -452,8 +452,10 @@ src/commands.ts
    daemon/manager/path tests, `10` packaging tests и native handshake smoke.
 4. `DONE`: Rust TaskGraph/session SQLite RPC, `mindcode-state`, daemon RPC,
    TS client/authority pinning и worker lifecycle migration.
-5. `PARTIAL`: Rust session index, TS client, sessionStorage bridge и interop —
-   `DONE`; core tools (Git/process/MCP) — `TODO`.
+5. `DONE`: Rust session index, TS client, sessionStorage bridge, native
+   core tools (Git/process), adaptive MCP stdio transport и interop. Rust
+   authority pinning исключает fallback после dispatch; SDK fallback получает
+   только explicit MCP credentials и никогда не наследует `VEXZY_API_KEY`.
 6. `TODO`: model-native VEXZY proxy/cache и immutable prompt snapshots.
 7. `TODO`: streaming DAG, credits-first tuning и тёплый worker pool.
 8. `TODO`: Ratatui input/status/tasks migration и release performance gates.

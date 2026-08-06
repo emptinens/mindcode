@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mindcode-protocol", "crates/mindcode-state", "crates/mindcoded"]
+members = ["crates/mindcode-protocol", "crates/mindcode-state", "crates/mindcoded", "crates/mindcode-core-tools"]
 resolver = "2"
 
 [workspace.package]

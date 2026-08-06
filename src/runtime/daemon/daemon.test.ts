@@ -248,9 +248,9 @@ describe("DaemonClient", () => {
       )
       .map((message) => message.id);
     expect(new Set(ids).size).toBe(ids.length);
-    expect(ids.every((id) => /^(handshake|request)-[0-9a-f-]+-[0-9a-z]+$/.test(id))).toBe(
-      true,
-    );
+    expect(
+      ids.every((id) => /^(handshake|request)-[0-9a-f-]+-[0-9a-z]+$/.test(id)),
+    ).toBe(true);
   });
 
   test("validates stream sequence and returns the final response", async () => {
@@ -292,6 +292,31 @@ describe("DaemonClient", () => {
       type: "cancel",
       id: expect.any(String),
     });
+  });
+
+  test("reports the exact post-send dispatch boundary", async () => {
+    const { client } = await fakeClient();
+    let dispatches = 0;
+    await expect(
+      client.ping({
+        onDispatch: () => {
+          dispatches += 1;
+        },
+      }),
+    ).resolves.toEqual({ pong: true });
+    expect(dispatches).toBe(1);
+
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      client.request("ping", undefined, {
+        signal: controller.signal,
+        onDispatch: () => {
+          dispatches += 1;
+        },
+      }),
+    ).rejects.toBeInstanceOf(DaemonCancelledError);
+    expect(dispatches).toBe(1);
   });
 
   test("rejects timed-out requests and emits cancellation", async () => {
