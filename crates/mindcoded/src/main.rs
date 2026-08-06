@@ -7,6 +7,8 @@ use std::{path::PathBuf, time::Duration};
 struct Args {
     #[arg(long, value_name = "PATH", default_value_os_t = DaemonConfig::default_socket())]
     socket: PathBuf,
+    #[arg(long, value_name = "PATH")]
+    state_dir: Option<PathBuf>,
     #[arg(long, value_name = "SECONDS", default_value_t = 1800)]
     idle_seconds: u64,
     #[arg(long, value_name = "HANDSHAKE_SECONDS", default_value_t = 5)]
@@ -20,6 +22,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     Daemon::new(DaemonConfig {
         socket: args.socket,
+        state_dir: args.state_dir,
         idle_seconds: Some(args.idle_seconds),
         handshake_timeout: Duration::from_secs(args.handshake_timeout_seconds),
         build_id: args.build_id,

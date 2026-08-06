@@ -1,4 +1,5 @@
 import { type Socket, createConnection } from "node:net";
+import { randomUUID } from "node:crypto";
 import {
   DaemonCancelledError,
   DaemonClientError,
@@ -46,6 +47,7 @@ export class DaemonClient {
   private connectionGeneration = 0;
   private connectPromise?: Promise<void>;
   private requestCounter = 0;
+  private readonly requestNamespace = randomUUID();
   private stateValue: DaemonClientState = "disconnected";
   private permanentlyClosed = false;
   private readonly pending = new Map<string, PendingRequest>();
@@ -208,9 +210,14 @@ export class DaemonClient {
               message.version !== DAEMON_PROTOCOL_VERSION
             ) {
               rejectConnection(
-                new DaemonProtocolError(
-                  "Invalid daemon handshake acknowledgement",
-                ),
+                message.type === "handshake_ack" && message.error
+                  ? new DaemonClientError(
+                      message.error.code ?? "DAEMON_HANDSHAKE_REJECTED",
+                      message.error.message,
+                    )
+                  : new DaemonProtocolError(
+                      "Invalid daemon handshake acknowledgement",
+                    ),
               );
               socket.destroy();
               return;
@@ -374,7 +381,7 @@ export class DaemonClient {
 
   private nextRequestId(prefix: string): string {
     this.requestCounter += 1;
-    return `${prefix}-${this.requestCounter.toString(36)}`;
+    return `${prefix}-${this.requestNamespace}-${this.requestCounter.toString(36)}`;
   }
 
   private send(connection: Connection, message: DaemonWireMessage): void {

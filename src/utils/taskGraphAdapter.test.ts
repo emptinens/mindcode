@@ -15,10 +15,14 @@ import {
 
 const roots: string[] = [];
 const originalConfig = process.env.MINDCODE_CONFIG_DIR;
+const originalDaemonDisabled = process.env.MINDCODE_DAEMON_DISABLED;
 
 afterEach(async () => {
   if (originalConfig === undefined) process.env.MINDCODE_CONFIG_DIR = undefined;
   else process.env.MINDCODE_CONFIG_DIR = originalConfig;
+  if (originalDaemonDisabled === undefined)
+    process.env.MINDCODE_DAEMON_DISABLED = undefined;
+  else process.env.MINDCODE_DAEMON_DISABLED = originalDaemonDisabled;
   for (const root of roots.splice(0))
     await rm(root, { recursive: true, force: true });
 });
@@ -27,6 +31,7 @@ async function useStore(): Promise<string> {
   const root = await mkdtemp("/tmp/mindcode-task-bridge-");
   roots.push(root);
   process.env.MINDCODE_CONFIG_DIR = root;
+  process.env.MINDCODE_DAEMON_DISABLED = "1";
   return root;
 }
 
@@ -135,6 +140,82 @@ describe("SQLite task tool bridge", () => {
     } finally {
       TaskGraph.prototype.list = originalList;
     }
+  });
+
+  test("routes structural fields before a pending task can run", async () => {
+    await useStore();
+    const active = await createTask("lifecycle-overlap", {
+      subject: "Active",
+      description: "",
+      status: "pending",
+      blocks: [],
+      blockedBy: [],
+      metadata: { write_set: ["src/shared.ts"] },
+    });
+    await graphUpdateTask("lifecycle-overlap", active, {
+      status: "in_progress",
+      owner: "worker-a",
+    });
+    const pending = await createTask("lifecycle-overlap", {
+      subject: "Pending",
+      description: "",
+      status: "pending",
+      blocks: [],
+      blockedBy: [],
+    });
+
+    await expect(
+      graphUpdateTask("lifecycle-overlap", pending, {
+        status: "in_progress",
+        owner: "worker-b",
+        effort: "high",
+        write_set: ["src/shared.ts"],
+      }),
+    ).rejects.toThrow();
+
+    const stored = await graphGetTask("lifecycle-overlap", pending);
+    expect(stored).toMatchObject({
+      id: pending,
+      status: "pending",
+      effort: "high",
+      write_set: [
+        ".mindcode-tasklists/bGlmZWN5Y2xlLW92ZXJsYXA/src/shared.ts",
+      ],
+    });
+    expect(stored?.blockedBy).toContain(active);
+    expect(stored?.owner).toBeUndefined();
+  });
+
+  test("persists combined owner and graph fields before claiming", async () => {
+    await useStore();
+    const id = await createTask("combined-owner", {
+      subject: "Combined",
+      description: "",
+      status: "pending",
+      blocks: [],
+      blockedBy: [],
+    });
+
+    const updated = await graphUpdateTask("combined-owner", id, {
+      owner: "worker",
+      effort: "high",
+      write_set: ["src/combined.ts"],
+      metadata: { marker: "kept" },
+    });
+
+    expect(updated).toMatchObject({
+      id,
+      status: "claimed",
+      owner: "worker",
+      effort: "high",
+      write_set: [
+        ".mindcode-tasklists/Y29tYmluZWQtb3duZXI/src/combined.ts",
+      ],
+      metadata: {
+        marker: "kept",
+        write_set: ["src/combined.ts"],
+      },
+    });
   });
 
   test("blocks claims on incomplete dependencies and routes target overlap", async () => {

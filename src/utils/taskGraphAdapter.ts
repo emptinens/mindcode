@@ -3,6 +3,9 @@ import { mkdirSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { getTaskGraphPaths } from "../storage/taskGraphPaths.js";
+import { TaskGraphDaemonClient } from "../runtime/taskGraph/client.js";
+import type { DaemonCallResult } from "../runtime/daemon/types.js";
+import type { TaskGraphListParams } from "../runtime/taskGraph/protocol.js";
 import { DuplicateTaskError } from "../tasks/graph/errors.js";
 import { type TaskGraph, openTaskGraph } from "../tasks/graph/taskGraph.js";
 import type {
@@ -453,22 +456,6 @@ function patchDetail(
   });
 }
 
-function recordsForList(
-  graph: TaskGraph,
-  details: Map<string, DetailRow>,
-  taskListId: string,
-): TaskRecord[] {
-  const prefix = taskNamespacePrefix(taskListId);
-  return graph.list().filter((record) => {
-    const detail = details.get(record.id);
-    return (
-      record.id.startsWith(prefix) &&
-      detail?.task_list_id === taskListId &&
-      detail.public_id === publicTaskId(taskListId, record.id)
-    );
-  });
-}
-
 function normalizeGraphRecord(
   taskListId: string,
   record: TaskRecord,
@@ -569,16 +556,6 @@ function graphInputFromTask(
       task.report_id ??
       (typeof metadataReportId === "string" ? metadataReportId : undefined),
   };
-}
-
-function taskIdForNextNumeric(graph: TaskGraph, taskListId: string): number {
-  let max = 0;
-  for (const record of graph.list()) {
-    const publicId = publicTaskId(taskListId, record.id);
-    if (publicId && /^\d+$/.test(publicId))
-      max = Math.max(max, Number(publicId));
-  }
-  return max + 1;
 }
 
 function mergeMetadataPreserving(
@@ -847,55 +824,6 @@ async function migrateLegacyTasks(
   ).run(marker, "done");
 }
 
-async function withStores<T>(
-  taskListId: string,
-  fn: (graph: TaskGraph, db: Database) => Promise<T> | T,
-): Promise<T> {
-  const graph = openTaskGraph();
-  const db = openDetailsDb();
-  try {
-    migrateRawBridgeRows(db);
-    await migrateLegacyTasks(graph, db, taskListId);
-    return await fn(graph, db);
-  } finally {
-    db.close();
-    graph.close();
-  }
-}
-
-function allTasks(
-  graph: TaskGraph,
-  db: Database,
-  taskListId: string,
-): BridgeTask[] {
-  const details = readDetailsForList(db, taskListId);
-  const records = recordsForList(graph, details, taskListId);
-  return records
-    .map((record) =>
-      normalizeGraphRecord(taskListId, record, details.get(record.id), records),
-    )
-    .filter((task): task is BridgeTask => task !== null);
-}
-
-function oneTask(
-  graph: TaskGraph,
-  db: Database,
-  taskListId: string,
-  publicId: string,
-): BridgeTask | null {
-  const storedId = storageTaskId(taskListId, publicId);
-  const record = graph.read(storedId);
-  const detail = readDetail(db, taskListId, publicId);
-  return record
-    ? normalizeGraphRecord(
-        taskListId,
-        record,
-        detail,
-        graph.listDependents(storedId),
-      )
-    : null;
-}
-
 function metadataWithStructural(
   metadata: TaskMetadata,
   patch: BridgeTaskPatch,
@@ -936,28 +864,459 @@ function mapClaimFailure(
   };
 }
 
+type AdapterFallbackGraph = () => Promise<TaskGraph>;
+
+/**
+ * The adapter keeps the UI/detail store local, but delegates the authoritative
+ * task graph to the native daemon.  The local TaskGraph is opened lazily and
+ * only through a daemon-availability fallback callback.
+ */
+class DaemonBackedTaskGraph {
+  private authority: "daemon" | "fallback" | undefined;
+
+  constructor(
+    private readonly client: TaskGraphDaemonClient,
+    private readonly fallbackGraph: AdapterFallbackGraph,
+  ) {}
+
+  private async call<T>(
+    firstDaemon: () => Promise<DaemonCallResult<T>>,
+    daemon: () => Promise<T>,
+    fallback: () => Promise<T>,
+  ): Promise<DaemonCallResult<T>> {
+    if (this.authority === "fallback") {
+      return {
+        source: "fallback",
+        value: await fallback(),
+        reason: "unavailable",
+      };
+    }
+    if (this.authority === "daemon") {
+      return { source: "daemon", value: await daemon() };
+    }
+    const result = await firstDaemon();
+    this.authority = result.source;
+    return result;
+  }
+
+  route(
+    task: RouteTaskInput,
+    mode: "block" | "reject" = "block",
+  ): Promise<DaemonCallResult<import("../tasks/graph/types.js").RouteResult>> {
+    return this.call(
+      () =>
+        this.client.routeWithFallback(
+          task,
+          async () => (await this.getFallbackGraph()).route(task, { mode }),
+          mode,
+        ),
+      () => this.client.route(task, mode),
+      async () => (await this.getFallbackGraph()).route(task, { mode }),
+    );
+  }
+
+  read(taskId: string): Promise<DaemonCallResult<{ task: TaskRecord | null }>> {
+    return this.call(
+      () =>
+        this.client.readWithFallback(taskId, async () => ({
+          task: (await this.getFallbackGraph()).read(taskId),
+        })),
+      () => this.client.read(taskId),
+      async () => ({ task: (await this.getFallbackGraph()).read(taskId) }),
+    );
+  }
+
+  list(
+    params: TaskGraphListParams = {},
+  ): Promise<DaemonCallResult<{ tasks: TaskRecord[] }>> {
+    return this.call(
+      () =>
+        this.client.listWithFallback(params, async () => ({
+          tasks: (await this.getFallbackGraph()).list(params),
+        })),
+      () => this.client.list(params),
+      async () => ({ tasks: (await this.getFallbackGraph()).list(params) }),
+    );
+  }
+
+  listDependents(
+    taskId: string,
+  ): Promise<DaemonCallResult<{ tasks: TaskRecord[] }>> {
+    return this.call(
+      () =>
+        this.client.listDependentsWithFallback(taskId, async () => ({
+          tasks: (await this.getFallbackGraph()).listDependents(taskId),
+        })),
+      () => this.client.listDependents(taskId),
+      async () => ({
+        tasks: (await this.getFallbackGraph()).listDependents(taskId),
+      }),
+    );
+  }
+
+  claim(
+    request: import("../runtime/taskGraph/protocol.js").TaskGraphClaimParams,
+  ): Promise<DaemonCallResult<ClaimResult>> {
+    return this.call(
+      () =>
+        this.client.claimWithFallback(request, async () =>
+          (await this.getFallbackGraph()).tryClaim(
+            request.task_id,
+            request.owner,
+            request,
+          ),
+        ),
+      () => this.client.claim(request),
+      async () =>
+        (await this.getFallbackGraph()).tryClaim(
+          request.task_id,
+          request.owner,
+          request,
+        ),
+    );
+  }
+
+  update(
+    taskId: string,
+    patch: import("../tasks/graph/types.js").TaskUpdate,
+    expectedVersion: number | undefined,
+  ): Promise<DaemonCallResult<{ task: TaskRecord }>> {
+    return this.call(
+      () =>
+        this.client.updateWithFallback(
+          taskId,
+          patch,
+          async () => ({
+            task: (await this.getFallbackGraph()).update(
+              taskId,
+              patch,
+              expectedVersion,
+            ),
+          }),
+          expectedVersion,
+        ),
+      () => this.client.update(taskId, patch, expectedVersion),
+      async () => ({
+        task: (await this.getFallbackGraph()).update(
+          taskId,
+          patch,
+          expectedVersion,
+        ),
+      }),
+    );
+  }
+
+  routeUpdate(
+    taskId: string,
+    patch: import("../tasks/graph/types.js").TaskUpdate,
+    expectedVersion: number,
+    mode: "block" | "reject" = "block",
+  ): Promise<DaemonCallResult<import("../tasks/graph/types.js").RouteResult>> {
+    const params = {
+      task_id: taskId,
+      patch,
+      expected_version: expectedVersion,
+      mode,
+    };
+    return this.call(
+      () =>
+        this.client.routeUpdateWithFallback(params, async () =>
+          (await this.getFallbackGraph()).routeUpdate(taskId, patch, {
+            expectedVersion,
+            mode,
+          }),
+        ),
+      () => this.client.routeUpdate(params),
+      async () =>
+        (await this.getFallbackGraph()).routeUpdate(taskId, patch, {
+          expectedVersion,
+          mode,
+        }),
+    );
+  }
+
+  async close(): Promise<void> {
+    // The daemon owns its process/database.  Only the lazy fallback graph is
+    // local to this adapter operation and must be closed here.
+    if (this.fallbackGraphValue) {
+      this.fallbackGraphValue.close();
+      this.fallbackGraphValue = undefined;
+    }
+  }
+
+  private fallbackGraphValue?: TaskGraph;
+
+  async getFallbackGraph(): Promise<TaskGraph> {
+    if (!this.fallbackGraphValue)
+      this.fallbackGraphValue = await this.fallbackGraph();
+    return this.fallbackGraphValue;
+  }
+}
+
+let daemonClientFactory: () => TaskGraphDaemonClient = () =>
+  new TaskGraphDaemonClient();
+
+async function migrateLegacyTasksToDaemon(
+  graph: DaemonBackedTaskGraph,
+  db: Database,
+  taskListId: string,
+): Promise<void> {
+  const marker = `legacy-v2:${taskListId}`;
+  if (
+    db.prepare("SELECT 1 FROM task_graph_bridge_meta WHERE key = ?").get(marker)
+  )
+    return;
+
+  let files: string[] = [];
+  try {
+    files = await readdir(legacyTasksDir(taskListId));
+  } catch {
+    db.prepare(
+      "INSERT OR IGNORE INTO task_graph_bridge_meta(key, value) VALUES (?, ?)",
+    ).run(marker, "done");
+    return;
+  }
+
+  const legacy: LegacyTask[] = [];
+  for (const file of files.filter(
+    (name) => name.endsWith(".json") && !name.startsWith("."),
+  )) {
+    try {
+      const value = JSON.parse(
+        await readFile(join(legacyTasksDir(taskListId), file), "utf8"),
+      ) as LegacyTask;
+      if (
+        value &&
+        typeof value.id === "string" &&
+        typeof value.subject === "string"
+      )
+        legacy.push(value);
+    } catch {
+      // Ignore malformed compatibility files; the daemon graph remains authoritative.
+    }
+  }
+  const ids = new Set(legacy.map((task) => task.id));
+  const reverseBlocks = new Map<string, string[]>();
+  for (const task of legacy) {
+    for (const target of task.blocks ?? []) {
+      if (ids.has(target))
+        reverseBlocks.set(target, [
+          ...(reverseBlocks.get(target) ?? []),
+          task.id,
+        ]);
+    }
+  }
+
+  for (const task of legacy) {
+    const importedStatus =
+      task.status === "completed" || task.status === "failed"
+        ? graphStatus(task.status)
+        : "pending";
+    const input: BridgeCreateInput = {
+      id: task.id,
+      subject: task.subject,
+      description: task.description ?? "",
+      activeForm: task.activeForm,
+      status: importedStatus,
+      blocks: [],
+      blockedBy: [],
+      metadata: asMetadata(task.metadata),
+    };
+    const storedId = storageTaskId(taskListId, task.id);
+    const existing = resultValue(await graph.read(storedId));
+    if (!existing.task) {
+      const routed = resultValue(
+        await graph.route(graphInputFromTask(taskListId, input)),
+      );
+      if (!routed.task) continue;
+    }
+    if (!readDetail(db, taskListId, task.id))
+      writeDetail(db, taskListId, input);
+  }
+
+  for (const task of legacy) {
+    const storedId = storageTaskId(taskListId, task.id);
+    const current = resultValue(await graph.read(storedId)).task;
+    if (!current) continue;
+    const blockedBy = [
+      ...new Set([
+        ...(task.blockedBy ?? []),
+        ...(reverseBlocks.get(task.id) ?? []),
+      ]),
+    ].filter((id) => ids.has(id) && id !== task.id);
+    if (blockedBy.length === 0) continue;
+    try {
+      const routed = resultValue(
+        await graph.routeUpdate(
+          storedId,
+          { blocked_by: namespaceDependencies(taskListId, blockedBy) },
+          current.version,
+        ),
+      );
+      if (!routed.task || !routed.decision.allowed) {
+        throw new Error(`Legacy task dependency route was rejected: ${storedId}`);
+      }
+    } catch (error) {
+      if (!isBenignMigrationVersionConflict(error)) throw error;
+      const latest = resultValue(await graph.read(storedId)).task;
+      const expectedDependencies =
+        namespaceDependencies(taskListId, blockedBy) ?? [];
+      if (
+        !latest ||
+        expectedDependencies.some(
+          (dependency) => !latest.blocked_by.includes(dependency),
+        )
+      ) {
+        throw error;
+      }
+    }
+  }
+
+  db.prepare(
+    "INSERT OR IGNORE INTO task_graph_bridge_meta(key, value) VALUES (?, ?)",
+  ).run(marker, "done");
+}
+
+function isBenignMigrationVersionConflict(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === "VERSION_CONFLICT"
+  );
+}
+
+/** Test-only dependency injection; production always uses the daemon manager. */
+export function setTaskGraphDaemonClientForTests(
+  factory: (() => TaskGraphDaemonClient) | undefined,
+): void {
+  daemonClientFactory = factory ?? (() => new TaskGraphDaemonClient());
+}
+
+async function withAdapterStores<T>(
+  taskListId: string,
+  fn: (graph: DaemonBackedTaskGraph, db: Database) => Promise<T>,
+): Promise<T> {
+  const db = openDetailsDb();
+  let migration: Promise<TaskGraph> | undefined;
+  const fallbackGraph = async (): Promise<TaskGraph> => {
+    if (!migration) {
+      migration = (async () => {
+        const opened = openTaskGraph();
+        try {
+          migrateRawBridgeRows(db);
+          await migrateLegacyTasks(opened, db, taskListId);
+          return opened;
+        } catch (error) {
+          try {
+            opened.close();
+          } catch {
+            // Preserve the migration failure as the authoritative error.
+          }
+          throw error;
+        }
+      })();
+    }
+    return migration;
+  };
+  const graph = new DaemonBackedTaskGraph(daemonClientFactory(), fallbackGraph);
+  try {
+    await migrateLegacyTasksToDaemon(graph, db, taskListId);
+    return await fn(graph, db);
+  } finally {
+    await graph.close();
+    db.close();
+  }
+}
+
+function resultValue<T>(result: DaemonCallResult<T>): T {
+  return result.value;
+}
+
+function duplicateTaskError(error: unknown): boolean {
+  return (
+    error instanceof DuplicateTaskError ||
+    (typeof error === "object" &&
+      error !== null &&
+      (error as { code?: unknown }).code === "DUPLICATE_TASK")
+  );
+}
+
+async function allTasksFromBackend(
+  graph: DaemonBackedTaskGraph,
+  db: Database,
+  taskListId: string,
+): Promise<BridgeTask[]> {
+  const details = readDetailsForList(db, taskListId);
+  const records = resultValue(await graph.list());
+  return records.tasks
+    .filter((record) => {
+      const detail = details.get(record.id);
+      return (
+        record.id.startsWith(taskNamespacePrefix(taskListId)) &&
+        detail?.task_list_id === taskListId &&
+        detail.public_id === publicTaskId(taskListId, record.id)
+      );
+    })
+    .map((record) =>
+      normalizeGraphRecord(
+        taskListId,
+        record,
+        details.get(record.id),
+        records.tasks,
+      ),
+    )
+    .filter((task): task is BridgeTask => task !== null);
+}
+
+async function oneTaskFromBackend(
+  graph: DaemonBackedTaskGraph,
+  db: Database,
+  taskListId: string,
+  publicId: string,
+): Promise<BridgeTask | null> {
+  const storedId = storageTaskId(taskListId, publicId);
+  const record = resultValue(await graph.read(storedId));
+  const detail = readDetail(db, taskListId, publicId);
+  if (!record.task) return null;
+  const dependents = resultValue(await graph.listDependents(storedId));
+  return normalizeGraphRecord(
+    taskListId,
+    record.task,
+    detail,
+    dependents.tasks,
+  );
+}
+
 export async function graphCreateTask(
   taskListId: string,
   input: BridgeCreateInput,
 ): Promise<string> {
-  return withStores(taskListId, (graph, db) => {
+  return withAdapterStores(taskListId, async (graph, db) => {
     const autoId = input.id === undefined;
-    let nextId = autoId ? taskIdForNextNumeric(graph, taskListId) : 0;
+    let nextId = 1;
+    if (autoId) {
+      for (const record of resultValue(await graph.list()).tasks) {
+        const publicId = publicTaskId(taskListId, record.id);
+        if (publicId && /^\d+$/.test(publicId))
+          nextId = Math.max(nextId, Number(publicId) + 1);
+      }
+    }
     for (;;) {
       const publicId = autoId ? String(nextId) : input.id;
       if (!publicId) throw new Error("Task ID must be non-empty");
       const task = { ...input, id: publicId };
       try {
-        const routed = graph.route(graphInputFromTask(taskListId, task));
-        if (!routed.task) {
+        const routed = resultValue(
+          await graph.route(graphInputFromTask(taskListId, task)),
+        );
+        if (!routed.task)
           throw new Error(
             `Task ${publicId} was rejected by overlap validation`,
           );
-        }
         writeDetail(db, taskListId, task);
         return publicId;
       } catch (error) {
-        if (!autoId || !(error instanceof DuplicateTaskError)) throw error;
+        if (!autoId || !duplicateTaskError(error)) throw error;
         nextId += 1;
       }
     }
@@ -968,15 +1327,17 @@ export async function graphGetTask(
   taskListId: string,
   taskId: string,
 ): Promise<BridgeTask | null> {
-  return withStores(taskListId, (graph, db) =>
-    oneTask(graph, db, taskListId, taskId),
+  return withAdapterStores(taskListId, (graph, db) =>
+    oneTaskFromBackend(graph, db, taskListId, taskId),
   );
 }
 
 export async function graphListTasks(
   taskListId: string,
 ): Promise<BridgeTask[]> {
-  return withStores(taskListId, (graph, db) => allTasks(graph, db, taskListId));
+  return withAdapterStores(taskListId, (graph, db) =>
+    allTasksFromBackend(graph, db, taskListId),
+  );
 }
 
 export async function graphUpdateTask(
@@ -984,55 +1345,52 @@ export async function graphUpdateTask(
   taskId: string,
   patch: BridgeTaskPatch,
 ): Promise<BridgeTask | null> {
-  return withStores(taskListId, (graph, db) => {
+  return withAdapterStores(taskListId, async (graph, db) => {
     const storedId = storageTaskId(taskListId, taskId);
-    const before = graph.read(storedId);
+    const beforeResult = await graph.read(storedId);
+    const before = resultValue(beforeResult).task;
     const detail = readDetail(db, taskListId, taskId);
-    const current = before
-      ? normalizeGraphRecord(
-          taskListId,
-          before,
-          detail,
-          graph.listDependents(storedId),
-        )
-      : null;
-    if (!before || !current) return null;
+    if (!before || !detail) return null;
+    const dependents = resultValue(await graph.listDependents(storedId)).tasks;
+    const current = normalizeGraphRecord(
+      taskListId,
+      before,
+      detail,
+      dependents,
+    );
+    if (!current) return null;
     const mergedMetadata =
       patch.metadata === undefined
-        ? parseMetadata(detail?.metadata)
-        : { ...parseMetadata(detail?.metadata), ...patch.metadata };
+        ? parseMetadata(detail.metadata)
+        : { ...parseMetadata(detail.metadata), ...patch.metadata };
     const effectiveMetadata = metadataWithStructural(mergedMetadata, patch);
     const structural = structuralMetadata(effectiveMetadata);
-    const metadataKind = effectiveMetadata.kind;
-    const metadataEffort = effectiveMetadata.effort;
-    const metadataPriority = effectiveMetadata.priority;
-    const metadataPolicyEpoch = effectiveMetadata.policy_epoch;
-    const metadataReportId = effectiveMetadata.report_id;
     const effectiveKind =
       patch.kind ??
-      (typeof metadataKind === "string"
-        ? (metadataKind as TaskKind)
+      (typeof effectiveMetadata.kind === "string"
+        ? (effectiveMetadata.kind as TaskKind)
         : undefined);
     const effectiveEffort =
       patch.effort ??
-      (typeof metadataEffort === "string"
-        ? (metadataEffort as TaskEffort)
+      (typeof effectiveMetadata.effort === "string"
+        ? (effectiveMetadata.effort as TaskEffort)
         : undefined);
     const effectivePriority =
       patch.priority ??
-      (typeof metadataPriority === "number" ? metadataPriority : undefined);
+      (typeof effectiveMetadata.priority === "number"
+        ? effectiveMetadata.priority
+        : undefined);
     const effectivePolicyEpoch =
       patch.policy_epoch ??
-      (typeof metadataPolicyEpoch === "number"
-        ? metadataPolicyEpoch
+      (typeof effectiveMetadata.policy_epoch === "number"
+        ? effectiveMetadata.policy_epoch
         : undefined);
     const effectiveReportId =
       patch.report_id !== undefined
         ? patch.report_id
-        : typeof metadataReportId === "string"
-          ? metadataReportId
+        : typeof effectiveMetadata.report_id === "string"
+          ? effectiveMetadata.report_id
           : undefined;
-    let record = before;
     const requestedStatus =
       patch.status === "in_progress" ? "running" : patch.status;
     const ownerWasProvided = patch.owner !== undefined;
@@ -1049,150 +1407,133 @@ export async function graphUpdateTask(
       );
     }
 
-    if (
-      (requestedStatus === "claimed" || requestedStatus === "running") &&
-      before.status === "pending"
-    ) {
-      const claim = graph.tryClaim(storedId, requestedOwner ?? "task-agent", {
-        expected_version: before.version,
-      });
-      if (!claim.ok) {
-        throw new Error(`Task ${taskId} cannot be claimed: ${claim.reason}`);
-      }
-      record = claim.task;
-      if (requestedStatus === "running") {
-        record = graph.update(
-          storedId,
-          {
-            status: "running",
-            ...(effectiveKind === undefined ? {} : { kind: effectiveKind }),
-            ...(effectiveEffort === undefined
-              ? {}
-              : { effort: effectiveEffort }),
-            ...(effectivePriority === undefined
-              ? {}
-              : { priority: effectivePriority }),
-            ...(patch.started_at === undefined
-              ? {}
-              : { started_at: patch.started_at }),
-            ...(patch.finished_at === undefined
-              ? {}
-              : { finished_at: patch.finished_at }),
-            ...(effectivePolicyEpoch === undefined
-              ? {}
-              : { policy_epoch: effectivePolicyEpoch }),
-            ...(effectiveReportId === undefined
-              ? {}
-              : { report_id: effectiveReportId }),
-          },
-          record.version,
-        );
-      }
-    } else if (
+    const wantsLeaseStatus =
+      requestedStatus === "claimed" || requestedStatus === "running";
+    const claimsPendingOwner =
+      before.status === "pending" &&
       ownerWasProvided &&
       requestedOwner !== before.owner &&
-      before.status === "pending" &&
-      requestedOwner !== null
-    ) {
-      const claim = graph.tryClaim(storedId, requestedOwner, {
-        expected_version: before.version,
-      });
-      if (!claim.ok) {
-        throw new Error(`Task ${taskId} cannot be claimed: ${claim.reason}`);
-      }
-      record = claim.task;
-    } else {
-      const graphPatch = {
-        ...(requestedStatus === undefined
-          ? {}
-          : { status: requestedStatus as GraphTaskStatus }),
-        ...(effectiveKind === undefined ? {} : { kind: effectiveKind }),
-        ...(effectiveEffort === undefined ? {} : { effort: effectiveEffort }),
-        ...(effectivePriority === undefined
-          ? {}
-          : { priority: effectivePriority }),
-        ...(ownerWasProvided &&
-        (requestedStatus === undefined ||
-          requestedStatus === "pending" ||
-          requestedStatus === "completed" ||
-          requestedStatus === "failed")
-          ? { owner: requestedOwner }
-          : {}),
-        ...(patch.blockedBy === undefined
-          ? {}
-          : { blocked_by: namespaceDependencies(taskListId, patch.blockedBy) }),
-        ...(structural.files_touched === undefined
-          ? {}
-          : {
-              files_touched: namespaceTargets(
-                taskListId,
-                structural.files_touched,
-                "files_touched",
-              ),
-            }),
-        ...(structural.read_set === undefined
-          ? {}
-          : {
-              read_set: namespaceTargets(
-                taskListId,
-                structural.read_set,
-                "read_set",
-              ),
-            }),
-        ...(structural.write_set === undefined
-          ? {}
-          : {
-              write_set: namespaceTargets(
-                taskListId,
-                structural.write_set,
-                "write_set",
-              ),
-            }),
-        ...(structural.isolation === undefined
-          ? {}
-          : { isolation: structural.isolation }),
-        ...(patch.started_at === undefined
-          ? {}
-          : { started_at: patch.started_at }),
-        ...(patch.finished_at === undefined
-          ? {}
-          : { finished_at: patch.finished_at }),
-        ...(effectivePolicyEpoch === undefined
-          ? {}
-          : { policy_epoch: effectivePolicyEpoch }),
-        ...(effectiveReportId === undefined
-          ? {}
-          : { report_id: effectiveReportId }),
-      };
-      if (Object.keys(graphPatch).length > 0) {
-        const needsOverlapValidation =
-          patch.blockedBy !== undefined ||
-          structural.files_touched !== undefined ||
-          structural.read_set !== undefined ||
-          structural.write_set !== undefined ||
-          structural.isolation !== undefined;
-        if (needsOverlapValidation) {
-          const routed = graph.routeUpdate(storedId, graphPatch, {
-            expectedVersion: before.version,
-          });
-          if (!routed.task || !routed.decision.allowed) {
-            throw new Error(
-              `Task ${taskId} was rejected by overlap validation`,
-            );
-          }
-          record = routed.task;
-        } else {
-          record = graph.update(storedId, graphPatch, before.version);
+      requestedOwner !== null &&
+      (requestedStatus === undefined || requestedStatus === "pending");
+    const claimsPendingLifecycle = before.status === "pending" && wantsLeaseStatus;
+    const shouldClaim = claimsPendingOwner || claimsPendingLifecycle;
+
+    // Structural fields are routed while the task is still pending. This
+    // gives route_update the exclusive overlap/CAS decision before claim/run.
+    // The status transition is deliberately applied only after the claim.
+    const graphPatch: import("../tasks/graph/types.js").TaskUpdate = {
+      ...(shouldClaim || requestedStatus === undefined
+        ? {}
+        : { status: requestedStatus as GraphTaskStatus }),
+      ...(effectiveKind === undefined ? {} : { kind: effectiveKind }),
+      ...(effectiveEffort === undefined ? {} : { effort: effectiveEffort }),
+      ...(effectivePriority === undefined
+        ? {}
+        : { priority: effectivePriority }),
+      ...(ownerWasProvided &&
+      (shouldClaim ||
+        requestedStatus === undefined ||
+        requestedStatus === "pending" ||
+        requestedStatus === "completed" ||
+        requestedStatus === "failed")
+        ? { owner: requestedOwner }
+        : {}),
+      ...(patch.blockedBy === undefined
+        ? {}
+        : { blocked_by: namespaceDependencies(taskListId, patch.blockedBy) }),
+      ...(structural.files_touched === undefined
+        ? {}
+        : {
+            files_touched: namespaceTargets(
+              taskListId,
+              structural.files_touched,
+              "files_touched",
+            ),
+          }),
+      ...(structural.read_set === undefined
+        ? {}
+        : {
+            read_set: namespaceTargets(
+              taskListId,
+              structural.read_set,
+              "read_set",
+            ),
+          }),
+      ...(structural.write_set === undefined
+        ? {}
+        : {
+            write_set: namespaceTargets(
+              taskListId,
+              structural.write_set,
+              "write_set",
+            ),
+          }),
+      ...(structural.isolation === undefined
+        ? {}
+        : { isolation: structural.isolation }),
+      ...(patch.started_at === undefined
+        ? {}
+        : { started_at: patch.started_at }),
+      ...(patch.finished_at === undefined
+        ? {}
+        : { finished_at: patch.finished_at }),
+      ...(effectivePolicyEpoch === undefined
+        ? {}
+        : { policy_epoch: effectivePolicyEpoch }),
+      ...(effectiveReportId === undefined
+        ? {}
+        : { report_id: effectiveReportId }),
+    };
+
+    let record = before;
+    if (Object.keys(graphPatch).length > 0) {
+      const needsOverlapValidation =
+        shouldClaim ||
+        patch.blockedBy !== undefined ||
+        structural.files_touched !== undefined ||
+        structural.read_set !== undefined ||
+        structural.write_set !== undefined ||
+        structural.isolation !== undefined;
+      if (needsOverlapValidation) {
+        const routed = resultValue(
+          await graph.routeUpdate(storedId, graphPatch, before.version),
+        );
+        if (!routed.task || !routed.decision.allowed) {
+          throw new Error(`Task ${taskId} was rejected by overlap validation`);
         }
+        record = routed.task;
+      } else {
+        record = resultValue(
+          await graph.update(storedId, graphPatch, before.version),
+        ).task;
       }
     }
 
+    if (shouldClaim) {
+      const claimResult = resultValue(
+        await graph.claim({
+          task_id: storedId,
+          owner: requestedOwner ?? "task-agent",
+          expected_version: record.version,
+        }),
+      );
+      if (!claimResult.ok)
+        throw new Error(
+          `Task ${taskId} cannot be claimed: ${claimResult.reason}`,
+        );
+      record = claimResult.task;
+      if (requestedStatus === "running") {
+        record = resultValue(
+          await graph.update(storedId, { status: "running" }, record.version),
+        ).task;
+      }
+    }
     patchDetail(db, taskListId, taskId, detail, patch, effectiveMetadata);
     return normalizeGraphRecord(
       taskListId,
       record,
       readDetail(db, taskListId, taskId),
-      graph.listDependents(storedId),
+      resultValue(await graph.listDependents(storedId)).tasks,
     );
   });
 }
@@ -1201,13 +1542,13 @@ export async function graphDeleteTask(
   taskListId: string,
   taskId: string,
 ): Promise<boolean> {
-  return withStores(taskListId, (graph, db) => {
+  return withAdapterStores(taskListId, async (graph, db) => {
     const storedId = storageTaskId(taskListId, taskId);
-    const current = graph.read(storedId);
+    const current = resultValue(await graph.read(storedId)).task;
     const detail = readDetail(db, taskListId, taskId);
     if (!current || !detail) return false;
     if (current.status !== "completed" && current.status !== "failed") {
-      graph.update(storedId, { status: "completed" }, current.version);
+      await graph.update(storedId, { status: "completed" }, current.version);
     }
     db.prepare(
       "UPDATE task_graph_details SET deleted = 1 WHERE task_id = ?",
@@ -1221,21 +1562,20 @@ export async function graphBlockTask(
   fromTaskId: string,
   toTaskId: string,
 ): Promise<boolean> {
-  return withStores(taskListId, (graph, db) => {
+  return withAdapterStores(taskListId, async (graph, db) => {
     const fromStoredId = storageTaskId(taskListId, fromTaskId);
     const toStoredId = storageTaskId(taskListId, toTaskId);
-    const from = graph.read(fromStoredId);
-    const to = graph.read(toStoredId);
+    const from = resultValue(await graph.read(fromStoredId)).task;
+    const to = resultValue(await graph.read(toStoredId)).task;
     if (
       !from ||
       !to ||
       !readDetail(db, taskListId, fromTaskId) ||
       !readDetail(db, taskListId, toTaskId)
-    ) {
+    )
       return false;
-    }
     if (!to.blocked_by.includes(fromStoredId)) {
-      graph.update(
+      await graph.update(
         toStoredId,
         { blocked_by: [...to.blocked_by, fromStoredId] },
         to.version,
@@ -1251,31 +1591,28 @@ export async function graphClaimTask(
   owner: string,
   checkAgentBusy = false,
 ): Promise<BridgeClaimResult> {
-  return withStores(taskListId, (graph, db) => {
+  return withAdapterStores(taskListId, async (graph, db) => {
     const storedId = storageTaskId(taskListId, taskId);
-    const candidateRecord = graph.read(storedId);
+    const candidateRecord = resultValue(await graph.read(storedId)).task;
     const detail = readDetail(db, taskListId, taskId);
     const candidate = candidateRecord
       ? normalizeGraphRecord(
           taskListId,
           candidateRecord,
           detail,
-          graph.listDependents(storedId),
+          resultValue(await graph.listDependents(storedId)).tasks,
         )
       : null;
     if (!candidate) return { success: false, reason: "task_not_found" };
-
     if (checkAgentBusy) {
-      const busy = graph
-        .list({ owner })
-        .filter(
-          (task) =>
-            task.id.startsWith(taskNamespacePrefix(taskListId)) &&
-            task.owner === owner &&
-            task.id !== storedId &&
-            !["completed", "failed"].includes(task.status),
-        );
-      if (busy.length > 0) {
+      const busy = resultValue(await graph.list({ owner })).tasks.filter(
+        (task) =>
+          task.id.startsWith(taskNamespacePrefix(taskListId)) &&
+          task.owner === owner &&
+          task.id !== storedId &&
+          !["completed", "failed"].includes(task.status),
+      );
+      if (busy.length > 0)
         return {
           success: false,
           reason: "agent_busy",
@@ -1283,11 +1620,9 @@ export async function graphClaimTask(
             .map((task) => publicTaskId(taskListId, task.id))
             .filter((id): id is string => id !== null),
         };
-      }
     }
-
-    const result: ClaimResult = graph.tryClaim(storedId, owner);
-    if (!result.ok) {
+    const result = resultValue(await graph.claim({ task_id: storedId, owner }));
+    if (!result.ok)
       return mapClaimFailure(
         taskListId,
         result,
@@ -1296,16 +1631,15 @@ export async function graphClaimTask(
               taskListId,
               result.task,
               detail,
-              graph.listDependents(storedId),
+              resultValue(await graph.listDependents(storedId)).tasks,
             )
           : candidate,
       );
-    }
     const task = normalizeGraphRecord(
       taskListId,
       result.task,
       detail,
-      graph.listDependents(storedId),
+      resultValue(await graph.listDependents(storedId)).tasks,
     );
     if (!task) throw new Error(`Task ${taskId} was deleted during claim`);
     return { success: true, task };
@@ -1313,14 +1647,19 @@ export async function graphClaimTask(
 }
 
 export async function graphResetTaskList(taskListId: string): Promise<void> {
-  return withStores(taskListId, (graph, db) => {
+  return withAdapterStores(taskListId, async (graph, db) => {
     const details = readDetailsForList(db, taskListId);
-    for (const task of recordsForList(graph, details, taskListId)) {
+    const records = resultValue(await graph.list()).tasks.filter(
+      (task) =>
+        task.id.startsWith(taskNamespacePrefix(taskListId)) &&
+        details.has(task.id),
+    );
+    for (const task of records) {
       if (task.status !== "completed" && task.status !== "failed") {
         try {
-          graph.update(task.id, { status: "completed" }, task.version);
+          await graph.update(task.id, { status: "completed" }, task.version);
         } catch {
-          // A concurrent writer owns the latest state.
+          /* concurrent writer owns latest state */
         }
       }
     }

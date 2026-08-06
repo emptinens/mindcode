@@ -3,7 +3,10 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { ensureTaskGraphPaths } from "../../storage/taskGraphPaths.js";
+import {
+  ensureTaskGraphPaths,
+  secureTaskGraphDatabaseFiles,
+} from "../../storage/taskGraphPaths.js";
 import {
   type OverlapCandidate,
   type OverlapDecision,
@@ -190,8 +193,65 @@ type DependencyStatusRow = {
 
 type ExpectedVersionInput = number | UpdateOptions | undefined;
 
+const TASK_INPUT_KEYS = new Set([
+  "id",
+  "status",
+  "owner",
+  "kind",
+  "effort",
+  "priority",
+  "blocked_by",
+  "depends_on",
+  "claimed_at",
+  "started_at",
+  "finished_at",
+  "files_touched",
+  "read_set",
+  "write_set",
+  "isolation",
+  "lease_id",
+  "policy_epoch",
+  "report_id",
+  "idempotency_key",
+  "idempotencyKey",
+]);
+
+const TASK_PATCH_KEYS = new Set([
+  "status",
+  "owner",
+  "kind",
+  "effort",
+  "priority",
+  "blocked_by",
+  "depends_on",
+  "claimed_at",
+  "started_at",
+  "finished_at",
+  "files_touched",
+  "read_set",
+  "write_set",
+  "isolation",
+  "lease_id",
+  "policy_epoch",
+  "report_id",
+  "expectedVersion",
+  "expected_version",
+  "version",
+]);
+
 function hasOwn<T extends object>(value: T, key: PropertyKey): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function assertKnownKeys(
+  value: object,
+  allowed: ReadonlySet<string>,
+  field: string,
+): void {
+  const unknown = Object.keys(value).find((key) => !allowed.has(key));
+  if (unknown !== undefined) {
+    throw new InvalidTaskError(`unknown ${field} field: ${unknown}`);
+  }
 }
 
 function isTaskStatus(value: string): value is TaskStatus {
@@ -398,6 +458,9 @@ function rowToTask(row: TaskRow): TaskRecord {
       `Stored task has invalid effort: ${row.effort}`,
     );
   }
+  assertSafeInteger(row.priority, "stored priority");
+  assertNonNegativeInteger(row.version, "stored version");
+  assertNonNegativeInteger(row.policy_epoch, "stored policy_epoch");
   const task = {
     id: row.id,
     status: row.status,
@@ -462,14 +525,31 @@ export class TaskGraph {
     this.clock = options.clock ?? (() => new Date());
     this.leaseTtlMs = normalizeTtl(options.leaseTtlMs, DEFAULT_LEASE_TTL_MS);
     this.db = new Database(databasePath);
-    this.db.exec(`
-      PRAGMA journal_mode = WAL;
-      PRAGMA synchronous = NORMAL;
-      PRAGMA foreign_keys = ON;
-      PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS};
-    `);
-    this.db.exec(SCHEMA);
-    this.migrateTaskColumns();
+    try {
+      secureTaskGraphDatabaseFiles(databasePath);
+      this.db.exec(`
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        PRAGMA foreign_keys = ON;
+        PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS};
+      `);
+      const existingSchemaVersion = this.readExistingSchemaVersion();
+      if (
+        existingSchemaVersion !== null &&
+        existingSchemaVersion > TASK_GRAPH_SCHEMA_VERSION
+      ) {
+        throw new TaskGraphError(
+          "INVALID_TASK",
+          `Unsupported future task graph schema version: ${existingSchemaVersion}`,
+        );
+      }
+      this.db.exec(SCHEMA);
+      this.migrateTaskColumns();
+      secureTaskGraphDatabaseFiles(databasePath);
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
 
   private migrateTaskColumns(): void {
@@ -477,8 +557,10 @@ export class TaskGraph {
       name: string;
     }>;
     const names = new Set(columns.map((column) => column.name));
+    const schemaVersion = this.readSchemaVersion();
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      this.validateStoredJsonColumns(names);
       const addColumn = (name: string, definition: string): void => {
         if (!names.has(name)) {
           this.db.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${definition}`);
@@ -538,11 +620,13 @@ export class TaskGraph {
       this.db
         .prepare("UPDATE tasks SET priority = 0 WHERE priority IS NULL")
         .run();
-      this.db
-        .prepare(
-          "UPDATE task_graph_meta SET value = ? WHERE key = 'schema_version' AND CAST(value AS INTEGER) < ?",
-        )
-        .run(String(TASK_GRAPH_SCHEMA_VERSION), TASK_GRAPH_SCHEMA_VERSION);
+      if (schemaVersion < TASK_GRAPH_SCHEMA_VERSION) {
+        this.db
+          .prepare(
+            "UPDATE task_graph_meta SET value = ? WHERE key = 'schema_version'",
+          )
+          .run(String(TASK_GRAPH_SCHEMA_VERSION));
+      }
       this.db.exec("COMMIT");
     } catch (error) {
       try {
@@ -554,8 +638,78 @@ export class TaskGraph {
     }
   }
 
+  private readSchemaVersion(): number {
+    const row = this.db
+      .prepare("SELECT value FROM task_graph_meta WHERE key = 'schema_version'")
+      .get() as { value: string } | null | undefined;
+    if (row == null) {
+      throw new TaskGraphError(
+        "INVALID_TASK",
+        "Missing task graph schema version",
+      );
+    }
+    const version = Number(row.value);
+    if (!Number.isSafeInteger(version) || version < 0) {
+      throw new TaskGraphError(
+        "INVALID_TASK",
+        "Invalid task graph schema version",
+      );
+    }
+    if (version > TASK_GRAPH_SCHEMA_VERSION) {
+      throw new TaskGraphError(
+        "INVALID_TASK",
+        `Unsupported future task graph schema version: ${version}`,
+      );
+    }
+    return version;
+  }
+
+  private readExistingSchemaVersion(): number | null {
+    const table = this.db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'task_graph_meta'",
+      )
+      .get() as { name: string } | null | undefined;
+    if (table == null) return null;
+    const row = this.db
+      .prepare("SELECT value FROM task_graph_meta WHERE key = 'schema_version'")
+      .get() as { value: string } | null | undefined;
+    return row == null ? null : this.readSchemaVersion();
+  }
+
+  private validateStoredJsonColumns(names: Set<string>): void {
+    for (const field of [
+      "blocked_by",
+      "files_touched",
+      "read_set",
+      "write_set",
+    ]) {
+      if (!names.has(field)) continue;
+      const rows = this.db
+        .prepare(`SELECT id, ${field} AS value FROM tasks ORDER BY id ASC`)
+        .all() as Array<{ id: string; value: unknown }>;
+      for (const row of rows) {
+        if (typeof row.value !== "string") {
+          throw new TaskGraphError(
+            "INVALID_TASK",
+            `Malformed stored ${field} for task ${row.id}: value is not JSON text`,
+          );
+        }
+        try {
+          parseStringArray(row.value, field);
+        } catch (error) {
+          throw new TaskGraphError(
+            "INVALID_TASK",
+            `Malformed stored ${field} for task ${row.id}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+    }
+  }
+
   create(input: CreateTaskInput = {}, idempotencyKey?: string): TaskRecord {
     this.assertOpen();
+    assertKnownKeys(input, TASK_INPUT_KEYS, "task");
 
     const id =
       input.id === undefined
@@ -711,6 +865,7 @@ export class TaskGraph {
    */
   route(input: RouteTaskInput = {}, options: RouteOptions = {}): RouteResult {
     this.assertOpen();
+    assertKnownKeys(input, TASK_INPUT_KEYS, "task");
     const id =
       input.id === undefined
         ? randomUUID()
@@ -769,13 +924,13 @@ export class TaskGraph {
     );
     const mode = options.mode ?? options.conflictMode ?? "block";
 
-    if (
-      (status === "claimed" || status === "running") &&
-      (owner === null || leaseId === null)
-    ) {
+    if (status === "claimed" || status === "running") {
       throw new InvalidTaskError(
-        "claimed and running tasks require owner and lease_id",
+        "route cannot create claimed or running tasks",
       );
+    }
+    if (leaseId !== null) {
+      throw new InvalidTaskError("route cannot attach a lease_id to a task");
     }
 
     return this.withWriteTransaction(() => {
@@ -902,6 +1057,7 @@ export class TaskGraph {
   ): RouteResult {
     this.assertOpen();
     const id = assertNonEmptyString(taskId, "id");
+    assertKnownKeys(patch, TASK_PATCH_KEYS, "patch");
     const expectedVersion = this.extractExpectedVersion(options, patch);
     if (expectedVersion !== undefined) {
       assertNonNegativeInteger(expectedVersion, "expected_version");
@@ -1401,7 +1557,9 @@ export class TaskGraph {
           if (
             existingLease.released_at === null &&
             existingLease.task_id === id &&
-            existingLease.owner === normalizedOwner
+            existingLease.owner === normalizedOwner &&
+            current.lease_id === requestedLeaseId &&
+            current.owner === normalizedOwner
           ) {
             return {
               ok: true,
@@ -1586,6 +1744,9 @@ export class TaskGraph {
       ) {
         return rowToLease(lease);
       }
+      if (task.owner !== lease.owner) {
+        throw new LeaseOwnerMismatchError(id);
+      }
 
       this.db
         .prepare(
@@ -1627,6 +1788,9 @@ export class TaskGraph {
       }
 
       const task = this.readTaskInTransaction(lease.task_id);
+      if (task !== null && task.lease_id === id && task.owner !== lease.owner) {
+        throw new LeaseOwnerMismatchError(id);
+      }
       this.db
         .prepare(
           "UPDATE task_leases SET released_at = ? WHERE lease_id = ? AND released_at IS NULL",
@@ -1748,6 +1912,7 @@ export class TaskGraph {
   ): TaskRecord {
     this.assertOpen();
     const id = assertNonEmptyString(taskId, "id");
+    assertKnownKeys(patch, TASK_PATCH_KEYS, "patch");
     const expectedVersion = this.extractExpectedVersion(
       expectedVersionOrOptions,
       patch,
@@ -1906,15 +2071,17 @@ export class TaskGraph {
 
       if (nextLeaseId !== null && nextLeaseId !== current.lease_id) {
         const lease = this.readLeaseInTransaction(nextLeaseId);
-        if (
-          lease === null ||
-          lease.task_id !== id ||
-          lease.released_at !== null
-        ) {
-          throw new LeaseConflictError(
-            nextLeaseId,
-            `Lease is not active for task ${id}`,
-          );
+        if (lease === null || lease.task_id !== id || lease.released_at !== null) {
+          throw new LeaseConflictError(nextLeaseId, `Lease is not active for task ${id}`);
+        }
+      }
+      if (nextLeaseId !== null) {
+        const lease = this.readLeaseInTransaction(nextLeaseId);
+        if (lease === null || lease.task_id !== id || lease.released_at !== null) {
+          throw new LeaseConflictError(nextLeaseId, `Lease is not active for task ${id}`);
+        }
+        if (nextOwner !== lease.owner) {
+          throw new LeaseOwnerMismatchError(nextLeaseId);
         }
       }
 
@@ -2335,6 +2502,7 @@ export class TaskGraph {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const result = callback();
+      secureTaskGraphDatabaseFiles(this.databasePath);
       this.db.exec("COMMIT");
       return result;
     } catch (error) {

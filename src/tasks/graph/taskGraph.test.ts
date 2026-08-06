@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -315,6 +315,104 @@ describe("SQLite task graph core", () => {
     );
   });
 
+  test("fails migration on malformed JSON without replacing the stored value", () => {
+    const path = databasePath();
+    mkdirSync(dirname(path), { recursive: true });
+    const malformed = "{not-json";
+    const database = new Database(path);
+    database.exec(`
+      CREATE TABLE task_graph_meta (
+        key TEXT PRIMARY KEY NOT NULL,
+        value TEXT NOT NULL
+      );
+      INSERT INTO task_graph_meta(key, value) VALUES ('schema_version', '1');
+      CREATE TABLE tasks (
+        id TEXT PRIMARY KEY NOT NULL,
+        status TEXT NOT NULL,
+        owner TEXT,
+        blocked_by TEXT,
+        lease_id TEXT
+      );
+    `);
+    database
+      .prepare("INSERT INTO tasks(id, status, blocked_by) VALUES (?, ?, ?)")
+      .run("malformed", "pending", malformed);
+    database.close();
+
+    expect(() => new TaskGraph({ databasePath: path })).toThrow(
+      /Malformed stored blocked_by/,
+    );
+
+    const reopened = new Database(path);
+    expect(
+      (
+        reopened
+          .prepare("SELECT blocked_by FROM tasks WHERE id = ?")
+          .get("malformed") as { blocked_by: string }
+      ).blocked_by,
+    ).toBe(malformed);
+    reopened.close();
+  });
+
+  test("rejects a future schema version before migration", () => {
+    const path = databasePath();
+    mkdirSync(dirname(path), { recursive: true });
+    const database = new Database(path);
+    database.exec(`
+      CREATE TABLE task_graph_meta (
+        key TEXT PRIMARY KEY NOT NULL,
+        value TEXT NOT NULL
+      );
+      INSERT INTO task_graph_meta(key, value) VALUES ('schema_version', '3');
+    `);
+    database.close();
+
+    expect(() => new TaskGraph({ databasePath: path })).toThrow(
+      /Unsupported future task graph schema version: 3/,
+    );
+
+    const reopened = new Database(path);
+    expect(
+      (
+        reopened
+          .prepare(
+            "SELECT value FROM task_graph_meta WHERE key = 'schema_version'",
+          )
+          .get() as { value: string }
+      ).value,
+    ).toBe("3");
+    reopened.close();
+  });
+
+  test("future schema rejection does not create task graph DDL", () => {
+    const path = databasePath();
+    mkdirSync(dirname(path), { recursive: true });
+    const database = new Database(path);
+    database.exec(`
+      CREATE TABLE task_graph_meta (
+        key TEXT PRIMARY KEY NOT NULL,
+        value TEXT NOT NULL
+      );
+      INSERT INTO task_graph_meta(key, value) VALUES ('schema_version', '3');
+    `);
+    database.close();
+
+    expect(() => new TaskGraph({ databasePath: path })).toThrow(
+      /Unsupported future task graph schema version: 3/,
+    );
+    const reopened = new Database(path);
+    expect(
+      (
+        reopened
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('tasks', 'task_leases', 'task_idempotency') ORDER BY name",
+          )
+          .all() as Array<{ name: string }>
+      ).map((row) => row.name),
+    ).toEqual([]);
+    reopened.close();
+  });
+
   test("returns only direct dependents from the targeted dependency query", () => {
     const taskGraph = graph();
     taskGraph.create({ id: "root" });
@@ -341,6 +439,88 @@ describe("SQLite task graph core", () => {
       taskGraph.updateTask("cas", { owner: "worker-b" }, task.version),
     ).toThrow(VersionConflictError);
     expect(taskGraph.requireTask("cas").owner).toBe("worker-a");
+  });
+
+  test("accepts all CAS alias spellings on update patches", () => {
+    const taskGraph = graph();
+    for (const [index, alias] of [
+      [0, "version"],
+      [1, "expected_version"],
+      [2, "expectedVersion"],
+    ] as const) {
+      const id = `cas-alias-${index}`;
+      taskGraph.create({ id });
+      const updated = taskGraph.update(id, {
+        owner: `worker-${index}`,
+        [alias]: 0,
+      });
+      expect(updated).toMatchObject({
+        id,
+        owner: `worker-${index}`,
+        version: 1,
+      });
+    }
+  });
+
+  test("trims and deduplicates dependency updates", () => {
+    const taskGraph = graph();
+    taskGraph.create({ id: "dependency-a" });
+    taskGraph.create({ id: "dependency-b" });
+    taskGraph.create({ id: "dependent" });
+
+    const updated = taskGraph.update(
+      "dependent",
+      {
+        blocked_by: [" dependency-a ", "dependency-a", " dependency-b "],
+      },
+      { expectedVersion: 0 },
+    );
+    expect(updated.blocked_by).toEqual(["dependency-a", "dependency-b"]);
+  });
+
+  test("matches nullish dependency fallback and rejects strict nested fields", () => {
+    const taskGraph = graph();
+    taskGraph.create({ id: "dependency" });
+    taskGraph.create({ id: "dependent" });
+    const updated = taskGraph.update("dependent", {
+      blocked_by: null as unknown as readonly string[],
+      depends_on: ["dependency", "dependency"],
+    });
+    expect(updated.blocked_by).toEqual(["dependency"]);
+    expect(() =>
+      taskGraph.update("dependent", { unknown: true } as never),
+    ).toThrow(/unknown patch field: unknown/);
+    expect(() =>
+      taskGraph.route({ id: "unknown-task", unknown: true } as never),
+    ).toThrow(/unknown task field: unknown/);
+  });
+
+  test("rejects orphaned routes and mismatched task and lease owners", () => {
+    const taskGraph = graph();
+    expect(() =>
+      taskGraph.route({ id: "active", status: "running" }),
+    ).toThrow(/route cannot create claimed or running tasks/);
+    expect(() =>
+      taskGraph.route({ id: "leased", lease_id: "orphan-lease" }),
+    ).toThrow(/route cannot attach a lease_id/);
+    taskGraph.create({ id: "owned" });
+    taskGraph.acquireLease("owned", "worker", { lease_id: "owned-lease" });
+    expect(() =>
+      taskGraph.update("owned", { owner: "other" }),
+    ).toThrow(/Lease owner mismatch/);
+  });
+
+  test("keeps the fallback database and sidecars at mode 0600", () => {
+    const taskGraph = graph();
+    expect(lstatSync(taskGraph.databasePath).mode & 0o777).toBe(0o600);
+    for (const sidecar of [
+      `${taskGraph.databasePath}-wal`,
+      `${taskGraph.databasePath}-shm`,
+    ]) {
+      if (existsSync(sidecar)) {
+        expect(lstatSync(sidecar).mode & 0o777).toBe(0o600);
+      }
+    }
   });
 
   test("rejects missing dependencies and direct or indirect cycles before writing", () => {

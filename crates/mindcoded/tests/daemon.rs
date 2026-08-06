@@ -42,6 +42,7 @@ async fn status_exposes_counters_without_secrets() {
     let task = tokio::spawn(
         Daemon::new(DaemonConfig {
             socket: socket.clone(),
+            state_dir: Some(dir.path().join("state")),
             idle_seconds: Some(60),
             handshake_timeout: Duration::from_secs(5),
             build_id: "integration".into(),
@@ -96,6 +97,7 @@ async fn second_instance_is_rejected() {
     let socket = dir.path().join("runtime/daemon.sock");
     let config = DaemonConfig {
         socket: socket.clone(),
+        state_dir: Some(dir.path().join("state")),
         idle_seconds: Some(60),
         handshake_timeout: Duration::from_secs(5),
         build_id: "one".into(),
@@ -115,6 +117,7 @@ async fn idle_timeout_stops_daemon_without_active_requests() {
     let task = tokio::spawn(
         Daemon::new(DaemonConfig {
             socket: socket.clone(),
+            state_dir: Some(dir.path().join("state")),
             idle_seconds: Some(1),
             handshake_timeout: Duration::from_secs(5),
             build_id: "idle-test".into(),

@@ -231,6 +231,28 @@ describe("DaemonClient", () => {
     ).toHaveLength(3);
   });
 
+  test("namespaces request IDs across client instances", async () => {
+    const { fake, client } = await fakeClient();
+    const second = new DaemonClient({
+      socketPath: fake.socketPath,
+      connectTimeoutMs: 1_000,
+      handshakeTimeoutMs: 1_000,
+      requestTimeoutMs: 500,
+    });
+    clients.push(second);
+    await Promise.all([client.ping(), second.ping()]);
+    const ids = fake.received
+      .filter(
+        (message): message is Extract<DaemonWireMessage, { id: string }> =>
+          "id" in message,
+      )
+      .map((message) => message.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids.every((id) => /^(handshake|request)-[0-9a-f-]+-[0-9a-z]+$/.test(id))).toBe(
+      true,
+    );
+  });
+
   test("validates stream sequence and returns the final response", async () => {
     const { client } = await fakeClient();
     const chunks: unknown[] = [];

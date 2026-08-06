@@ -5,13 +5,20 @@ pub mod protocol;
 
 use anyhow::{bail, Context, Result};
 use instance::InstanceLock;
+use mindcode_state::{
+    ClaimOptions, ConflictMode, ListOptions, StateError, TaskGraph, TaskGraphConfig, TaskInput,
+    TaskStatus, DEFAULT_LEASE_TTL_MS,
+};
 use protocol::{
     read_message, write_message, ClientMessage, RemoteErrorPayload, ServerMessage, PROTOCOL_VERSION,
 };
-use serde::Serialize;
+use serde::{
+    de::{DeserializeOwned, Deserializer},
+    Deserialize, Serialize,
+};
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     env,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -20,6 +27,7 @@ use std::{
 use tokio::{
     net::{unix::OwnedWriteHalf, UnixListener, UnixStream},
     sync::{Mutex as AsyncMutex, Notify},
+    sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError},
     task::JoinSet,
     time::{sleep, sleep_until, timeout, Instant as TokioInstant},
 };
@@ -32,7 +40,29 @@ const DEFAULT_IDLE_SECONDS: u64 = 30 * 60;
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_POLL: Duration = Duration::from_millis(250);
 const MAX_SLEEP_MS: u64 = 60_000;
-const SERVER_CAPABILITIES: &[&str] = &["request", "stream", "cancel", "ping", "status", "shutdown"];
+pub const MAX_DAEMON_CONNECTIONS: usize = 64;
+pub const MAX_DAEMON_IN_FLIGHT_REQUESTS: usize = 128;
+pub const MAX_COMPLETED_MUTATION_REPLAY_BYTES: usize = 4 * 1024 * 1024;
+const SERVER_CAPABILITIES: &[&str] = &[
+    "request",
+    "stream",
+    "cancel",
+    "ping",
+    "status",
+    "shutdown",
+    "task_graph",
+    "task_graph.route",
+    "task_graph.route_update",
+    "task_graph.read",
+    "task_graph.list",
+    "task_graph.list_dependents",
+    "task_graph.claim",
+    "task_graph.update",
+    "task_graph.renew_lease",
+    "task_graph.release_lease",
+    "task_graph.recover",
+    "task_graph.snapshot",
+];
 
 type SharedWriter = Arc<AsyncMutex<OwnedWriteHalf>>;
 
@@ -46,6 +76,7 @@ struct UnixIdentity {
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
     pub socket: PathBuf,
+    pub state_dir: Option<PathBuf>,
     pub idle_seconds: Option<u64>,
     pub handshake_timeout: Duration,
     pub build_id: String,
@@ -71,6 +102,7 @@ impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             socket: Self::default_socket(),
+            state_dir: None,
             idle_seconds: Some(DEFAULT_IDLE_SECONDS),
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             build_id: "dev".to_owned(),
@@ -103,9 +135,13 @@ struct Metrics {
 
 struct DaemonState {
     config: DaemonConfig,
+    task_graph: Arc<TaskGraph>,
+    request_ledger: Arc<Mutex<RequestLedger>>,
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
     activity: Notify,
+    connection_slots: Arc<Semaphore>,
+    request_slots: Arc<Semaphore>,
     started_at: Instant,
 }
 
@@ -150,12 +186,21 @@ pub struct Daemon {
 
 impl Daemon {
     pub fn new(config: DaemonConfig) -> Self {
+        let mut task_graph_config = TaskGraphConfig::from_env();
+        task_graph_config.lease_ttl_ms = DEFAULT_LEASE_TTL_MS;
+        if let Some(state_dir) = &config.state_dir {
+            task_graph_config.state_dir = state_dir.clone();
+        }
         Self {
             state: Arc::new(DaemonState {
+                task_graph: Arc::new(TaskGraph::new(task_graph_config)),
+                request_ledger: Arc::new(Mutex::new(RequestLedger::default())),
                 config,
                 metrics: Arc::new(Metrics::default()),
                 shutdown: CancellationToken::new(),
                 activity: Notify::new(),
+                connection_slots: Arc::new(Semaphore::new(MAX_DAEMON_CONNECTIONS)),
+                request_slots: Arc::new(Semaphore::new(MAX_DAEMON_IN_FLIGHT_REQUESTS)),
                 started_at: Instant::now(),
             }),
         }
@@ -185,6 +230,11 @@ impl Daemon {
         let _instance_lock =
             InstanceLock::acquire(&lock_path, socket_path, &self.state.config.build_id)
                 .with_context(|| format!("acquire daemon instance lock {}", lock_path.display()))?;
+
+        let task_graph = Arc::clone(&self.state.task_graph);
+        tokio::task::spawn_blocking(move || task_graph.initialize())
+            .await
+            .context("join task graph initialization")??;
 
         ensure_runtime_directory_unchanged(parent, runtime_identity)?;
         remove_stale_socket(socket_path)?;
@@ -226,7 +276,15 @@ impl Daemon {
                     let (stream, _) = accepted.context("accept daemon connection")?;
                     last_activity = Instant::now();
                     let state = Arc::clone(&self.state);
-                    tasks.spawn(async move { handle_connection(stream, state).await });
+                    match state.connection_slots.clone().try_acquire_owned() {
+                        Ok(permit) => {
+                            tasks.spawn(async move { handle_connection(stream, state, permit).await });
+                        }
+                        Err(TryAcquireError::NoPermits) => {
+                            tasks.spawn(async move { reject_overloaded_connection(stream, state).await });
+                        }
+                        Err(TryAcquireError::Closed) => break,
+                    }
                 }
                 joined = tasks.join_next(), if !tasks.is_empty() => {
                     if let Some(Err(error)) = joined {
@@ -258,6 +316,14 @@ impl Daemon {
     }
 }
 
+const MAX_COMPLETED_MUTATION_REPLAYS: usize = 256;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RequestFingerprint {
+    method: String,
+    params: Option<Value>,
+}
+
 struct RequestEntry {
     generation: u64,
     token: CancellationToken,
@@ -269,66 +335,269 @@ struct ConnectionRegistry {
     next_generation: u64,
 }
 
+struct ActiveRequest {
+    generation: u64,
+}
+
+#[derive(Default)]
+struct RequestLedger {
+    active: HashMap<String, ActiveRequest>,
+    completed: HashMap<String, CompletedMutation>,
+    completed_order: VecDeque<String>,
+    completed_bytes: usize,
+    next_generation: u64,
+}
+
+struct CompletedMutation {
+    fingerprint: RequestFingerprint,
+    result: RequestResult,
+    bytes: usize,
+}
+
+fn replay_entry_bytes(
+    request_id: &str,
+    fingerprint: &RequestFingerprint,
+    result: &RequestResult,
+) -> usize {
+    request_id
+        .len()
+        .saturating_add(fingerprint.method.len())
+        .saturating_add(
+            fingerprint
+                .params
+                .as_ref()
+                .and_then(|value| serde_json::to_vec(value).ok())
+                .map_or(0, |value| value.len()),
+        )
+        .saturating_add(
+            result
+                .result
+                .as_ref()
+                .and_then(|value| serde_json::to_vec(value).ok())
+                .map_or(0, |value| value.len()),
+        )
+        .saturating_add(
+            result
+                .error
+                .as_ref()
+                .and_then(|value| serde_json::to_vec(value).ok())
+                .map_or(0, |value| value.len()),
+        )
+}
+
+enum RequestStart {
+    Started(RequestLease),
+    Replay(RequestResult),
+    Duplicate,
+    IdReuse,
+    Overloaded,
+}
+
 struct RequestLease {
     request_id: String,
-    generation: u64,
+    local_generation: u64,
+    global_generation: u64,
+    fingerprint: RequestFingerprint,
     token: CancellationToken,
-    registry: Arc<Mutex<ConnectionRegistry>>,
+    local_registry: Arc<Mutex<ConnectionRegistry>>,
+    global_registry: Arc<Mutex<RequestLedger>>,
     metrics: Arc<Metrics>,
+    _in_flight_permit: OwnedSemaphorePermit,
+    finished: bool,
 }
 
 impl RequestLease {
     fn begin(
         request_id: String,
-        registry: &Arc<Mutex<ConnectionRegistry>>,
+        fingerprint: RequestFingerprint,
+        local_registry: &Arc<Mutex<ConnectionRegistry>>,
+        global_registry: &Arc<Mutex<RequestLedger>>,
         metrics: &Arc<Metrics>,
-    ) -> Option<Self> {
-        let mut registry_guard = registry.lock().expect("connection registry poisoned");
-        if registry_guard.requests.contains_key(&request_id) {
-            return None;
+        request_slots: &Arc<Semaphore>,
+    ) -> RequestStart {
+        let mut global_guard = global_registry.lock().expect("request ledger poisoned");
+        if let Some(completed) = global_guard.completed.get(&request_id) {
+            return if completed.fingerprint == fingerprint {
+                RequestStart::Replay(completed.result.clone())
+            } else {
+                RequestStart::IdReuse
+            };
         }
-        registry_guard.next_generation = registry_guard.next_generation.wrapping_add(1).max(1);
-        let generation = registry_guard.next_generation;
+        if global_guard.active.contains_key(&request_id) {
+            return RequestStart::Duplicate;
+        }
+        let in_flight_permit = match request_slots.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(TryAcquireError::NoPermits | TryAcquireError::Closed) => {
+                return RequestStart::Overloaded;
+            }
+        };
+        global_guard.next_generation = global_guard.next_generation.wrapping_add(1).max(1);
+        let global_generation = global_guard.next_generation;
         let token = CancellationToken::new();
-        registry_guard.requests.insert(
+        global_guard.active.insert(
+            request_id.clone(),
+            ActiveRequest {
+                generation: global_generation,
+            },
+        );
+        drop(global_guard);
+
+        let mut local_guard = local_registry.lock().expect("connection registry poisoned");
+        local_guard.next_generation = local_guard.next_generation.wrapping_add(1).max(1);
+        let local_generation = local_guard.next_generation;
+        local_guard.requests.insert(
             request_id.clone(),
             RequestEntry {
-                generation,
+                generation: local_generation,
                 token: token.clone(),
             },
         );
-        drop(registry_guard);
+        drop(local_guard);
 
         use std::sync::atomic::Ordering;
         metrics.active_requests.fetch_add(1, Ordering::AcqRel);
         metrics.total_requests.fetch_add(1, Ordering::Relaxed);
-        Some(Self {
+        RequestStart::Started(Self {
             request_id,
-            generation,
+            local_generation,
+            global_generation,
+            fingerprint,
             token,
-            registry: Arc::clone(registry),
+            local_registry: Arc::clone(local_registry),
+            global_registry: Arc::clone(global_registry),
             metrics: Arc::clone(metrics),
+            _in_flight_permit: in_flight_permit,
+            finished: false,
         })
+    }
+
+    fn finish(&mut self, cache_result: bool, result: &RequestResult) {
+        if self.finished {
+            return;
+        }
+
+        let mut global = self
+            .global_registry
+            .lock()
+            .expect("request ledger poisoned");
+        let owns_global = global
+            .active
+            .get(&self.request_id)
+            .is_some_and(|entry| entry.generation == self.global_generation);
+        if owns_global {
+            global.active.remove(&self.request_id);
+            if cache_result {
+                let bytes = replay_entry_bytes(&self.request_id, &self.fingerprint, result);
+                if bytes <= MAX_COMPLETED_MUTATION_REPLAY_BYTES {
+                    global.completed_bytes = global.completed_bytes.saturating_add(bytes);
+                    global.completed.insert(
+                        self.request_id.clone(),
+                        CompletedMutation {
+                            fingerprint: self.fingerprint.clone(),
+                            result: result.clone(),
+                            bytes,
+                        },
+                    );
+                    global.completed_order.push_back(self.request_id.clone());
+                }
+                while global.completed_order.len() > MAX_COMPLETED_MUTATION_REPLAYS
+                    || global.completed_bytes > MAX_COMPLETED_MUTATION_REPLAY_BYTES
+                {
+                    if let Some(evicted) = global.completed_order.pop_front() {
+                        if let Some(entry) = global.completed.remove(&evicted) {
+                            global.completed_bytes =
+                                global.completed_bytes.saturating_sub(entry.bytes);
+                        }
+                    }
+                }
+            }
+        }
+        drop(global);
+        self.remove_local();
+        self.metrics
+            .active_requests
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        self.finished = true;
+    }
+
+    fn remove_local(&self) {
+        let mut local = self
+            .local_registry
+            .lock()
+            .expect("connection registry poisoned");
+        if local
+            .requests
+            .get(&self.request_id)
+            .is_some_and(|entry| entry.generation == self.local_generation)
+        {
+            local.requests.remove(&self.request_id);
+        }
     }
 }
 
 impl Drop for RequestLease {
     fn drop(&mut self) {
-        use std::sync::atomic::Ordering;
-
-        let mut registry = self.registry.lock().expect("connection registry poisoned");
-        let removed = registry
-            .requests
-            .get(&self.request_id)
-            .is_some_and(|entry| entry.generation == self.generation);
-        if removed {
-            registry.requests.remove(&self.request_id);
-            self.metrics.active_requests.fetch_sub(1, Ordering::AcqRel);
+        if self.finished {
+            return;
         }
+        let mut global = self
+            .global_registry
+            .lock()
+            .expect("request ledger poisoned");
+        if global
+            .active
+            .get(&self.request_id)
+            .is_some_and(|entry| entry.generation == self.global_generation)
+        {
+            global.active.remove(&self.request_id);
+        }
+        drop(global);
+        self.remove_local();
+        self.metrics
+            .active_requests
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
-async fn handle_connection(stream: UnixStream, state: Arc<DaemonState>) -> Result<()> {
+async fn reject_overloaded_connection(
+    mut stream: UnixStream,
+    state: Arc<DaemonState>,
+) -> Result<()> {
+    let handshake = match timeout(
+        state.config.handshake_timeout,
+        read_message::<_, ClientMessage>(&mut stream),
+    )
+    .await
+    {
+        Ok(Ok(Some(ClientMessage::Handshake { id, .. }))) => id,
+        _ => return Ok(()),
+    };
+    write_message(
+        &mut stream,
+        &ServerMessage::HandshakeAck {
+            id: handshake,
+            version: PROTOCOL_VERSION,
+            accepted: false,
+            server: Some(format!("mindcoded/{}", state.config.build_id)),
+            capabilities: Vec::new(),
+            error: Some(RemoteErrorPayload {
+                code: "DAEMON_OVERLOADED_CONNECTIONS".into(),
+                message: "daemon connection limit reached".into(),
+                details: None,
+            }),
+        },
+    )
+    .await
+    .context("write overloaded connection response")?;
+    Ok(())
+}
+
+async fn handle_connection(
+    stream: UnixStream,
+    state: Arc<DaemonState>,
+    _connection_permit: OwnedSemaphorePermit,
+) -> Result<()> {
     use std::sync::atomic::Ordering;
 
     state
@@ -428,17 +697,49 @@ async fn handle_connection_inner(stream: UnixStream, state: Arc<DaemonState>) ->
                     }
                     ClientMessage::Request { id, method, params, .. } => {
                         let request_id = id.clone();
-                        let Some(lease) = RequestLease::begin(request_id.clone(), &registry, &state.metrics) else {
-                            if let Err(error) = write_error(&writer, request_id, "duplicate_request", "request id is already active").await {
-                                break Err(error);
+                        let fingerprint = RequestFingerprint {
+                            method: method.clone(),
+                            params: params.clone(),
+                        };
+                        let start = RequestLease::begin(
+                            request_id.clone(),
+                            fingerprint,
+                            &registry,
+                            &state.request_ledger,
+                            &state.metrics,
+                            &state.request_slots,
+                        );
+                        let lease = match start {
+                            RequestStart::Started(lease) => lease,
+                            RequestStart::Replay(result) => {
+                                if let Err(error) = write_request_result(&writer, request_id, result).await {
+                                    break Err(error);
+                                }
+                                continue;
                             }
-                            continue;
+                            RequestStart::Duplicate => {
+                                if let Err(error) = write_error(&writer, request_id, "duplicate_request", "request id is already active").await {
+                                    break Err(error);
+                                }
+                                continue;
+                            }
+                            RequestStart::IdReuse => {
+                                if let Err(error) = write_error(&writer, request_id, "request_id_reuse", "request id was already completed with different method or params").await {
+                                    break Err(error);
+                                }
+                                continue;
+                            }
+                            RequestStart::Overloaded => {
+                                if let Err(error) = write_error(&writer, request_id, "DAEMON_OVERLOADED_REQUESTS", "daemon in-flight request limit reached").await {
+                                    break Err(error);
+                                }
+                                continue;
+                            }
                         };
                         let task_state = Arc::clone(&state);
-                        let task_registry = Arc::clone(&registry);
                         let task_writer = Arc::clone(&writer);
                         tasks.spawn(async move {
-                            run_request(id, method, params, lease, task_state, task_registry, task_writer).await
+                            run_request(id, method, params, lease, task_state, task_writer).await
                         });
                     }
                 }
@@ -486,23 +787,30 @@ async fn run_request(
     params: Option<Value>,
     lease: RequestLease,
     state: Arc<DaemonState>,
-    _registry: Arc<Mutex<ConnectionRegistry>>,
     writer: SharedWriter,
 ) -> Result<()> {
     let cancellation = lease.token.clone();
-    let result = tokio::select! {
-        _ = cancellation.cancelled() => RequestResult::cancelled(),
-        result = execute_request(&method, params, &state) => result?,
-    };
+    let result = execute_request(&method, params, &state, cancellation).await?;
     let should_shutdown = result.shutdown;
+    let replayable = is_mutation_method(&method);
+    let mut lease = lease;
+    if replayable {
+        // Publish a completed mutation before writing its response so a
+        // reconnect can replay it even if the original socket disappears.
+        lease.finish(true, &result);
+    }
     let response = ServerMessage::Response {
         id,
         ok: result.ok,
-        result: result.result,
-        error: result.error,
+        result: result.result.clone(),
+        error: result.error.clone(),
     };
     let write_result = write_server_message(&writer, &response).await;
-    drop(lease);
+    if !replayable {
+        // Keep non-mutation request ids active until their response has been
+        // written, preserving the existing duplicate-request protection.
+        lease.finish(false, &result);
+    }
     state.touch();
     if should_shutdown {
         state.shutdown.cancel();
@@ -510,6 +818,7 @@ async fn run_request(
     write_result
 }
 
+#[derive(Debug, Clone)]
 struct RequestResult {
     ok: bool,
     result: Option<Value>,
@@ -550,16 +859,230 @@ impl RequestResult {
     fn cancelled() -> Self {
         Self::error("cancelled", "request cancelled")
     }
+
+    fn serialized<T: Serialize>(value: T) -> Result<Self> {
+        Ok(Self::ok(serde_json::to_value(value)?))
+    }
+
+    fn state_error(error: StateError) -> Self {
+        let details = match &error {
+            StateError::VersionConflict {
+                task_id,
+                expected,
+                actual,
+            } => Some(json!({
+                "task_id": task_id,
+                "expected_version": expected,
+                "actual_version": actual,
+            })),
+            StateError::DependencyNotFound {
+                task_id,
+                dependency_id,
+            } => Some(json!({
+                "task_id": task_id,
+                "dependency_id": dependency_id,
+            })),
+            StateError::DependencyCycle(cycle) => Some(json!({ "cycle": cycle })),
+            _ => None,
+        };
+        Self {
+            ok: false,
+            result: None,
+            error: Some(RemoteErrorPayload {
+                code: error.code().into(),
+                message: error.to_string(),
+                details,
+            }),
+            shutdown: false,
+        }
+    }
+
+    fn invalid_params(message: impl Into<String>) -> Self {
+        Self::error("INVALID_PARAMS", message)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RouteParams {
+    task: TaskInput,
+    mode: Option<ConflictMode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskIdParams {
+    task_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum StatusFilter {
+    One(TaskStatus),
+    Many(Vec<TaskStatus>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListParams {
+    status: Option<StatusFilter>,
+    owner: Option<Value>,
+    limit: Option<u64>,
+    offset: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClaimParams {
+    task_id: String,
+    owner: String,
+    lease_id: Option<String>,
+    ttl_ms: Option<u64>,
+    expected_version: Option<u64>,
+    now: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RouteUpdateParams {
+    task_id: String,
+    patch: Value,
+    mode: Option<ConflictMode>,
+    expected_version: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateParams {
+    task_id: String,
+    patch: Value,
+    expected_version: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LeaseParams {
+    lease_id: String,
+    owner: Option<String>,
+    ttl_ms: Option<u64>,
+    now: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseParams {
+    lease_id: String,
+    owner: Option<String>,
+    now: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoverParams {
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
+    now: Option<String>,
+}
+
+fn deserialize_optional_string<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
+}
+
+fn parse_params<T: DeserializeOwned>(
+    params: Option<Value>,
+) -> std::result::Result<T, RequestResult> {
+    let Some(params) = params else {
+        return Err(RequestResult::invalid_params("params must be an object"));
+    };
+    if !params.is_object() {
+        return Err(RequestResult::invalid_params("params must be an object"));
+    }
+    serde_json::from_value(params).map_err(|error| RequestResult::invalid_params(error.to_string()))
+}
+
+fn parse_empty_params(params: Option<Value>) -> std::result::Result<(), RequestResult> {
+    match params {
+        Some(Value::Object(object)) if object.is_empty() => Ok(()),
+        Some(Value::Object(_)) | Some(_) | None => Err(RequestResult::invalid_params(
+            "snapshot params must be an empty object",
+        )),
+    }
+}
+
+fn validate_rpc_patch(patch: &Value) -> std::result::Result<(), RequestResult> {
+    let Some(object) = patch.as_object() else {
+        return Err(RequestResult::invalid_params("patch must be an object"));
+    };
+    const ALLOWED: &[&str] = &[
+        "status",
+        "owner",
+        "kind",
+        "effort",
+        "priority",
+        "blocked_by",
+        "depends_on",
+        "claimed_at",
+        "started_at",
+        "finished_at",
+        "files_touched",
+        "read_set",
+        "write_set",
+        "isolation",
+        "lease_id",
+        "policy_epoch",
+        "report_id",
+        "expectedVersion",
+        "expected_version",
+        "version",
+    ];
+    if let Some(unknown) = object.keys().find(|key| !ALLOWED.contains(&key.as_str())) {
+        return Err(RequestResult::invalid_params(format!(
+            "unknown patch field: {unknown}"
+        )));
+    }
+    Ok(())
+}
+
+async fn run_state_call<T, F>(
+    cancellation: &CancellationToken,
+    operation: F,
+) -> Result<Option<std::result::Result<T, StateError>>>
+where
+    T: Send + 'static,
+    F: FnOnce() -> std::result::Result<T, StateError> + Send + 'static,
+{
+    let mut handle = tokio::task::spawn_blocking(operation);
+    tokio::select! {
+        result = &mut handle => {
+            Ok(Some(result.context("join task graph operation")?))
+        }
+        _ = cancellation.cancelled() => {
+            // `spawn_blocking` cannot be force-aborted after it starts. Wait
+            // for the SQLite operation to reach its commit/rollback boundary
+            // and return its actual result. A committed mutation must never
+            // be reported as an ambiguous cancellation.
+            Ok(Some(handle.await.context("join task graph operation")?))
+        }
+    }
 }
 
 async fn execute_request(
     method: &str,
     params: Option<Value>,
     state: &Arc<DaemonState>,
+    cancellation: CancellationToken,
 ) -> Result<RequestResult> {
-    Ok(match method {
-        "ping" => RequestResult::ok(json!({ "pong": true })),
-        "status" => RequestResult::ok(serde_json::to_value(state.status())?),
+    if cancellation.is_cancelled() {
+        return Ok(RequestResult::cancelled());
+    }
+
+    match method {
+        "ping" => Ok(RequestResult::ok(json!({ "pong": true }))),
+        "status" => Ok(RequestResult::ok(serde_json::to_value(state.status())?)),
         "sleep" => {
             let duration_ms = params
                 .as_ref()
@@ -567,15 +1090,230 @@ async fn execute_request(
                 .and_then(Value::as_u64)
                 .unwrap_or(1_000)
                 .min(MAX_SLEEP_MS);
-            sleep(Duration::from_millis(duration_ms)).await;
-            RequestResult::ok(json!({ "slept_ms": duration_ms }))
+            tokio::select! {
+                _ = cancellation.cancelled() => Ok(RequestResult::cancelled()),
+                _ = sleep(Duration::from_millis(duration_ms)) => Ok(RequestResult::ok(json!({ "slept_ms": duration_ms }))),
+            }
         }
-        "shutdown" => RequestResult::shutdown(json!({ "accepted": true })),
-        _ => RequestResult::error(
+        "shutdown" => Ok(RequestResult::shutdown(json!({ "accepted": true }))),
+        "task_graph.route" => {
+            let request = match parse_params::<RouteParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let graph = Arc::clone(&state.task_graph);
+            let result = run_state_call(&cancellation, move || {
+                graph.route(request.task, request.mode.unwrap_or_default())
+            })
+            .await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(value)) => RequestResult::serialized(value),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
+        "task_graph.route_update" => {
+            let request = match parse_params::<RouteUpdateParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            if let Err(error) = validate_rpc_patch(&request.patch) {
+                return Ok(error);
+            }
+            let graph = Arc::clone(&state.task_graph);
+            let result = run_state_call(&cancellation, move || {
+                graph.route_update(
+                    &request.task_id,
+                    request.patch,
+                    request.mode.unwrap_or_default(),
+                    request.expected_version,
+                )
+            })
+            .await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(value)) => RequestResult::serialized(value),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
+        "task_graph.read" => {
+            let request = match parse_params::<TaskIdParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let graph = Arc::clone(&state.task_graph);
+            let result =
+                run_state_call(&cancellation, move || graph.read(&request.task_id)).await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(task)) => RequestResult::serialized(json!({ "task": task })),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
+        "task_graph.list" => {
+            let request = match parse_params::<ListParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let status = match request.status {
+                None => None,
+                Some(StatusFilter::One(value)) => Some(vec![value]),
+                Some(StatusFilter::Many(value)) => Some(value),
+            };
+            let owner = match request.owner {
+                None => None,
+                Some(Value::Null) => Some(None),
+                Some(Value::String(value)) => Some(Some(value)),
+                Some(value) => {
+                    return Ok(RequestResult::invalid_params(format!(
+                        "owner must be a string or null, got {value}"
+                    )))
+                }
+            };
+            let options = ListOptions {
+                status,
+                owner,
+                limit: request.limit,
+                offset: request.offset,
+            };
+            let graph = Arc::clone(&state.task_graph);
+            let result = run_state_call(&cancellation, move || graph.list(options)).await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(tasks)) => RequestResult::serialized(json!({ "tasks": tasks })),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
+        "task_graph.list_dependents" => {
+            let request = match parse_params::<TaskIdParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let graph = Arc::clone(&state.task_graph);
+            let result = run_state_call(&cancellation, move || {
+                graph.list_dependents(&request.task_id)
+            })
+            .await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(tasks)) => RequestResult::serialized(json!({ "tasks": tasks })),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
+        "task_graph.claim" => {
+            let request = match parse_params::<ClaimParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let options = ClaimOptions {
+                lease_id: request.lease_id,
+                ttl_ms: request.ttl_ms,
+                expected_version: request.expected_version,
+                now: request.now,
+            };
+            let graph = Arc::clone(&state.task_graph);
+            let result = run_state_call(&cancellation, move || {
+                graph.claim(&request.task_id, &request.owner, options)
+            })
+            .await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(value)) => RequestResult::serialized(value),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
+        "task_graph.update" => {
+            let request = match parse_params::<UpdateParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            if let Err(error) = validate_rpc_patch(&request.patch) {
+                return Ok(error);
+            }
+            let graph = Arc::clone(&state.task_graph);
+            let result = run_state_call(&cancellation, move || {
+                graph.update(&request.task_id, request.patch, request.expected_version)
+            })
+            .await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(task)) => RequestResult::serialized(json!({ "task": task })),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
+        "task_graph.renew_lease" => {
+            let request = match parse_params::<LeaseParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let graph = Arc::clone(&state.task_graph);
+            let result = run_state_call(&cancellation, move || {
+                graph.renew_lease(
+                    &request.lease_id,
+                    request.owner.as_deref(),
+                    request.ttl_ms,
+                    request.now.as_deref(),
+                )
+            })
+            .await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(lease)) => RequestResult::serialized(json!({ "lease": lease })),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
+        "task_graph.release_lease" => {
+            let request = match parse_params::<ReleaseParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let graph = Arc::clone(&state.task_graph);
+            let result = run_state_call(&cancellation, move || {
+                graph.release_lease(
+                    &request.lease_id,
+                    request.owner.as_deref(),
+                    request.now.as_deref(),
+                )
+            })
+            .await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(lease)) => RequestResult::serialized(json!({ "lease": lease })),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
+        "task_graph.recover" => {
+            let request = match parse_params::<RecoverParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let now = request.now;
+            let graph = Arc::clone(&state.task_graph);
+            let result =
+                run_state_call(&cancellation, move || graph.recover(now.as_deref())).await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(value)) => RequestResult::serialized(value),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
+        "task_graph.snapshot" => {
+            if let Err(error) = parse_empty_params(params) {
+                return Ok(error);
+            }
+            let graph = Arc::clone(&state.task_graph);
+            let result = run_state_call(&cancellation, move || graph.snapshot()).await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(value)) => RequestResult::serialized(value),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
+        _ => Ok(RequestResult::error(
             "unsupported_method",
             format!("unsupported daemon method: {method}"),
-        ),
-    })
+        )),
+    }
 }
 
 fn cancel_all_requests(registry: &Arc<Mutex<ConnectionRegistry>>) {
@@ -585,11 +1323,40 @@ fn cancel_all_requests(registry: &Arc<Mutex<ConnectionRegistry>>) {
     }
 }
 
+fn is_mutation_method(method: &str) -> bool {
+    matches!(
+        method,
+        "task_graph.route"
+            | "task_graph.claim"
+            | "task_graph.update"
+            | "task_graph.renew_lease"
+            | "task_graph.release_lease"
+            | "task_graph.recover"
+    )
+}
+
 async fn write_server_message(writer: &SharedWriter, message: &ServerMessage) -> Result<()> {
     let mut writer_guard = writer.lock().await;
     write_message(&mut *writer_guard, message)
         .await
         .context("write daemon response")
+}
+
+async fn write_request_result(
+    writer: &SharedWriter,
+    id: String,
+    result: RequestResult,
+) -> Result<()> {
+    write_server_message(
+        writer,
+        &ServerMessage::Response {
+            id,
+            ok: result.ok,
+            result: result.result,
+            error: result.error,
+        },
+    )
+    .await
 }
 
 async fn write_ok(writer: &SharedWriter, id: String, result: Value) -> Result<()> {
@@ -799,8 +1566,13 @@ mod tests {
     use tokio::net::UnixStream;
 
     fn test_config(path: PathBuf) -> DaemonConfig {
+        let state_dir = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("state");
         DaemonConfig {
             socket: path,
+            state_dir: Some(state_dir),
             idle_seconds: Some(60),
             handshake_timeout: Duration::from_millis(100),
             build_id: "test-build".into(),
@@ -1053,6 +1825,51 @@ mod tests {
         task.await.unwrap().unwrap();
     }
 
+    #[tokio::test]
+    async fn global_connection_limit_returns_a_stable_handshake_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("run/mindcoded.sock");
+        let task = tokio::spawn(Daemon::new(test_config(path.clone())).run());
+        wait_for_socket(&path).await;
+        let mut held = Vec::with_capacity(MAX_DAEMON_CONNECTIONS);
+        for _ in 0..MAX_DAEMON_CONNECTIONS {
+            held.push(connect_and_handshake(&path).await);
+        }
+
+        let mut overloaded = UnixStream::connect(&path).await.unwrap();
+        write_message(
+            &mut overloaded,
+            &ClientMessage::Handshake {
+                id: "overload-handshake".into(),
+                version: PROTOCOL_VERSION,
+                client: "overload-test".into(),
+                capabilities: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        let response = timeout(
+            Duration::from_secs(1),
+            read_message::<_, ServerMessage>(&mut overloaded),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            response,
+            ServerMessage::HandshakeAck {
+                accepted: false,
+                error: Some(error),
+                ..
+            } if error.code == "DAEMON_OVERLOADED_CONNECTIONS"
+        ));
+        drop(overloaded);
+        shutdown(&mut held[0]).await;
+        drop(held);
+        task.await.unwrap().unwrap();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn runtime_and_socket_permissions_are_restricted() {
@@ -1081,27 +1898,121 @@ mod tests {
     #[test]
     fn duplicate_lease_does_not_replace_generation() {
         let metrics = Arc::new(Metrics::default());
-        let registry = Arc::new(Mutex::new(ConnectionRegistry::default()));
-        let first = RequestLease::begin("id".into(), &registry, &metrics).unwrap();
-        assert!(RequestLease::begin("id".into(), &registry, &metrics).is_none());
+        let local_registry = Arc::new(Mutex::new(ConnectionRegistry::default()));
+        let global_registry = Arc::new(Mutex::new(RequestLedger::default()));
+        let request_slots = Arc::new(Semaphore::new(MAX_DAEMON_IN_FLIGHT_REQUESTS));
+        let fingerprint = RequestFingerprint {
+            method: "task_graph.update".into(),
+            params: Some(json!({"task_id":"id"})),
+        };
+        let first = match RequestLease::begin(
+            "id".into(),
+            fingerprint.clone(),
+            &local_registry,
+            &global_registry,
+            &metrics,
+            &request_slots,
+        ) {
+            RequestStart::Started(lease) => lease,
+            _ => panic!("expected started request"),
+        };
+        assert!(matches!(
+            RequestLease::begin(
+                "id".into(),
+                fingerprint,
+                &local_registry,
+                &global_registry,
+                &metrics,
+                &request_slots,
+            ),
+            RequestStart::Duplicate
+        ));
         assert_eq!(
-            registry
+            local_registry
                 .lock()
                 .unwrap()
                 .requests
                 .get("id")
                 .unwrap()
                 .generation,
-            first.generation
+            first.local_generation
         );
         drop(first);
-        assert!(registry.lock().unwrap().requests.is_empty());
+        assert!(local_registry.lock().unwrap().requests.is_empty());
+        assert!(global_registry.lock().unwrap().active.is_empty());
         assert_eq!(
             metrics
                 .active_requests
                 .load(std::sync::atomic::Ordering::Relaxed),
             0
         );
+    }
+
+    #[test]
+    fn request_slots_return_a_stable_overload_result() {
+        let metrics = Arc::new(Metrics::default());
+        let local_registry = Arc::new(Mutex::new(ConnectionRegistry::default()));
+        let global_registry = Arc::new(Mutex::new(RequestLedger::default()));
+        let request_slots = Arc::new(Semaphore::new(1));
+        let fingerprint = RequestFingerprint {
+            method: "sleep".into(),
+            params: None,
+        };
+        let first = match RequestLease::begin(
+            "first".into(),
+            fingerprint.clone(),
+            &local_registry,
+            &global_registry,
+            &metrics,
+            &request_slots,
+        ) {
+            RequestStart::Started(lease) => lease,
+            _ => panic!("expected first request"),
+        };
+        assert!(matches!(
+            RequestLease::begin(
+                "second".into(),
+                fingerprint,
+                &local_registry,
+                &global_registry,
+                &metrics,
+                &request_slots,
+            ),
+            RequestStart::Overloaded
+        ));
+        drop(first);
+    }
+
+    #[test]
+    fn replay_cache_obeys_both_entry_and_byte_budgets() {
+        let metrics = Arc::new(Metrics::default());
+        let local_registry = Arc::new(Mutex::new(ConnectionRegistry::default()));
+        let global_registry = Arc::new(Mutex::new(RequestLedger::default()));
+        let request_slots = Arc::new(Semaphore::new(1));
+        let payload = "x".repeat(30_000);
+        for index in 0..200 {
+            let lease = match RequestLease::begin(
+                format!("replay-{index}"),
+                RequestFingerprint {
+                    method: "task_graph.route".into(),
+                    params: Some(json!({"index": index})),
+                },
+                &local_registry,
+                &global_registry,
+                &metrics,
+                &request_slots,
+            ) {
+                RequestStart::Started(lease) => lease,
+                _ => panic!("expected replay request"),
+            };
+            let result = RequestResult::ok(json!({"payload": payload}));
+            let mut lease = lease;
+            lease.finish(true, &result);
+        }
+        let ledger = global_registry.lock().unwrap();
+        assert!(ledger.completed_bytes <= MAX_COMPLETED_MUTATION_REPLAY_BYTES);
+        assert!(ledger.completed_order.len() < 200);
+        assert!(ledger.completed_order.len() <= MAX_COMPLETED_MUTATION_REPLAYS);
     }
 
     #[test]
