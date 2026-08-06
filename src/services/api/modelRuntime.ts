@@ -217,7 +217,11 @@ import {
 } from "../compact/microCompact.js";
 import { getInitializationStatus } from "../lsp/manager.js";
 import { withStreamingVCR, withVCR } from "../vcr.js";
-import { CLIENT_REQUEST_ID_HEADER, getVexzyClient } from "./client.js";
+import { getVexzyClient } from "./client.js";
+import {
+  completeRuntimeRequest,
+  streamRuntimeRequest,
+} from "./vexzy/modelRuntimeTransport.js";
 import {
   API_ERROR_MESSAGE_PREFIX,
   CUSTOM_OFF_SWITCH_MESSAGE,
@@ -529,10 +533,9 @@ export async function verifyApiKey(
             model,
             source: "verify_api_key",
           }),
-        async (anthropic) => {
+        async (client) => {
           const messages: MessageParam[] = [{ role: "user", content: "test" }];
-          // biome-ignore lint/plugin: API key verification is intentionally a minimal direct call
-          await anthropic.beta.messages.create({
+          await completeRuntimeRequest(client, {
             model,
             max_tokens: 1,
             messages,
@@ -1034,7 +1037,7 @@ export async function* executeNonStreamingRequest(
         fetchOverride: clientOptions.fetchOverride,
         source: clientOptions.source,
       }),
-    async (anthropic, attempt, context) => {
+    async (client, attempt, context) => {
       const start = Date.now();
       const retryParams = paramsFromContext(context);
       captureRequest(retryParams);
@@ -1046,17 +1049,19 @@ export async function* executeNonStreamingRequest(
       );
 
       try {
-        // biome-ignore lint/plugin: non-streaming API call
-        return await anthropic.beta.messages.create(
-          {
-            ...adjustedParams,
-            model: normalizeModelStringForAPI(adjustedParams.model),
-          },
-          {
-            signal: retryOptions.signal,
-            timeout: fallbackTimeoutMs,
-          },
-        );
+        return (
+          await completeRuntimeRequest(
+            client,
+            {
+              ...adjustedParams,
+              model: normalizeModelStringForAPI(adjustedParams.model),
+            },
+            {
+              signal: retryOptions.signal,
+              timeoutMs: fallbackTimeoutMs,
+            },
+          )
+        ).data;
       } catch (err) {
         // User aborts are not errors — re-throw immediately without logging
         if (err instanceof APIUserAbortError) throw err;
@@ -1954,7 +1959,7 @@ async function* queryModel(
           fetchOverride: options.fetchOverride,
           source: options.querySource,
         }),
-      async (anthropic, attempt, context) => {
+      async (client, attempt, context) => {
         attemptNumber = attempt;
         isFastModeRequest = context.fastMode ?? false;
         start = Date.now();
@@ -1985,21 +1990,19 @@ async function* queryModel(
         // server request ID) can still be correlated with VEXZY logs.
         clientRequestId = randomUUID();
 
-        // Use raw stream instead of BetaMessageStream to avoid O(n²) partial JSON parsing
-        // BetaMessageStream calls partialParse() on every input_json_delta, which we don't need
-        // since we handle tool input accumulation ourselves
-        // biome-ignore lint/plugin: main conversation loop handles attribution separately
-        const result = await anthropic.beta.messages
-          .create(
-            { ...params, stream: true },
-            {
-              signal,
-              ...(clientRequestId && {
-                headers: { [CLIENT_REQUEST_ID_HEADER]: clientRequestId },
-              }),
-            },
-          )
-          .withResponse();
+        // Use the raw transport stream instead of a parsed SDK stream to avoid
+        // O(n²) partial JSON parsing. The compatibility bridge preserves the
+        // local stream event shape consumed by this runtime.
+        const result = await streamRuntimeRequest(
+          client,
+          { ...params, stream: true },
+          {
+            signal,
+            ...(clientRequestId && {
+              headers: { "x-client-request-id": clientRequestId },
+            }),
+          },
+        );
         queryCheckpoint("query_response_headers_received");
         streamRequestId = result.request_id;
         streamResponse = result.response;

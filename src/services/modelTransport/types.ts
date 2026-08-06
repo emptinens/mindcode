@@ -21,12 +21,15 @@ export interface TransportMessage {
 export interface TransportToolDefinition {
   readonly name: string;
   readonly description?: string;
-  readonly inputSchema: Readonly<Record<string, unknown>>;
+  readonly inputSchema?: Readonly<Record<string, unknown>>;
+  /** Provider-neutral escape hatch for protocol fields not yet standardized. */
+  readonly extensions?: Readonly<Record<string, TransportJsonValue>>;
 }
 
 export type TransportToolChoice =
   | { readonly kind: "auto" }
   | { readonly kind: "any" }
+  | { readonly kind: "none" }
   | { readonly kind: "tool"; readonly name: string };
 
 export interface TransportOutputFormat {
@@ -48,6 +51,8 @@ export interface TransportRequest {
   readonly toolChoice?: TransportToolChoice;
   readonly metadata?: Readonly<Record<string, TransportJsonValue>>;
   readonly outputFormat?: TransportOutputFormat;
+  /** Opaque JSON fields retained until a provider-neutral contract exists. */
+  readonly extensions?: Readonly<Record<string, TransportJsonValue>>;
 }
 
 export interface TransportRequestOptions {
@@ -68,6 +73,7 @@ export interface TransportUsage {
   readonly outputTokens: number;
   readonly cacheReadInputTokens?: number;
   readonly cacheWriteInputTokens?: number;
+  readonly extensions?: Readonly<Record<string, TransportJsonValue>>;
 }
 
 export interface TransportResponse {
@@ -75,7 +81,9 @@ export interface TransportResponse {
   readonly model: string;
   readonly content: readonly TransportContentBlock[];
   readonly stopReason: string | null;
+  readonly stopSequence?: string | null;
   readonly usage: TransportUsage;
+  readonly extensions?: Readonly<Record<string, TransportJsonValue>>;
 }
 
 export interface TransportResult {
@@ -99,24 +107,40 @@ export interface TransportModelInfo {
 export type TransportStreamEvent =
   | {
       readonly kind: "started";
-      readonly response: Pick<TransportResponse, "id" | "model">;
+      readonly response: TransportResponse;
+      readonly extensions?: Readonly<Record<string, TransportJsonValue>>;
     }
   | {
       readonly kind: "content_started";
       readonly index: number;
       readonly content: TransportContentBlock;
+      readonly extensions?: Readonly<Record<string, TransportJsonValue>>;
     }
   | {
       readonly kind: "content_delta";
       readonly index: number;
       readonly delta: Readonly<Record<string, unknown>>;
+      readonly extensions?: Readonly<Record<string, TransportJsonValue>>;
     }
-  | { readonly kind: "content_stopped"; readonly index: number }
-  | { readonly kind: "keepalive" }
+  | {
+      readonly kind: "content_stopped";
+      readonly index: number;
+      readonly extensions?: Readonly<Record<string, TransportJsonValue>>;
+    }
+  | {
+      readonly kind: "keepalive";
+      readonly extensions?: Readonly<Record<string, TransportJsonValue>>;
+    }
   | {
       readonly kind: "completed";
       readonly stopReason: string | null;
+      readonly stopSequence?: string | null;
       readonly usage: Partial<TransportUsage>;
+      readonly extensions?: Readonly<Record<string, TransportJsonValue>>;
+    }
+  | {
+      readonly kind: "stopped";
+      readonly extensions?: Readonly<Record<string, TransportJsonValue>>;
     };
 
 export interface TransportStream extends AsyncIterable<TransportStreamEvent> {
@@ -154,11 +178,19 @@ export type ModelTransportErrorCode =
 export class ModelTransportError extends Error {
   readonly code: ModelTransportErrorCode;
   readonly status?: number;
+  readonly cause?: unknown;
 
-  constructor(code: ModelTransportErrorCode, status?: number) {
+  constructor(code: ModelTransportErrorCode, status?: number, cause?: unknown) {
     super(`Model transport request ${code.replace("_", " ")}`);
     this.name = "ModelTransportError";
     this.code = code;
     this.status = status;
+    if (cause !== undefined) {
+      Object.defineProperty(this, "cause", {
+        configurable: true,
+        enumerable: false,
+        value: cause,
+      });
+    }
   }
 }

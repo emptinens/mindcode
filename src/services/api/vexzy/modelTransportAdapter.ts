@@ -12,6 +12,7 @@ import type {
   TransportStreamEvent,
   TransportTokenCount,
   TransportToolChoice,
+  TransportJsonValue,
   TransportUsage,
 } from "../../modelTransport/index.js";
 import { ModelTransportError } from "../../modelTransport/index.js";
@@ -164,6 +165,7 @@ export function createVexzyModelTransport(
 
 function toVexzyRequest(request: TransportRequest): VexzySDKMessageParams {
   return {
+    ...(request.extensions ?? {}),
     model: request.model,
     max_tokens: request.maxOutputTokens,
     messages: request.messages.map(toVexzyMessage),
@@ -181,11 +183,14 @@ function toVexzyRequest(request: TransportRequest): VexzySDKMessageParams {
     }),
     ...(request.tools !== undefined && {
       tools: request.tools.map((tool) => ({
+        ...(tool.extensions ?? {}),
         name: tool.name,
         ...(tool.description !== undefined && {
           description: tool.description,
         }),
-        input_schema: tool.inputSchema,
+        ...(tool.inputSchema !== undefined && {
+          input_schema: tool.inputSchema,
+        }),
       })),
     }),
     ...(request.toolChoice !== undefined && {
@@ -193,7 +198,12 @@ function toVexzyRequest(request: TransportRequest): VexzySDKMessageParams {
     }),
     ...(request.metadata !== undefined && { metadata: request.metadata }),
     ...(request.outputFormat !== undefined && {
-      output_config: { format: request.outputFormat },
+      output_config: {
+        ...(isRecord(request.extensions?.output_config)
+          ? request.extensions.output_config
+          : {}),
+        format: request.outputFormat,
+      },
     }),
   };
 }
@@ -212,6 +222,8 @@ function toVexzyToolChoice(
       return { type: "auto" };
     case "any":
       return { type: "any" };
+    case "none":
+      return { type: "none" };
     case "tool":
       return { type: "tool", name: choice.name };
   }
@@ -229,6 +241,19 @@ function toVexzyRequestOptions(
 }
 
 function toTransportResponse(response: VexzyMessage): TransportResponse {
+  const extensions = toTransportExtensions(
+    response as unknown as Record<string, unknown>,
+    [
+      "type",
+      "id",
+      "role",
+      "model",
+      "content",
+      "stop_reason",
+      "stop_sequence",
+      "usage",
+    ],
+  );
   return {
     id: response.id,
     model: response.model,
@@ -238,7 +263,12 @@ function toTransportResponse(response: VexzyMessage): TransportResponse {
       ),
     ),
     stopReason: response.stop_reason,
+    ...(response.stop_sequence !== undefined &&
+      response.stop_sequence !== null && {
+        stopSequence: response.stop_sequence,
+      }),
     usage: toTransportUsage(response.usage),
+    ...(extensions !== undefined && { extensions }),
   };
 }
 
@@ -251,6 +281,12 @@ function normalizeContentBlock(
 function toTransportUsage(
   usage: Readonly<Record<string, unknown>>,
 ): TransportUsage {
+  const extensions = toTransportExtensions(usage, [
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+  ]);
   return {
     inputTokens: numberOrZero(usage.input_tokens),
     outputTokens: numberOrZero(usage.output_tokens),
@@ -262,6 +298,7 @@ function toTransportUsage(
         usage.cache_creation_input_tokens,
       ),
     }),
+    ...(extensions !== undefined && { extensions }),
   };
 }
 
@@ -285,10 +322,20 @@ function toTransportStreamEvent(event: VexzyStreamEvent): TransportStreamEvent {
     case "message_start":
       return {
         kind: "started",
-        response: { id: event.message.id, model: event.message.model },
+        response: toTransportResponse(event.message),
+        extensions: toTransportExtensions(
+          event as unknown as Record<string, unknown>,
+          ["type", "message"],
+        ),
       };
     case "ping":
-      return { kind: "keepalive" };
+      return {
+        kind: "keepalive",
+        extensions: toTransportExtensions(
+          event as unknown as Record<string, unknown>,
+          ["type"],
+        ),
+      };
     case "content_block_start":
       return {
         kind: "content_started",
@@ -296,31 +343,63 @@ function toTransportStreamEvent(event: VexzyStreamEvent): TransportStreamEvent {
         content: normalizeContentBlock(
           event.content_block as unknown as Readonly<Record<string, unknown>>,
         ),
+        extensions: toTransportExtensions(
+          event as unknown as Record<string, unknown>,
+          ["type", "index", "content_block"],
+        ),
       };
     case "content_block_delta":
       return {
         kind: "content_delta",
         index: event.index,
         delta: { ...event.delta },
+        extensions: toTransportExtensions(
+          event as unknown as Record<string, unknown>,
+          ["type", "index", "delta"],
+        ),
       };
     case "content_block_stop":
-      return { kind: "content_stopped", index: event.index };
+      return {
+        kind: "content_stopped",
+        index: event.index,
+        extensions: toTransportExtensions(
+          event as unknown as Record<string, unknown>,
+          ["type", "index"],
+        ),
+      };
     case "message_delta":
       return {
         kind: "completed",
         stopReason: event.delta.stop_reason,
+        stopSequence: event.delta.stop_sequence,
         usage: {
           outputTokens: numberOrZero(event.usage.output_tokens),
           ...(numberOrUndefined(event.usage.input_tokens) !== undefined && {
             inputTokens: numberOrUndefined(event.usage.input_tokens),
           }),
+          extensions: toTransportExtensions(
+            event.usage as unknown as Record<string, unknown>,
+            ["input_tokens", "output_tokens"],
+          ),
+        },
+        extensions: {
+          ...toTransportExtensions(
+            event as unknown as Record<string, unknown>,
+            ["type", "delta", "usage"],
+          ),
+          ...toTransportExtensions(
+            event.delta as unknown as Record<string, unknown>,
+            ["stop_reason", "stop_sequence"],
+          ),
         },
       };
     case "message_stop":
       return {
-        kind: "completed",
-        stopReason: null,
-        usage: {},
+        kind: "stopped",
+        extensions: toTransportExtensions(
+          event as unknown as Record<string, unknown>,
+          ["type"],
+        ),
       };
   }
 }
@@ -340,7 +419,26 @@ function toTransportError(error: unknown): ModelTransportError {
         ? "aborted"
         : "request_failed";
   const status = numberOrUndefined(record?.status);
-  return new ModelTransportError(code, status);
+  const cause =
+    record !== undefined &&
+    ("headers" in record || "error" in record || "request_id" in record)
+      ? error
+      : undefined;
+  return new ModelTransportError(code, status, cause);
+}
+
+function toTransportExtensions(
+  record: Readonly<Record<string, unknown>>,
+  excluded: readonly string[],
+): Readonly<Record<string, TransportJsonValue>> | undefined {
+  const excludedSet = new Set(excluded);
+  const extensions: Record<string, TransportJsonValue> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (!excludedSet.has(key)) {
+      extensions[key] = value as TransportJsonValue;
+    }
+  }
+  return Object.keys(extensions).length > 0 ? extensions : undefined;
 }
 
 function numberOrZero(value: unknown): number {
