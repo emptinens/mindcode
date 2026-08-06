@@ -449,7 +449,15 @@ export type BetaThinkingConfigParam =
 
 export interface BetaOutputConfig {
   format?: BetaJSONOutputFormat;
-  effort?: "none" | "low" | "medium" | "high" | "xhigh" | "max";
+  effort?:
+    | "none"
+    | "minimal"
+    | "low"
+    | "medium"
+    | "high"
+    | "xhigh"
+    | "max"
+    | "auto";
   [key: string]: unknown;
 }
 

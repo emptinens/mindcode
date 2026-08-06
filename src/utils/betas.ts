@@ -6,7 +6,6 @@ import {
 } from 'src/services/analytics/growthbook.js'
 import { getIsNonInteractiveSession, getSdkBetas } from '../bootstrap/state.js'
 import {
-  CLI_INTERNAL_BETA_HEADER,
   CONTEXT_1M_BETA_HEADER,
   CONTEXT_MANAGEMENT_BETA_HEADER,
   EFFORT_BETA_HEADER,
@@ -132,7 +131,6 @@ export const getAllModelBetas = memoize((model: string): string[] => {
   }
 
   if (
-    process.env.USER_TYPE === 'ant' &&
     includeExperimental &&
     !strictToolsEnabled &&
     getFeatureValue_CACHED_MAY_BE_STALE('tengu_amber_json_tools', false)
@@ -144,11 +142,10 @@ export const getAllModelBetas = memoize((model: string): string[] => {
     betaHeaders.push(PROMPT_CACHING_SCOPE_BETA_HEADER)
   }
   if (EFFORT_BETA_HEADER) betaHeaders.push(EFFORT_BETA_HEADER)
-  if (CLI_INTERNAL_BETA_HEADER) betaHeaders.push(CLI_INTERNAL_BETA_HEADER)
 
-  if (process.env.ANTHROPIC_BETAS) {
+  if (process.env.VEXZY_BETAS) {
     betaHeaders.push(
-      ...process.env.ANTHROPIC_BETAS.split(',')
+      ...process.env.VEXZY_BETAS.split(',')
         .map(value => value.trim())
         .filter(Boolean),
     )

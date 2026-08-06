@@ -19,6 +19,7 @@ import {
   getTotalToolDuration,
   getTotalWebSearchRequests,
 } from "../../bootstrap/state.js";
+import { TaskGraphDaemonClient } from "../../runtime/taskGraph/client.js";
 import {
   DEFAULT_AUTO_COMPACT_PERCENTAGE,
   DEFAULT_WARNING_PERCENTAGE,
@@ -34,9 +35,14 @@ import {
   getSessionModelCredits,
 } from "../../services/credits/accounting.js";
 import { getTaskGraphDatabasePath } from "../../storage/taskGraphPaths.js";
+import { openTaskGraph } from "../../tasks/graph/taskGraph.js";
+import type { TaskGraphSnapshot } from "../../tasks/graph/types.js";
 import { getMindCodeConfigHomeDir } from "../../utils/envUtils.js";
 import { getConfiguredSubagentModel } from "../../utils/model/subagentModel.js";
-import { getSwarmConcurrencySnapshot } from "../../utils/swarm/concurrencyPolicy.js";
+import {
+  getSwarmConcurrencySnapshot,
+  getSwarmWorkerWeight,
+} from "../../utils/swarm/concurrencyPolicy.js";
 
 const number = new Intl.NumberFormat("en-US");
 
@@ -51,6 +57,33 @@ export type StatusReportModel = {
   webSearchRequests: number;
   priceCreditsPerMillion: number | null;
   credits: CreditBreakdown;
+};
+
+export type StatusRoleMetrics = {
+  requests: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  reasoningTokens: number | null;
+  effort: string | null;
+};
+
+export type StatusTaskTimelineEntry = {
+  id: string;
+  status: string;
+  owner: string | null;
+  effort: string;
+  claimedAt: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+};
+
+export type StatusTaskMetrics = {
+  available: boolean;
+  statusCounts: Record<string, number>;
+  effortCounts: Record<string, number>;
+  effortWeights: Record<string, number>;
+  activeLeases: number | null;
+  timeline: readonly StatusTaskTimelineEntry[];
 };
 
 export type StatusReportData = {
@@ -90,6 +123,23 @@ export type StatusReportData = {
   };
   taskGraph: "initialized" | "not initialized";
   workerModel: string;
+  roleBreakdown?: {
+    leader: StatusRoleMetrics;
+    worker: StatusRoleMetrics;
+  };
+  taskMetrics?: StatusTaskMetrics;
+  errors?: {
+    runtime: number | null;
+    taskFailures: number;
+    total: number | null;
+  };
+  compactHistory?:
+    | readonly {
+        at: string;
+        kind: string;
+        status: string;
+      }[]
+    | null;
 };
 
 export function escapeHtml(value: unknown): string {
@@ -103,6 +153,117 @@ export function escapeHtml(value: unknown): string {
 
 function finite(value: number): number {
   return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function unavailableRoleMetrics(): StatusRoleMetrics {
+  return {
+    requests: null,
+    inputTokens: null,
+    outputTokens: null,
+    reasoningTokens: null,
+    effort: null,
+  };
+}
+
+function displayNumber(value: number | null | undefined): string {
+  return value === null || value === undefined
+    ? "unavailable"
+    : number.format(finite(value));
+}
+
+function displayTimestamp(value: string | null): string {
+  if (value === null) return "unavailable";
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp)
+    ? new Date(timestamp).toISOString()
+    : "unavailable";
+}
+
+function safeOpaque(value: unknown): string {
+  const text = String(value ?? "");
+  if (
+    /(?:^|[\s(])(?:~\/|\/|[A-Za-z]:[\\/])/.test(text) ||
+    /forge-[A-Za-z0-9._-]+/i.test(text)
+  ) {
+    return "[redacted]";
+  }
+  return text.length > 96 ? `${text.slice(0, 93)}...` : text;
+}
+
+function unavailableTaskMetrics(): StatusTaskMetrics {
+  return {
+    available: false,
+    statusCounts: {},
+    effortCounts: {},
+    effortWeights: {},
+    activeLeases: null,
+    timeline: [],
+  };
+}
+
+function taskMetricsFromSnapshot(
+  snapshot: TaskGraphSnapshot,
+): StatusTaskMetrics {
+  const statusCounts: Record<string, number> = {};
+  const effortCounts: Record<string, number> = {};
+  const effortWeights: Record<string, number> = {};
+  const timeline = [...snapshot.tasks]
+    .sort((left, right) => {
+      const leftAt =
+        left.started_at ?? left.claimed_at ?? left.finished_at ?? "";
+      const rightAt =
+        right.started_at ?? right.claimed_at ?? right.finished_at ?? "";
+      return rightAt.localeCompare(leftAt) || left.id.localeCompare(right.id);
+    })
+    .slice(0, 200)
+    .map((task) => {
+      statusCounts[task.status] = (statusCounts[task.status] ?? 0) + 1;
+      effortCounts[task.effort] = (effortCounts[task.effort] ?? 0) + 1;
+      effortWeights[task.effort] =
+        (effortWeights[task.effort] ?? 0) + getSwarmWorkerWeight(task.effort);
+      return {
+        id: safeOpaque(task.id),
+        status: safeOpaque(task.status),
+        owner: task.owner === null ? null : safeOpaque(task.owner),
+        effort: safeOpaque(task.effort),
+        claimedAt: task.claimed_at,
+        startedAt: task.started_at,
+        finishedAt: task.finished_at,
+      } satisfies StatusTaskTimelineEntry;
+    });
+
+  return {
+    available: true,
+    statusCounts,
+    effortCounts,
+    effortWeights,
+    activeLeases: snapshot.tasks.filter(
+      (task) =>
+        task.lease_id !== null &&
+        (task.status === "claimed" || task.status === "running"),
+    ).length,
+    timeline,
+  };
+}
+
+async function readTaskMetrics(
+  databasePath: string,
+): Promise<StatusTaskMetrics> {
+  if (!existsSync(databasePath)) return unavailableTaskMetrics();
+  try {
+    const client = new TaskGraphDaemonClient();
+    const result = await client.snapshotWithFallback(() => {
+      const graph = openTaskGraph();
+      try {
+        return graph.snapshot();
+      } finally {
+        graph.close();
+      }
+    });
+    return taskMetricsFromSnapshot(result.value);
+  } catch {
+    return unavailableTaskMetrics();
+  }
 }
 
 function duration(ms: number): string {
@@ -171,6 +332,103 @@ function architecture(data: StatusReportData): string {
   return `<section class="panel architecture"><h2>Runtime architecture</h2><div class="flow"><div class="node"><b>Leader</b><small>running</small></div><span class="arrow" aria-hidden="true">→</span><div class="node"><b>Weighted scheduler</b><small>${escapeHtml(`${scheduler.activeWorkers} active · ${scheduler.queuedWorkers} queued`)}</small></div><span class="arrow" aria-hidden="true">→</span><div class="node"><b>Workers</b><small>${escapeHtml(`${data.workerModel} · configured VEXZY model`)}</small></div><span class="arrow" aria-hidden="true">→</span><div class="node"><b>Structured worker report</b><small>active · JSON-only Leader context</small></div></div><div class="architecture-foot"><span><b>Task graph</b><br>${escapeHtml(taskGraphStatus)}</span><span><b>Worker budget</b><br>${escapeHtml(`${number.format(scheduler.activeWeight)} active / ${number.format(scheduler.budget)} total weight`)}</span></div></section>`;
 }
 
+function roleRows(data: StatusReportData): string {
+  const roles = data.roleBreakdown ?? {
+    leader: unavailableRoleMetrics(),
+    worker: unavailableRoleMetrics(),
+  };
+  return (
+    [
+      ["Leader", roles.leader],
+      ["Worker", roles.worker],
+    ] as const
+  )
+    .map(
+      ([role, metrics]) =>
+        `<tr><th>${escapeHtml(role)}</th><td>${escapeHtml(displayNumber(metrics.requests))}</td><td>${escapeHtml(displayNumber(metrics.inputTokens))}</td><td>${escapeHtml(displayNumber(metrics.outputTokens))}</td><td>${escapeHtml(displayNumber(metrics.reasoningTokens))}</td><td>${escapeHtml(metrics.effort ?? "unavailable")}</td></tr>`,
+    )
+    .join("");
+}
+
+function taskCountRows(metrics: StatusTaskMetrics): string {
+  if (!metrics.available) {
+    return '<tr><td colspan="3" class="empty">unavailable</td></tr>';
+  }
+  const statuses = Object.entries(metrics.statusCounts).sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+  const efforts = Object.entries(metrics.effortCounts).sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+  const rows = [
+    ...statuses.map(
+      ([status, count]) =>
+        `<tr><td>Status · ${escapeHtml(status)}</td><td>${escapeHtml(number.format(count))}</td><td>count</td></tr>`,
+    ),
+    ...efforts.map(
+      ([effort, count]) =>
+        `<tr><td>Effort · ${escapeHtml(effort)}</td><td>${escapeHtml(number.format(count))}</td><td>${escapeHtml(`${number.format(metrics.effortWeights[effort] ?? 0)} weight`)}</td></tr>`,
+    ),
+  ];
+  return rows.length
+    ? rows.join("")
+    : '<tr><td colspan="3" class="empty">No tasks recorded.</td></tr>';
+}
+
+function timelineRows(metrics: StatusTaskMetrics): string {
+  if (!metrics.available || metrics.timeline.length === 0) {
+    return '<tr><td colspan="7" class="empty">unavailable</td></tr>';
+  }
+  return metrics.timeline
+    .map(
+      (task) =>
+        `<tr><td>${escapeHtml(safeOpaque(task.id))}</td><td>${escapeHtml(safeOpaque(task.status))}</td><td>${escapeHtml(task.owner === null ? "unavailable" : safeOpaque(task.owner))}</td><td>${escapeHtml(safeOpaque(task.effort))}</td><td>${escapeHtml(displayTimestamp(task.claimedAt))}</td><td>${escapeHtml(displayTimestamp(task.startedAt))}</td><td>${escapeHtml(displayTimestamp(task.finishedAt))}</td></tr>`,
+    )
+    .join("");
+}
+
+function compactHistoryRows(
+  history: StatusReportData["compactHistory"],
+): string {
+  if (!history || history.length === 0) {
+    return '<tr><td colspan="3" class="empty">unavailable</td></tr>';
+  }
+  return history
+    .map(
+      (event) =>
+        `<tr><td>${escapeHtml(displayTimestamp(event.at))}</td><td>${escapeHtml(safeOpaque(event.kind))}</td><td>${escapeHtml(safeOpaque(event.status))}</td></tr>`,
+    )
+    .join("");
+}
+
+function creditTransparencyRows(credits: CreditBreakdown): string {
+  const price =
+    credits.priceCreditsPerMillion === null
+      ? "unavailable"
+      : number.format(credits.priceCreditsPerMillion);
+  return [
+    ["Input", credits.inputTokens, "price / 8", credits.inputCredits],
+    [
+      "Cache read + write",
+      credits.cacheReadTokens + credits.cacheWriteTokens,
+      "price / 40",
+      credits.cacheCredits,
+    ],
+    [
+      "Reasoning",
+      credits.reasoningTokens,
+      "price / 2",
+      credits.reasoningCredits,
+    ],
+    ["Output", credits.outputTokens, "price", credits.outputCredits],
+  ]
+    .map(
+      ([component, tokens, formula, value]) =>
+        `<tr><th>${escapeHtml(component)}</th><td>${escapeHtml(number.format(tokens as number))}</td><td>${escapeHtml(formula as string)}</td><td>${escapeHtml(price)}</td><td>${escapeHtml(formatVexzyCredits(value as number))}</td></tr>`,
+    )
+    .join("");
+}
+
 export function renderStatusHtml(data: StatusReportData): string {
   const totalTokens =
     data.inputTokens +
@@ -208,6 +466,12 @@ export function renderStatusHtml(data: StatusReportData): string {
     : "0.0";
 
   const credits = data.credits;
+  const taskMetrics = data.taskMetrics ?? unavailableTaskMetrics();
+  const errors = data.errors ?? {
+    runtime: null,
+    taskFailures: taskMetrics.statusCounts.failed ?? 0,
+    total: null,
+  };
   const creditBars = [
     bar(
       "Input credits",
@@ -238,8 +502,13 @@ export function renderStatusHtml(data: StatusReportData): string {
 <section class="grid">${metric("API requests", number.format(data.requestCount), data.requestCount ? `${number.format(Math.round(totalTokens / data.requestCount))} tokens/request` : "no completed requests")}${metric("Total tokens", number.format(totalTokens), `${number.format(data.inputTokens)} input · ${number.format(data.outputTokens)} output`)}${metric("Session credits", formatVexzyCredits(credits.totalCredits), credits.modelsWithoutPrice ? `${credits.modelsWithoutPrice} model price unavailable` : "VEXZY model pricing")}${metric("Cache hit rate", `${cacheHitRate}%`, `${number.format(data.cacheReadTokens)} read · ${number.format(data.cacheWriteTokens)} write`)}${metric("Wall duration", duration(data.wallDurationMs), data.requestCount ? `${duration(data.wallDurationMs / data.requestCount)} / request` : "0 ms")}${metric("API duration", duration(data.apiDurationMs), `${duration(retryOverhead)} retry overhead`)}${metric("Tool activity", number.format(data.toolCount), `${duration(data.toolDurationMs)} total tool time`)}${metric("Lines changed", `+${number.format(data.linesAdded)} / -${number.format(data.linesRemoved)}`, `${number.format(data.webSearchRequests)} web searches`)}</section>
 <section class="columns"><article class="panel"><h2>Token composition</h2>${tokenBars}</article><article class="panel"><h2>Tokens by model</h2>${modelBars}</article></section>
 <section class="panel"><h2>Credits by component</h2><p>VEXZY output price per 1M: input = price / 8 · cache = price / 40 · reasoning = price / 2 · output = price.</p>${creditBars}</section>
+<section class="panel"><h2>Credit calculation transparency</h2><table><thead><tr><th>Component</th><th>Tokens</th><th>Formula</th><th>Rate / 1M</th><th>Credits</th></tr></thead><tbody>${creditTransparencyRows(credits)}</tbody></table></section>
 <section class="panel"><h2>Per-model details</h2><table><thead><tr><th>Model</th><th>Requests</th><th>Output price / 1M</th><th>Input tokens</th><th>Output tokens</th><th>Cache read</th><th>Cache write</th><th>Reasoning</th><th>Input credits</th><th>Cache credits</th><th>Reasoning credits</th><th>Output credits</th><th>Total credits</th><th>Searches</th><th>Total tokens</th></tr></thead><tbody>${modelRows(data.models)}</tbody></table></section>
+<section class="panel"><h2>Leader vs Worker</h2><p>Role attribution is reported only when runtime counters provide it; model totals remain below.</p><table><thead><tr><th>Role</th><th>Requests</th><th>Input tokens</th><th>Output tokens</th><th>Reasoning tokens</th><th>Effort</th></tr></thead><tbody>${roleRows(data)}</tbody></table></section>
 <section class="panel"><h2>Runtime and context</h2><table><tbody>${contextRows(data.context)}<tr><th>API with retries</th><td>${escapeHtml(duration(data.apiDurationMs))}</td><th>API without retries</th><td>${escapeHtml(duration(data.apiDurationWithoutRetriesMs))}</td></tr><tr><th>Retry overhead</th><td>${escapeHtml(duration(retryOverhead))}</td><th>API utilization</th><td>${escapeHtml(`${apiUtilization}% of wall time`)}</td></tr><tr><th>Active worker weight</th><td>${escapeHtml(`${number.format(data.scheduler.activeWeight)} / ${number.format(data.scheduler.budget)}`)}</td><th>Queued worker weight</th><td>${escapeHtml(number.format(data.scheduler.queuedWeight))}</td></tr></tbody></table></section>
+<section class="panel"><h2>Task and lease observability</h2><table><thead><tr><th>Metric</th><th>Count</th><th>Weight / detail</th></tr></thead><tbody>${taskCountRows(taskMetrics)}<tr><th>Active leases</th><td>${escapeHtml(displayNumber(taskMetrics.activeLeases))}</td><td>persistent task leases</td></tr><tr><th>Runtime errors</th><td>${escapeHtml(displayNumber(errors.runtime))}</td><td>error log not exposed to status</td></tr><tr><th>Failed tasks</th><td>${escapeHtml(number.format(errors.taskFailures))}</td><td>task graph failures</td></tr><tr><th>Total errors</th><td>${escapeHtml(displayNumber(errors.total))}</td><td>unavailable unless role/runtime counters expose it</td></tr></tbody></table></section>
+<section class="panel"><h2>Task lifecycle / timeline</h2><table><thead><tr><th>Task</th><th>Status</th><th>Owner</th><th>Effort</th><th>Claimed</th><th>Started</th><th>Finished</th></tr></thead><tbody>${timelineRows(taskMetrics)}</tbody></table></section>
+<section class="panel"><h2>Compact thresholds and history</h2><table><thead><tr><th>Time</th><th>Event</th><th>Status</th></tr></thead><tbody>${compactHistoryRows(data.compactHistory)}</tbody></table></section>
 ${architecture(data)}<footer>Generated locally by /status html · no external assets, scripts, or network report upload</footer></main></body></html>`;
 }
 
@@ -351,6 +620,7 @@ export async function generateStatusHtmlReport(): Promise<string> {
     ...schedulerSnapshot,
     queuedWorkers: queuedRequests,
   };
+  const taskMetrics = await readTaskMetrics(getTaskGraphDatabasePath());
   const usageRecord = usage as Record<string, unknown>;
   const credits = getSessionCreditTotals();
   const wallDurationMs = getTotalDuration();
@@ -378,10 +648,22 @@ export async function generateStatusHtmlReport(): Promise<string> {
     models,
     scheduler,
     context: collectContext(usageRecord),
-    taskGraph: existsSync(getTaskGraphDatabasePath())
-      ? "initialized"
-      : "not initialized",
+    taskGraph: taskMetrics.available ? "initialized" : "not initialized",
     workerModel: getConfiguredSubagentModel(),
+    roleBreakdown: {
+      // The session counters currently aggregate by model, not by runtime
+      // role. Do not infer role ownership from a model name: Leader and
+      // Worker can legally use the same VEXZY model.
+      leader: unavailableRoleMetrics(),
+      worker: unavailableRoleMetrics(),
+    },
+    taskMetrics,
+    errors: {
+      runtime: null,
+      taskFailures: taskMetrics.statusCounts.failed ?? 0,
+      total: null,
+    },
+    compactHistory: null,
   };
   const html = renderStatusHtml(data);
   const reportsDir = join(getMindCodeConfigHomeDir(), "reports");

@@ -1,8 +1,8 @@
 import { feature } from 'bun:bundle'
 import { markPostCompaction } from 'src/bootstrap/state.js'
+import type { ToolUseContext } from '../../Tool.js'
 import { getSdkBetas } from '../../bootstrap/state.js'
 import type { QuerySource } from '../../constants/querySource.js'
-import type { ToolUseContext } from '../../Tool.js'
 import type { Message } from '../../types/message.js'
 import { getGlobalConfig } from '../../utils/config.js'
 import {
@@ -15,24 +15,28 @@ import { hasExactErrorMessage } from '../../utils/errors.js'
 import type { CacheSafeParams } from '../../utils/forkedAgent.js'
 import { logError } from '../../utils/log.js'
 import { tokenCountWithEstimation } from '../../utils/tokens.js'
+import { setLastSummarizedMessageId } from '../SessionMemory/sessionMemoryUtils.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../analytics/growthbook.js'
 import { getMaxOutputTokensForModel } from '../api/modelRuntime.js'
 import { notifyCompaction } from '../api/promptCacheBreakDetection.js'
-import { setLastSummarizedMessageId } from '../SessionMemory/sessionMemoryUtils.js'
 import {
-  type CompactionResult,
-  compactConversation,
-  ERROR_MESSAGE_USER_ABORT,
-  type RecompactionInfo,
-} from './compact.js'
-import { runPostCompactCleanup } from './postCompactCleanup.js'
-import { trySessionMemoryCompaction } from './sessionMemoryCompact.js'
-import {
+  DEFAULT_AUTO_COMPACT_PERCENTAGE,
   calculateAutoCompactThreshold,
   calculateHardLimitThreshold,
   calculateWarningThreshold,
-  DEFAULT_AUTO_COMPACT_PERCENTAGE,
 } from './autoCompactPolicy.js'
+import {
+  type CompactionResult,
+  ERROR_MESSAGE_USER_ABORT,
+  type RecompactionInfo,
+  compactConversation,
+} from './compact.js'
+import {
+  createCompactStateTransaction,
+  createCompactWatchdog,
+} from './compactWatchdog.js'
+import { runPostCompactCleanup } from './postCompactCleanup.js'
+import { trySessionMemoryCompaction } from './sessionMemoryCompact.js'
 
 // Returns the context window size minus the max output tokens for the model
 export function getEffectiveContextWindowSize(model: string): number {
@@ -281,32 +285,58 @@ export async function autoCompactIfNeeded(
     querySource,
   }
 
-  // EXPERIMENT: Try session memory compaction first
-  const sessionMemoryResult = await trySessionMemoryCompaction(
-    messages,
-    toolUseContext.agentId,
-    recompactionInfo.autoCompactThreshold,
+  const stateTransaction = createCompactStateTransaction(
+    toolUseContext.readFileState,
+    toolUseContext.loadedNestedMemoryPaths,
   )
-  if (sessionMemoryResult) {
-    // Reset lastSummarizedMessageId since session memory compaction prunes messages
-    // and the old message UUID will no longer exist after the REPL replaces messages
-    setLastSummarizedMessageId(undefined)
-    runPostCompactCleanup(querySource)
-    // Reset cache read baseline so the post-compact drop isn't flagged as a
-    // break. compactConversation does this internally; SM-compact doesn't.
-    // BQ 2026-03-01: missing this made 20% of tengu_prompt_cache_break events
-    // false positives (systemPromptChanged=true, timeSinceLastAssistantMsg=-1).
-    if (feature('PROMPT_CACHE_BREAK_DETECTION')) {
-      notifyCompaction(querySource ?? 'compact', toolUseContext.agentId)
-    }
-    markPostCompaction()
-    return {
-      wasCompacted: true,
-      compactionResult: sessionMemoryResult,
-    }
-  }
 
   try {
+    // EXPERIMENT: Try session memory compaction first. A stalled optimization
+    // gets a child-only watchdog and can fall back without canceling the
+    // parent session.
+    let sessionMemoryResult: CompactionResult | null = null
+    const sessionWatchdog = createCompactWatchdog(
+      toolUseContext.abortController,
+    )
+    try {
+      sessionMemoryResult = await sessionWatchdog.guard(
+        trySessionMemoryCompaction(
+          messages,
+          toolUseContext.agentId,
+          recompactionInfo.autoCompactThreshold,
+        ),
+      )
+    } catch (error) {
+      if (toolUseContext.abortController.signal.aborted) throw error
+      logError(error)
+    } finally {
+      sessionWatchdog.dispose()
+    }
+
+    if (sessionMemoryResult) {
+      // Reset lastSummarizedMessageId since session memory compaction prunes messages
+      // and the old message UUID will no longer exist after the REPL replaces messages
+      setLastSummarizedMessageId(undefined)
+      runPostCompactCleanup(querySource)
+      // Reset cache read baseline so the post-compact drop isn't flagged as a
+      // break. compactConversation does this internally; SM-compact doesn't.
+      // BQ 2026-03-01: missing this made 20% of tengu_prompt_cache_break events
+      // false positives (systemPromptChanged=true, timeSinceLastAssistantMsg=-1).
+      if (feature('PROMPT_CACHE_BREAK_DETECTION')) {
+        notifyCompaction(querySource ?? 'compact', toolUseContext.agentId)
+      }
+      markPostCompaction()
+      stateTransaction.commit()
+      return {
+        wasCompacted: true,
+        compactionResult: sessionMemoryResult,
+      }
+    }
+
+    // Restore optimization mutations before the legacy fallback, including a
+    // null result caused by unavailable/oversized session memory.
+    stateTransaction.restoreForFallback()
+
     const compactionResult = await compactConversation(
       messages,
       toolUseContext,
@@ -315,12 +345,14 @@ export async function autoCompactIfNeeded(
       undefined, // No custom instructions for autocompact
       true, // isAutoCompact
       recompactionInfo,
+      stateTransaction,
     )
 
     // Reset lastSummarizedMessageId since legacy compaction replaces all messages
     // and the old message UUID will no longer exist in the new messages array
     setLastSummarizedMessageId(undefined)
     runPostCompactCleanup(querySource)
+    stateTransaction.commit()
 
     return {
       wasCompacted: true,
@@ -329,6 +361,7 @@ export async function autoCompactIfNeeded(
       consecutiveFailures: 0,
     }
   } catch (error) {
+    stateTransaction.rollback()
     if (!hasExactErrorMessage(error, ERROR_MESSAGE_USER_ABORT)) {
       logError(error)
     }

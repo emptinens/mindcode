@@ -3,7 +3,7 @@ import { z } from 'zod'
 export const VEXZY_FIXED_WORKER_MODEL = 'gpt-5.6-luna' as const
 export const VEXZY_WORKER_MODEL = VEXZY_FIXED_WORKER_MODEL
 
-const nonNegativeInteger = z.number().int().nonnegative()
+const positiveSafeInteger = z.number().int().positive().safe()
 const stringList = z.array(z.string())
 
 export const vexzyCapabilitiesSchema = z
@@ -24,15 +24,18 @@ export const vexzyProviderModelSchema = z
     // The provider currently emits "maintenance", but preserving unknown
     // future values is safer than manufacturing local status semantics.
     status: z.string().min(1).optional(),
-    context_length: nonNegativeInteger,
+    context_length: positiveSafeInteger,
     supported_reasoning_efforts: stringList,
     input_modalities: stringList,
     output_modalities: stringList,
     capabilities: vexzyCapabilitiesSchema,
-    max_output_tokens: nonNegativeInteger.optional(),
-    max_completion_tokens: nonNegativeInteger.optional(),
-    output_limit: nonNegativeInteger.optional(),
-    max_output: nonNegativeInteger.optional(),
+    // These fields are deliberately parsed as unknown. VEXZY may add or
+    // change optional limit fields; invalid values must be ignored without
+    // discarding the complete model catalog.
+    max_output_tokens: z.unknown().optional(),
+    max_completion_tokens: z.unknown().optional(),
+    output_limit: z.unknown().optional(),
+    max_output: z.unknown().optional(),
   })
   .passthrough()
 
@@ -190,7 +193,7 @@ export const VEXZY_OUTPUT_LIMIT_OVERRIDES = {
   'glm-5.2': 131_100,
 } as const satisfies Readonly<Record<string, number>>
 
-function getStaticOutputLimit(id: string): number | undefined {
+export function getVexzyStaticOutputLimit(id: string): number | undefined {
   if (!Object.prototype.hasOwnProperty.call(VEXZY_OUTPUT_LIMIT_OVERRIDES, id)) {
     return undefined
   }
@@ -200,17 +203,34 @@ function getStaticOutputLimit(id: string): number | undefined {
   ]
 }
 
-function getDynamicOutputLimit(model: VexzyProviderModel): number | undefined {
+export function isValidVexzyOutputLimit(
+  value: unknown,
+  contextLength: number,
+): value is number {
   return (
-    model.max_output_tokens ??
-    model.max_completion_tokens ??
-    model.output_limit ??
-    model.max_output
+    typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value > 0 &&
+    value <= contextLength
   )
 }
 
+export function getVexzyDynamicOutputLimit(
+  model: VexzyProviderModel,
+): number | undefined {
+  const candidates = [
+    model.max_output_tokens,
+    model.max_completion_tokens,
+    model.output_limit,
+    model.max_output,
+  ]
+  return candidates.find(candidate =>
+    isValidVexzyOutputLimit(candidate, model.context_length),
+  ) as number | undefined
+}
+
 export function normalizeVexzyModel(model: VexzyProviderModel): VexzyModel {
-  const dynamicOutputLimit = getDynamicOutputLimit(model)
+  const dynamicOutputLimit = getVexzyDynamicOutputLimit(model)
 
   return {
     id: model.id,
@@ -234,7 +254,15 @@ export function normalizeVexzyModel(model: VexzyProviderModel): VexzyModel {
     tools: model.capabilities.tools,
     vision: model.capabilities.vision,
     capabilities: model.capabilities,
-    outputLimit: dynamicOutputLimit ?? getStaticOutputLimit(model.id),
+    outputLimit:
+      dynamicOutputLimit ??
+      (() => {
+        const fallback = getVexzyStaticOutputLimit(model.id)
+        return fallback !== undefined &&
+          isValidVexzyOutputLimit(fallback, model.context_length)
+          ? fallback
+          : undefined
+      })(),
     outputCreditsPerMillion:
       readOutputCreditsPerMillion(model) ??
       getStaticOutputCreditsPerMillion(model.id),

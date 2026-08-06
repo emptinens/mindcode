@@ -7,7 +7,7 @@ const sessionTranscriptModule = feature('KAIROS')
   ? (require('../sessionTranscript/sessionTranscript.js') as typeof import('../sessionTranscript/sessionTranscript.js'))
   : null
 
-import { APIUserAbortError } from '../api/vexzy/errors.js'
+import type { Tool, ToolUseContext } from '../../Tool.js'
 import {
   getInvokedSkillsForAgent,
   getSdkBetas,
@@ -15,7 +15,6 @@ import {
 } from '../../bootstrap/state.js'
 import type { QuerySource } from '../../constants/querySource.js'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
-import type { Tool, ToolUseContext } from '../../Tool.js'
 import type { LocalAgentTaskState } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
 import { FileReadTool } from '../../tools/FileReadTool/FileReadTool.js'
 import {
@@ -105,33 +104,33 @@ import {
   logEvent,
 } from '../analytics/index.js'
 import {
+  PROMPT_TOO_LONG_ERROR_MESSAGE,
+  getPromptTooLongTokenGap,
+  startsWithApiErrorPrefix,
+} from '../api/errors.js'
+import {
   getMaxOutputTokensForModel,
   queryModelWithStreaming,
 } from '../api/modelRuntime.js'
-import {
-  getPromptTooLongTokenGap,
-  PROMPT_TOO_LONG_ERROR_MESSAGE,
-  startsWithApiErrorPrefix,
-} from '../api/errors.js'
 import { notifyCompaction } from '../api/promptCacheBreakDetection.js'
+import { APIUserAbortError } from '../api/vexzy/errors.js'
 import { getRetryDelay } from '../api/withRetry.js'
 import { logPermissionContextForAnts } from '../internalLogging.js'
 import {
   roughTokenCountEstimation,
   roughTokenCountEstimationForMessages,
 } from '../tokenEstimation.js'
+import {
+  type CompactStateTransaction,
+  createCompactStateTransaction,
+  createCompactWatchdog,
+} from './compactWatchdog.js'
 import { groupMessagesByApiRound } from './grouping.js'
 import {
   getCompactPrompt,
   getCompactUserSummaryMessage,
   getPartialCompactPrompt,
 } from './prompt.js'
-import {
-  commitCompactState,
-  createCompactWatchdog,
-  restoreCompactState,
-  snapshotCompactState,
-} from './compactWatchdog.js'
 
 export const POST_COMPACT_MAX_FILES_TO_RESTORE = 5
 export const POST_COMPACT_TOKEN_BUDGET = 50_000
@@ -428,13 +427,17 @@ export async function compactConversation(
   customInstructions?: string,
   isAutoCompact: boolean = false,
   recompactionInfo?: RecompactionInfo,
+  stateTransaction?: CompactStateTransaction,
 ): Promise<CompactionResult> {
   const watchdog = createCompactWatchdog(parentContext.abortController)
   const context = { ...parentContext, abortController: watchdog.controller }
-  const stateSnapshot = snapshotCompactState(
-    context.readFileState,
-    context.loadedNestedMemoryPaths,
-  )
+  const ownsStateTransaction = stateTransaction === undefined
+  const transaction =
+    stateTransaction ??
+    createCompactStateTransaction(
+      context.readFileState,
+      context.loadedNestedMemoryPaths,
+    )
 
   try {
     if (messages.length === 0) {
@@ -770,9 +773,6 @@ export async function compactConversation(
       ),
     )
 
-    // Commit only after summary, attachments, SessionStart, and PostCompact
-    // hooks have all succeeded. This is the transaction's commit point.
-    commitCompactState(context.readFileState, context.loadedNestedMemoryPaths)
     if (feature('PROMPT_CACHE_BREAK_DETECTION')) {
       notifyCompaction(
         context.options.querySource ?? 'compact',
@@ -794,6 +794,10 @@ export async function compactConversation(
 
     context.onCompactProgress?.({ type: 'compact_done', summary })
 
+    // Outer command/auto callers commit after this attempt has returned. A
+    // standalone call owns its transaction and commits exactly once here.
+    if (ownsStateTransaction) transaction.commit()
+
     return {
       boundaryMarker,
       summaryMessages,
@@ -806,11 +810,7 @@ export async function compactConversation(
       compactionUsage,
     }
   } catch (error) {
-    restoreCompactState(
-      context.readFileState,
-      context.loadedNestedMemoryPaths,
-      stateSnapshot,
-    )
+    if (ownsStateTransaction) transaction.rollback()
     // Only show the error notification for manual /compact.
     // Auto-compact failures are retried on the next turn and the
     // notification is confusing when compaction eventually succeeds.
@@ -841,13 +841,17 @@ export async function partialCompactConversation(
   cacheSafeParams: CacheSafeParams,
   userFeedback?: string,
   direction: PartialCompactDirection = 'from',
+  stateTransaction?: CompactStateTransaction,
 ): Promise<CompactionResult> {
   const watchdog = createCompactWatchdog(parentContext.abortController)
   const context = { ...parentContext, abortController: watchdog.controller }
-  const stateSnapshot = snapshotCompactState(
-    context.readFileState,
-    context.loadedNestedMemoryPaths,
-  )
+  const ownsStateTransaction = stateTransaction === undefined
+  const transaction =
+    stateTransaction ??
+    createCompactStateTransaction(
+      context.readFileState,
+      context.loadedNestedMemoryPaths,
+    )
 
   try {
     const messagesToSummarize =
@@ -1136,7 +1140,6 @@ export async function partialCompactConversation(
       ),
     )
 
-    commitCompactState(context.readFileState, context.loadedNestedMemoryPaths)
     if (feature('PROMPT_CACHE_BREAK_DETECTION')) {
       notifyCompaction(
         context.options.querySource ?? 'compact',
@@ -1152,6 +1155,8 @@ export async function partialCompactConversation(
     }
 
     context.onCompactProgress?.({ type: 'compact_done', summary })
+
+    if (ownsStateTransaction) transaction.commit()
 
     // 'from': prefix-preserving → boundary; 'up_to': suffix → last summary
     const anchorUuid =
@@ -1174,11 +1179,7 @@ export async function partialCompactConversation(
       compactionUsage,
     }
   } catch (error) {
-    restoreCompactState(
-      context.readFileState,
-      context.loadedNestedMemoryPaths,
-      stateSnapshot,
-    )
+    if (ownsStateTransaction) transaction.rollback()
     addErrorNotificationIfNeeded(error, context)
     throw error
   } finally {

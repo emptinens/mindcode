@@ -58,8 +58,11 @@ import {
   CAPPED_DEFAULT_MAX_TOKENS,
   getModelMaxOutputTokens,
   getSonnet1mExpTreatmentEnabled,
+  getVexzyMaxOutputTokens,
+  normalizeVexzyMaxOutputTokens,
+  normalizeVexzyMaxOutputTokensEnv,
 } from "../../utils/context.js";
-import { resolveAppliedEffort } from "../../utils/effort.js";
+import { resolveEffortForQuery } from "../../utils/effort.js";
 import { isEnvTruthy } from "../../utils/envUtils.js";
 import { errorMessage } from "../../utils/errors.js";
 import { computeFingerprintFromMessages } from "../../utils/fingerprint.js";
@@ -186,7 +189,6 @@ import {
 } from "../../tools/ToolSearchTool/prompt.js";
 import { count } from "../../utils/array.js";
 import { insertBlockAfterToolResults } from "../../utils/contentArray.js";
-import { validateBoundedIntEnvVar } from "../../utils/envValidation.js";
 import { safeParseJSON } from "../../utils/json.js";
 import {
   normalizeModelStringForAPI,
@@ -1617,7 +1619,15 @@ async function* queryModel(
     }
   }
 
-  const effort = resolveAppliedEffort(options.model, options.effortValue);
+  const effortScope =
+    options.agentId !== undefined || options.querySource.startsWith("agent:")
+      ? "worker"
+      : "leader";
+  const effort = resolveEffortForQuery(
+    options.model,
+    options.effortValue,
+    effortScope,
+  );
 
   if (feature("PROMPT_CACHE_BREAK_DETECTION")) {
     // Exclude defer_loading tools from the hash -- the API strips them from the
@@ -1744,10 +1754,12 @@ async function* queryModel(
     }
 
     // Retry context gets preference because it tries to course correct if we exceed the context window limit
-    const maxOutputTokens =
-      retryContext?.maxTokensOverride ||
-      options.maxOutputTokensOverride ||
-      getMaxOutputTokensForModel(options.model);
+    const defaultMaxOutputTokens = getMaxOutputTokensForModel(options.model);
+    const maxOutputTokens = getVexzyMaxOutputTokens(
+      options.model,
+      retryContext?.maxTokensOverride ?? options.maxOutputTokensOverride,
+      defaultMaxOutputTokens,
+    );
 
     const hasThinking =
       thinkingConfig.type !== "disabled" &&
@@ -3535,7 +3547,17 @@ export function adjustParamsForNonStreaming<
     thinking?: BetaMessageStreamParams["thinking"];
   },
 >(params: T, maxTokensCap: number): T {
-  const cappedMaxTokens = Math.min(params.max_tokens, maxTokensCap);
+  const fallbackMaxTokens =
+    typeof params.max_tokens === "number" &&
+    Number.isSafeInteger(params.max_tokens) &&
+    params.max_tokens > 0
+      ? Math.min(params.max_tokens, maxTokensCap)
+      : maxTokensCap;
+  const cappedMaxTokens = normalizeVexzyMaxOutputTokens(
+    params.max_tokens,
+    fallbackMaxTokens,
+    maxTokensCap,
+  ).value;
 
   // Adjust thinking budget if it would exceed capped max_tokens
   // to maintain the constraint: max_tokens > thinking.budget_tokens
@@ -3576,11 +3598,9 @@ export function getMaxOutputTokensForModel(model: string): number {
     ? Math.min(maxOutputTokens.default, CAPPED_DEFAULT_MAX_TOKENS)
     : maxOutputTokens.default;
 
-  const result = validateBoundedIntEnvVar(
-    "MINDCODE_MAX_OUTPUT_TOKENS",
+  return normalizeVexzyMaxOutputTokensEnv(
     process.env.MINDCODE_MAX_OUTPUT_TOKENS,
     defaultTokens,
     maxOutputTokens.upperLimit,
-  );
-  return result.effective;
+  ).value;
 }

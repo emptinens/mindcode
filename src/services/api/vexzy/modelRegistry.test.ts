@@ -218,6 +218,42 @@ describe('Vexzy model registry', () => {
     expect(VEXZY_OUTPUT_LIMIT_OVERRIDES['gpt-5.6-luna']).toBe(128_000)
   })
 
+  test('ignores invalid dynamic output limits and preserves known 128K fallback', () => {
+    for (const value of [0, -1, 1.5, 1_050_001, '999']) {
+      const registry = createVexzyModelRegistry({
+        object: 'list',
+        data: [{ ...liveLuna, max_output_tokens: value }],
+      })
+      expect(registry.get('gpt-5.6-luna')?.outputLimit).toBe(128_000)
+    }
+
+    const registry = createVexzyModelRegistry({
+      object: 'list',
+      data: [
+        {
+          ...liveLuna,
+          max_output_tokens: 0,
+          max_completion_tokens: 777,
+        },
+      ],
+    })
+    expect(registry.get('gpt-5.6-luna')?.outputLimit).toBe(777)
+  })
+
+  test('rejects unsafe context lengths at the catalog boundary', () => {
+    expect(() =>
+      parseVexzyModels({
+        object: 'list',
+        data: [
+          {
+            ...liveLuna,
+            context_length: Number.MAX_SAFE_INTEGER + 1,
+          },
+        ],
+      }),
+    ).toThrow()
+  })
+
   test('rejects payloads that do not match the verified wire envelope', () => {
     expect(() => vexzyModelsEnvelopeSchema.parse({ data: [] })).toThrow()
     expect(() =>

@@ -89,6 +89,41 @@ describe("Vexzy SDK compatibility adapter", () => {
     expect(seenBody).not.toHaveProperty("output_config");
   });
 
+  test("passes a catalog-selected automatic effort to VEXZY", async () => {
+    let seenBody: Record<string, unknown> | undefined;
+    const adapter = createVexzySDKAdapter({
+      apiKey: "forge-test-key",
+      fetch: async (_input, init) => {
+        seenBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return jsonResponse({ ...message(), model: "deepseek-v4-flash" });
+      },
+    });
+
+    await adapter.messages.create({
+      ...params,
+      model: "deepseek-v4-flash",
+      output_config: { effort: "auto" },
+    });
+
+    expect(seenBody?.reasoning_effort).toBe("auto");
+    expect(seenBody).not.toHaveProperty("output_config");
+  });
+
+  test("routes SDK max_tokens through the native output-limit policy", async () => {
+    let seenBody: Record<string, unknown> | undefined;
+    const adapter = createVexzySDKAdapter({
+      apiKey: "forge-test-key",
+      fetch: async (_input, init) => {
+        seenBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return jsonResponse(message());
+      },
+    });
+
+    await adapter.messages.create({ ...params, max_tokens: 999_999 });
+
+    expect(seenBody?.max_tokens).toBe(128_000);
+  });
+
   test("preserves create, withResponse, asResponse, and per-request headers", async () => {
     let seenHeaders: Headers | undefined;
     let seenBody: Record<string, unknown> | undefined;

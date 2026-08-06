@@ -84,6 +84,34 @@ describe("Vexzy native Messages client", () => {
     expect(result).toMatchObject({ id: "msg_test", model: "gpt-5.6-luna" });
   });
 
+  test("clamps direct transport max_tokens to the model output ceiling", async () => {
+    let body: Record<string, unknown> | undefined;
+    const client = createVexzyMessagesClient({
+      apiKey: "forge-test-key",
+      fetch: async (_input, init) => {
+        body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return response(message());
+      },
+    });
+
+    await client.messages.create({ ...params, max_tokens: 999_999 });
+
+    expect(body?.max_tokens).toBe(128_000);
+  });
+
+  test("rejects zero, negative, and fractional direct transport limits", async () => {
+    const client = createVexzyMessagesClient({
+      apiKey: "forge-test-key",
+      fetch: async () => response(message()),
+    });
+
+    for (const max_tokens of [0, -1, 1.5]) {
+      await expect(
+        client.messages.create({ ...params, max_tokens }),
+      ).rejects.toMatchObject({ code: "invalid_request" });
+    }
+  });
+
   test("forces non-streaming requests to send stream=false", async () => {
     const bodies: Record<string, unknown>[] = [];
     const client = createVexzyMessagesClient({
@@ -126,6 +154,7 @@ describe("Vexzy native Messages client", () => {
         expect(JSON.parse(String(init?.body))).toMatchObject({
           stream: true,
           reasoning_effort: "high",
+          max_tokens: 128_000,
         });
         return sse([
           {
@@ -144,6 +173,7 @@ describe("Vexzy native Messages client", () => {
 
     const stream = client.messages.stream({
       ...params,
+      max_tokens: 999_999,
       reasoning_effort: "high",
     });
     const events = [];

@@ -92,6 +92,8 @@ export type CompactStateSnapshot = {
   loadedNestedMemoryPaths?: Set<string>;
 };
 
+type CompactStateTransactionStatus = "active" | "committed" | "rolled_back";
+
 export function snapshotCompactState(
   readFileState: FileStateCache,
   loadedNestedMemoryPaths?: Set<string>,
@@ -102,6 +104,65 @@ export function snapshotCompactState(
       ? new Set(loadedNestedMemoryPaths)
       : undefined,
   };
+}
+
+/** Owns mutable compact state across optimization and fallback attempts. */
+export class CompactStateTransaction {
+  readonly snapshot: CompactStateSnapshot;
+  private status: CompactStateTransactionStatus = "active";
+
+  constructor(
+    private readonly readFileState: FileStateCache,
+    private readonly loadedNestedMemoryPaths?: Set<string>,
+  ) {
+    this.snapshot = snapshotCompactState(
+      readFileState,
+      loadedNestedMemoryPaths,
+    );
+  }
+
+  get isActive(): boolean {
+    return this.status === "active";
+  }
+
+  get isCommitted(): boolean {
+    return this.status === "committed";
+  }
+
+  get isRolledBack(): boolean {
+    return this.status === "rolled_back";
+  }
+
+  /** Restore the initial snapshot while leaving fallback eligible. */
+  restoreForFallback(): void {
+    if (this.status !== "active") return;
+    restoreCompactState(
+      this.readFileState,
+      this.loadedNestedMemoryPaths,
+      this.snapshot,
+    );
+  }
+
+  /** Clear compact state once, after the final result and hooks succeed. */
+  commit(): void {
+    if (this.status !== "active") return;
+    commitCompactState(this.readFileState, this.loadedNestedMemoryPaths);
+    this.status = "committed";
+  }
+
+  /** Restore compact state once after a terminal failure or cancellation. */
+  rollback(): void {
+    if (this.status !== "active") return;
+    this.restoreForFallback();
+    this.status = "rolled_back";
+  }
+}
+
+export function createCompactStateTransaction(
+  readFileState: FileStateCache,
+  loadedNestedMemoryPaths?: Set<string>,
+): CompactStateTransaction {
+  return new CompactStateTransaction(readFileState, loadedNestedMemoryPaths);
 }
 
 /** Commit is deliberately the final state mutation after all compact hooks. */

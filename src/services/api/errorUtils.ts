@@ -36,7 +36,7 @@ export type ConnectionErrorDetails = {
 
 /**
  * Extracts connection error details from the error cause chain.
- * The Anthropic SDK wraps underlying errors in the `cause` property.
+ * The VEXZY client wraps underlying errors in the `cause` property.
  * This function walks the cause chain to find the root error code/message.
  */
 export function extractConnectionErrorDetails(
@@ -87,7 +87,7 @@ export function extractConnectionErrorDetails(
  * the main API client (OAuth token exchange, preflight connectivity checks)
  * where `formatAPIError` doesn't apply.
  *
- * Motivation: enterprise users behind TLS-intercepting proxies (Zscaler et al.)
+ * Motivation: enterprise users behind TLS-intercepting gateways
  * see OAuth complete in-browser but the CLI's token exchange silently fails
  * with a raw SSL code. Surfacing the likely fix saves a support round-trip.
  */
@@ -96,7 +96,7 @@ export function getSSLErrorHint(error: unknown): string | null {
   if (!details?.isSSLError) {
     return null
   }
-  return `SSL certificate error (${details.code}). If you are behind a corporate proxy or TLS-intercepting firewall, set NODE_EXTRA_CA_CERTS to your CA bundle path, or ask IT to allowlist *.anthropic.com. Run /doctor for details.`
+  return `SSL certificate error (${details.code}). Set NODE_EXTRA_CA_CERTS to your CA bundle path, or allowlist api.echogate.one. Run /doctor for details.`
 }
 
 /**
@@ -135,8 +135,8 @@ export function sanitizeAPIError(apiError: APIError): string {
  * After JSON round-tripping, the SDK's APIError loses its `.message` property.
  * The actual message lives at different nesting levels depending on the provider:
  *
- * - Bedrock/proxy: `{ error: { message: "..." } }`
- * - Standard Anthropic API: `{ error: { error: { message: "..." } } }`
+ * - Gateway response: `{ error: { message: "..." } }`
+ * - Messages-compatible response: `{ error: { error: { message: "..." } } }`
  *   (the outer `.error` is the response body, the inner `.error` is the API error)
  *
  * See also: `getErrorMessage` in `logging.ts` which handles the same shapes.
@@ -163,8 +163,8 @@ function hasNestedError(value: unknown): value is NestedAPIError {
  * a top-level `.message`.
  *
  * Checks two nesting levels (deeper first for specificity):
- * 1. `error.error.error.message` — standard Anthropic API shape
- * 2. `error.error.message` — Bedrock shape
+ * 1. `error.error.error.message` — Messages-compatible response shape
+ * 2. `error.error.message` — gateway response shape
  */
 function extractNestedErrorMessage(error: APIError): string | null {
   if (!hasNestedError(error)) {
@@ -176,7 +176,7 @@ function extractNestedErrorMessage(error: APIError): string | null {
   const narrowed: NestedAPIError = error
   const nested = narrowed.error
 
-  // Standard Anthropic API shape: { error: { error: { message } } }
+  // Messages-compatible response shape: { error: { error: { message } } }
   const deepMsg = nested?.error?.message
   if (typeof deepMsg === 'string' && deepMsg.length > 0) {
     const sanitized = sanitizeMessageHTML(deepMsg)
@@ -185,7 +185,7 @@ function extractNestedErrorMessage(error: APIError): string | null {
     }
   }
 
-  // Bedrock shape: { error: { message } }
+  // Gateway response shape: { error: { message } }
   const msg = nested?.message
   if (typeof msg === 'string' && msg.length > 0) {
     const sanitized = sanitizeMessageHTML(msg)
@@ -206,7 +206,7 @@ export function formatAPIError(error: APIError): string {
 
     // Handle timeout errors
     if (code === 'ETIMEDOUT') {
-      return 'Request timed out. Check your internet connection and proxy settings'
+      return 'Request timed out. Check your internet connection and network settings'
     }
 
     // Handle SSL/TLS errors with specific messages
@@ -215,14 +215,14 @@ export function formatAPIError(error: APIError): string {
         case 'UNABLE_TO_VERIFY_LEAF_SIGNATURE':
         case 'UNABLE_TO_GET_ISSUER_CERT':
         case 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY':
-          return 'Unable to connect to API: SSL certificate verification failed. Check your proxy or corporate SSL certificates'
+          return 'Unable to connect to API: SSL certificate verification failed. Check your network CA certificates'
         case 'CERT_HAS_EXPIRED':
           return 'Unable to connect to API: SSL certificate has expired'
         case 'CERT_REVOKED':
           return 'Unable to connect to API: SSL certificate has been revoked'
         case 'DEPTH_ZERO_SELF_SIGNED_CERT':
         case 'SELF_SIGNED_CERT_IN_CHAIN':
-          return 'Unable to connect to API: Self-signed certificate detected. Check your proxy or corporate SSL certificates'
+          return 'Unable to connect to API: Self-signed certificate detected. Check your network CA certificates'
         case 'ERR_TLS_CERT_ALTNAME_INVALID':
         case 'HOSTNAME_MISMATCH':
           return 'Unable to connect to API: SSL certificate hostname mismatch'

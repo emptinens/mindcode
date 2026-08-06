@@ -17,13 +17,14 @@ mock.module('./model/modelCapabilities.js', () => ({
 type MockCatalogModel = {
   id: string
   contextLength: number
-  outputLimit: number
+  outputLimit: number | undefined
   available: boolean
 }
 
 type MockCatalogState = {
   state: 'uninitialized' | 'loading' | 'ready' | 'error'
   registry?: { get: (id: string) => MockCatalogModel | undefined }
+  lastRegistry?: { get: (id: string) => MockCatalogModel | undefined }
 }
 
 let catalogState: MockCatalogState = { state: 'uninitialized' }
@@ -35,7 +36,11 @@ mock.module('../services/api/vexzy/modelCatalog.js', () => ({
 const {
   getContextWindowForModel,
   getModelMaxOutputTokens,
+  getVexzyMaxOutputTokens,
+  getVexzyOutputTokenPolicy,
   modelSupports1M,
+  normalizeVexzyMaxOutputTokens,
+  normalizeVexzyMaxOutputTokensEnv,
 } = await import('./context.js')
 
 const originalDisable1m = process.env.MINDCODE_DISABLE_1M_CONTEXT
@@ -77,7 +82,7 @@ function setReadyCatalog(...models: MockCatalogModel[]): void {
 function model(
   id: string,
   contextLength: number,
-  outputLimit: number,
+  outputLimit: number | undefined,
   available = true,
 ): MockCatalogModel {
   return { id, contextLength, outputLimit, available }
@@ -94,6 +99,71 @@ describe('context windows', () => {
       default: 128_000,
       upperLimit: 128_000,
     })
+  })
+
+  test('clamps overrides through the dynamic model output policy', () => {
+    setReadyCatalog(model('gpt-5.6-luna', 1_050_000, 999))
+
+    expect(getVexzyOutputTokenPolicy('gpt-5.6-luna')).toEqual({
+      contextLength: 1_050_000,
+      maxOutputTokens: 999,
+    })
+    expect(getVexzyMaxOutputTokens('gpt-5.6-luna', 10_000, 128_000)).toBe(999)
+    expect(getVexzyMaxOutputTokens('gpt-5.6-luna', 0, 999)).toBe(999)
+    expect(getVexzyMaxOutputTokens('gpt-5.6-luna', 1.5, 999)).toBe(999)
+  })
+
+  test('preserves the known 128K output limit while the catalog is unavailable', () => {
+    clearEnv('VEXZY_API_KEY')
+    catalogState = { state: 'uninitialized' }
+
+    expect(getVexzyOutputTokenPolicy('gpt-5.6-luna')).toEqual({
+      contextLength: 128_000,
+      maxOutputTokens: 128_000,
+    })
+    expect(getModelMaxOutputTokens('gpt-5.6-luna')).toEqual({
+      default: 128_000,
+      upperLimit: 128_000,
+    })
+  })
+
+  test('uses the ready dynamic catalog as authoritative over static IDs', () => {
+    setReadyCatalog(model('gpt-5.6-luna', 1_050_000, 128_000))
+
+    expect(() => getModelMaxOutputTokens('gpt-5.6-sol')).toThrow(
+      'not in the dynamic catalog',
+    )
+  })
+
+  test('rejects malformed transport values but clamps valid oversize values', () => {
+    expect(
+      normalizeVexzyMaxOutputTokens(200, 128, 128),
+    ).toMatchObject({ value: 128, status: 'clamped' })
+    expect(() =>
+      normalizeVexzyMaxOutputTokens(0, 128, 128, true),
+    ).toThrow('positive safe integer')
+    expect(() =>
+      normalizeVexzyMaxOutputTokens(1.5, 128, 128, true),
+    ).toThrow('positive safe integer')
+    expect(normalizeVexzyMaxOutputTokensEnv('64', 128, 256)).toEqual({
+      value: 64,
+      status: 'valid',
+    })
+    expect(normalizeVexzyMaxOutputTokensEnv('999', 128, 256)).toEqual({
+      value: 256,
+      status: 'clamped',
+    })
+    expect(normalizeVexzyMaxOutputTokensEnv('64tokens', 128, 256)).toEqual({
+      value: 128,
+      status: 'fallback',
+    })
+  })
+
+  test('rejects a catalog model without a confirmed output limit', () => {
+    setReadyCatalog(model('future-model', 777_777, undefined))
+    expect(() => getVexzyOutputTokenPolicy('future-model')).toThrow(
+      'no confirmed output token limit',
+    )
   })
 
   test('resolves Terra, Sol, and arbitrary future IDs by exact catalog ID', () => {
@@ -135,18 +205,52 @@ describe('context windows', () => {
     )
   })
 
-  test('fails closed for cold and error catalogs', () => {
+  test('uses exact fallback during loading and error after a prior successful load', () => {
     process.env.VEXZY_API_KEY = 'forge-context-test-key'
+
+    const priorRegistry = {
+      get: (id: string) =>
+        id === 'gpt-5.6-luna'
+          ? model('gpt-5.6-luna', 1_050_000, 999)
+          : undefined,
+    }
+    catalogState = { state: 'ready', registry: priorRegistry }
+    expect(getModelMaxOutputTokens('gpt-5.6-luna')).toEqual({
+      default: 999,
+      upperLimit: 999,
+    })
+
+    catalogState = { state: 'loading', lastRegistry: priorRegistry }
+    expect(getModelMaxOutputTokens('gpt-5.6-luna')).toEqual({
+      default: 128_000,
+      upperLimit: 128_000,
+    })
+
+    catalogState = { state: 'error', lastRegistry: priorRegistry }
+    expect(getModelMaxOutputTokens('gpt-5.6-luna')).toEqual({
+      default: 128_000,
+      upperLimit: 128_000,
+    })
 
     catalogState = { state: 'uninitialized' }
     expect(() => getContextWindowForModel('gpt-5.6-luna')).toThrow(
       'state: uninitialized',
     )
+  })
 
-    catalogState = { state: 'error' }
-    expect(() => getModelMaxOutputTokens('gpt-5.6-luna')).toThrow(
-      'state: error',
-    )
+  test('clamps retry-style overrides through the same safe integer policy', () => {
+    setReadyCatalog(model('gpt-5.6-luna', 1_050_000, 999))
+
+    expect(
+      getVexzyMaxOutputTokens(
+        'gpt-5.6-luna',
+        Number.MAX_SAFE_INTEGER,
+        999,
+      ),
+    ).toBe(999)
+    expect(
+      getVexzyMaxOutputTokens('gpt-5.6-luna', 0, 999),
+    ).toBe(999)
   })
 
   test('does not downgrade catalog-backed Luna when legacy Claude 1M is disabled', () => {

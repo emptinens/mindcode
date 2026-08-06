@@ -1,28 +1,29 @@
 import { feature } from 'bun:bundle'
 import chalk from 'chalk'
 import { markPostCompaction } from 'src/bootstrap/state.js'
+import type { ToolUseContext } from '../../Tool.js'
 import { getSystemPrompt } from '../../constants/prompts.js'
 import { getSystemContext, getUserContext } from '../../context.js'
 import { getShortcutDisplay } from '../../keybindings/shortcutFormat.js'
+import { setLastSummarizedMessageId } from '../../services/SessionMemory/sessionMemoryUtils.js'
 import { notifyCompaction } from '../../services/api/promptCacheBreakDetection.js'
 import {
   type CompactionResult,
-  compactConversation,
   ERROR_MESSAGE_INCOMPLETE_RESPONSE,
   ERROR_MESSAGE_NOT_ENOUGH_MESSAGES,
   ERROR_MESSAGE_USER_ABORT,
+  compactConversation,
   mergeHookInstructions,
 } from '../../services/compact/compact.js'
 import { suppressCompactWarning } from '../../services/compact/compactWarningState.js'
+import {
+  CompactTimeoutError,
+  createCompactStateTransaction,
+  createCompactWatchdog,
+} from '../../services/compact/compactWatchdog.js'
 import { microcompactMessages } from '../../services/compact/microCompact.js'
 import { runPostCompactCleanup } from '../../services/compact/postCompactCleanup.js'
 import { trySessionMemoryCompaction } from '../../services/compact/sessionMemoryCompact.js'
-import {
-  CompactTimeoutError,
-  createCompactWatchdog,
-} from '../../services/compact/compactWatchdog.js'
-import { setLastSummarizedMessageId } from '../../services/SessionMemory/sessionMemoryUtils.js'
-import type { ToolUseContext } from '../../Tool.js'
 import type { LocalCommandCall } from '../../types/command.js'
 import type { Message } from '../../types/message.js'
 import { hasExactErrorMessage } from '../../utils/errors.js'
@@ -31,8 +32,8 @@ import { logError } from '../../utils/log.js'
 import { getMessagesAfterCompactBoundary } from '../../utils/messages.js'
 import { getUpgradeMessage } from '../../utils/model/contextWindowUpgradeCheck.js'
 import {
-  buildEffectiveSystemPrompt,
   type SystemPrompt,
+  buildEffectiveSystemPrompt,
 } from '../../utils/systemPrompt.js'
 
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -52,6 +53,10 @@ export const call: LocalCommandCall = async (args, parentContext) => {
     throw new Error('No messages to compact')
   }
 
+  const stateTransaction = createCompactStateTransaction(
+    parentContext.readFileState,
+    parentContext.loadedNestedMemoryPaths,
+  )
   let watchdog = createCompactWatchdog(parentContext.abortController)
   let context = {
     ...parentContext,
@@ -75,6 +80,8 @@ export const call: LocalCommandCall = async (args, parentContext) => {
         // traditional summarizer. A timed-out watchdog child is aborted, so
         // create a fresh child scope for the fallback path.
         if (parentContext.abortController.signal.aborted) throw error
+        // Restore mutations made by the failed optimization before fallback.
+        stateTransaction.restoreForFallback()
         logError(error)
         if (watchdog.controller.signal.aborted) {
           watchdog.dispose()
@@ -103,6 +110,7 @@ export const call: LocalCommandCall = async (args, parentContext) => {
         markPostCompaction()
         // Suppress warning immediately after successful compaction
         suppressCompactWarning()
+        stateTransaction.commit()
 
         return {
           type: 'compact',
@@ -112,10 +120,14 @@ export const call: LocalCommandCall = async (args, parentContext) => {
       }
     }
 
+    // A null session-memory result is also a fallback. Restore both mutable
+    // compact collections before reactive or legacy compaction starts.
+    stateTransaction.restoreForFallback()
+
     // Reactive-only mode: route /compact through the reactive path.
     // Checked after session-memory (that path is cheap and orthogonal).
     if (reactiveCompact?.isReactiveOnlyMode()) {
-      return await watchdog.guard(
+      const reactiveResult = await watchdog.guard(
         compactViaReactive(
           messages,
           context,
@@ -123,6 +135,8 @@ export const call: LocalCommandCall = async (args, parentContext) => {
           reactiveCompact,
         ),
       )
+      stateTransaction.commit()
+      return reactiveResult
     }
 
     // Fall back to traditional compaction
@@ -142,6 +156,8 @@ export const call: LocalCommandCall = async (args, parentContext) => {
         false,
         customInstructions,
         false,
+        undefined,
+        stateTransaction,
       ),
     )
 
@@ -154,6 +170,7 @@ export const call: LocalCommandCall = async (args, parentContext) => {
 
     getUserContext.cache.clear?.()
     runPostCompactCleanup()
+    stateTransaction.commit()
 
     return {
       type: 'compact',
@@ -161,6 +178,7 @@ export const call: LocalCommandCall = async (args, parentContext) => {
       displayText: buildDisplayText(context, result.userDisplayMessage),
     }
   } catch (error) {
+    stateTransaction.rollback()
     if (error instanceof CompactTimeoutError) {
       throw new Error(error.message)
     }

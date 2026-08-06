@@ -8,9 +8,10 @@ import {
 import {
   CompactTimeoutError,
   DEFAULT_COMPACT_TIMEOUT_MS,
+  commitCompactState,
+  createCompactStateTransaction,
   createCompactWatchdog,
   resolveCompactTimeoutMs,
-  commitCompactState,
   restoreCompactState,
   snapshotCompactState,
 } from "./compactWatchdog.js";
@@ -57,6 +58,18 @@ describe("compact watchdog", () => {
 });
 
 describe("compact state transaction", () => {
+  function createState() {
+    const cache = createFileStateCacheWithSizeLimit(10);
+    cache.set("/tmp/original.txt", {
+      content: "original",
+      timestamp: 1,
+      offset: undefined,
+      limit: undefined,
+    });
+    const loaded = new Set(["/tmp/MINDCODE.md"]);
+    return { cache, loaded };
+  }
+
   test("commits state only after successful compaction", () => {
     const cache = createFileStateCacheWithSizeLimit(10);
     cache.set("/tmp/a.txt", {
@@ -94,6 +107,84 @@ describe("compact state transaction", () => {
 
     expect(cache.get("/tmp/a.txt")?.content).toBe("original");
     expect([...loaded]).toEqual(["/tmp/MINDCODE.md"]);
+  });
+
+  test("restores state after a stalled provider child timeout", async () => {
+    const { cache, loaded } = createState();
+    const transaction = createCompactStateTransaction(cache, loaded);
+    const parent = new AbortController();
+    const watchdog = createCompactWatchdog(parent, 10);
+
+    cache.clear();
+    loaded.clear();
+
+    await expect(
+      watchdog.guard(new Promise(() => undefined)),
+    ).rejects.toBeInstanceOf(CompactTimeoutError);
+    transaction.rollback();
+    watchdog.dispose();
+
+    expect(parent.signal.aborted).toBe(false);
+    expect(cache.get("/tmp/original.txt")?.content).toBe("original");
+    expect([...loaded]).toEqual(["/tmp/MINDCODE.md"]);
+  });
+
+  test("parent abort restores state without a double rollback", async () => {
+    const { cache, loaded } = createState();
+    const transaction = createCompactStateTransaction(cache, loaded);
+    const parent = new AbortController();
+    const watchdog = createCompactWatchdog(parent, 1000);
+
+    cache.clear();
+    loaded.clear();
+    parent.abort(new Error("parent canceled"));
+
+    await expect(watchdog.guard(new Promise(() => undefined))).rejects.toThrow(
+      "parent canceled",
+    );
+    transaction.rollback();
+    transaction.rollback();
+    watchdog.dispose();
+
+    expect(cache.get("/tmp/original.txt")?.content).toBe("original");
+    expect([...loaded]).toEqual(["/tmp/MINDCODE.md"]);
+  });
+
+  test("restores failed session-memory state before legacy fallback", () => {
+    const { cache, loaded } = createState();
+    const transaction = createCompactStateTransaction(cache, loaded);
+
+    cache.clear();
+    loaded.clear();
+    transaction.restoreForFallback();
+    expect(cache.get("/tmp/original.txt")?.content).toBe("original");
+    expect([...loaded]).toEqual(["/tmp/MINDCODE.md"]);
+
+    cache.clear();
+    loaded.clear();
+    transaction.commit();
+    transaction.commit();
+    expect(cache.size).toBe(0);
+    expect(loaded.size).toBe(0);
+  });
+
+  test("reactive failure preserves both mutable state collections", () => {
+    const { cache, loaded } = createState();
+    const transaction = createCompactStateTransaction(cache, loaded);
+
+    cache.set("/tmp/reactive.txt", {
+      content: "transient",
+      timestamp: 2,
+      offset: undefined,
+      limit: undefined,
+    });
+    loaded.add("/tmp/reactive.md");
+    transaction.rollback();
+
+    expect(cache.get("/tmp/original.txt")?.content).toBe("original");
+    expect(cache.get("/tmp/reactive.txt")).toBeUndefined();
+    expect([...loaded]).toEqual(["/tmp/MINDCODE.md"]);
+    expect(transaction.isRolledBack).toBe(true);
   });
 });
 

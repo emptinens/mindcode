@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { calculateVexzyCredits } from "../../services/credits/accounting.js";
+import { openTaskGraph } from "../../tasks/graph/taskGraph.js";
 import {
   type StatusReportData,
   generateStatusHtmlReport,
@@ -10,12 +11,18 @@ import {
 } from "./report.js";
 
 const originalConfigDir = process.env.MINDCODE_CONFIG_DIR;
+const originalDaemonDisabled = process.env.MINDCODE_DAEMON_DISABLED;
 
 afterEach(() => {
   if (originalConfigDir === undefined) {
     Reflect.deleteProperty(process.env, "MINDCODE_CONFIG_DIR");
   } else {
     process.env.MINDCODE_CONFIG_DIR = originalConfigDir;
+  }
+  if (originalDaemonDisabled === undefined) {
+    Reflect.deleteProperty(process.env, "MINDCODE_DAEMON_DISABLED");
+  } else {
+    process.env.MINDCODE_DAEMON_DISABLED = originalDaemonDisabled;
   }
 });
 
@@ -122,6 +129,84 @@ describe("status HTML report", () => {
     expect(html).toContain("Input credits");
   });
 
+  test("renders bounded role, weighted task, error, and timeline telemetry", () => {
+    const html = renderStatusHtml({
+      ...fixture(),
+      roleBreakdown: {
+        leader: {
+          requests: null,
+          inputTokens: null,
+          outputTokens: null,
+          reasoningTokens: null,
+          effort: null,
+        },
+        worker: {
+          requests: 3,
+          inputTokens: 300,
+          outputTokens: 600,
+          reasoningTokens: 100,
+          effort: "high",
+        },
+      },
+      taskMetrics: {
+        available: true,
+        statusCounts: { running: 1, failed: 1 },
+        effortCounts: { high: 1, medium: 1 },
+        effortWeights: { high: 4, medium: 2 },
+        activeLeases: 1,
+        timeline: [
+          {
+            id: "task-1",
+            status: "running",
+            owner: "worker-1",
+            effort: "high",
+            claimedAt: "2026-08-05T11:01:00.000Z",
+            startedAt: "2026-08-05T11:02:00.000Z",
+            finishedAt: null,
+          },
+          {
+            id: "/Users/secret/project/task-2",
+            status: "failed",
+            owner: "/Users/secret/owner",
+            effort: "medium",
+            claimedAt: null,
+            startedAt: null,
+            finishedAt: "2026-08-05T11:03:00.000Z",
+          },
+        ],
+      },
+      errors: { runtime: null, taskFailures: 1, total: null },
+      compactHistory: [
+        {
+          at: "2026-08-05T11:04:00.000Z",
+          kind: "auto-compact",
+          status: "completed",
+        },
+      ],
+    });
+
+    expect(html).toContain("Leader vs Worker");
+    expect(html).toContain("unavailable");
+    expect(html).toContain("Effort · high");
+    expect(html).toContain("4 weight");
+    expect(html).toContain("Active leases");
+    expect(html).toContain("Task lifecycle / timeline");
+    expect(html).toContain("auto-compact");
+    expect(html).not.toContain("/Users/secret");
+  });
+
+  test("makes the credit formula auditable without serializing secrets", () => {
+    const html = renderStatusHtml(fixture());
+
+    expect(html).toContain("Credit calculation transparency");
+    expect(html).toContain("price / 8");
+    expect(html).toContain("price / 40");
+    expect(html).toContain("price / 2");
+    expect(html).not.toMatch(/forge-[A-Za-z0-9._-]+/i);
+    expect(html).not.toMatch(/Bearer\s+/i);
+    expect(html).not.toMatch(/response.body|raw response|transcript/i);
+  });
+
   test("contains compact self-contained Sakura report without legacy branding", () => {
     const html = renderStatusHtml(fixture());
     const normalized = html.toLowerCase();
@@ -148,6 +233,32 @@ describe("status HTML report", () => {
       expect(path).toContain(join(configDir, "reports"));
       expect(html).toContain("MindCode");
       expect(html).toContain("Runtime architecture");
+    } finally {
+      await rm(configDir, { recursive: true, force: true });
+    }
+  });
+
+  test("reads task telemetry through the daemon client fallback", async () => {
+    const configDir = await mkdtemp(join(tmpdir(), "mindcode-status-graph-"));
+    process.env.MINDCODE_CONFIG_DIR = configDir;
+    process.env.MINDCODE_DAEMON_DISABLED = "1";
+    const graph = openTaskGraph();
+    try {
+      graph.route({
+        id: "status-task",
+        effort: "high",
+        files_touched: ["src/status.ts"],
+      });
+    } finally {
+      graph.close();
+    }
+
+    try {
+      const path = await generateStatusHtmlReport();
+      const html = await readFile(path, "utf8");
+      expect(html).toContain("status-task");
+      expect(html).toContain("Effort · high");
+      expect(html).toContain("4 weight");
     } finally {
       await rm(configDir, { recursive: true, force: true });
     }

@@ -21,6 +21,10 @@ import {
   createVexzySseTextParser,
   parseVexzyMessage,
 } from "./messagesProtocol.js";
+import {
+  getVexzyOutputTokenPolicy,
+  normalizeVexzyMaxOutputTokens,
+} from "../../../utils/context.js";
 
 export const DEFAULT_VEXZY_MESSAGES_TIMEOUT_MS = 600_000;
 
@@ -375,7 +379,14 @@ export class VexzyMessagesClient {
 
     let body: string;
     try {
-      body = JSON.stringify(params);
+      const policy = getVexzyOutputTokenPolicy(params.model);
+      const max_tokens = normalizeVexzyMaxOutputTokens(
+        params.max_tokens,
+        policy.maxOutputTokens,
+        policy.maxOutputTokens,
+        true,
+      ).value;
+      body = JSON.stringify({ ...params, max_tokens });
     } catch {
       throw new VexzyMessagesClientError("invalid_request");
     }
