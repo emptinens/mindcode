@@ -19,6 +19,30 @@ test("maps all six VEXZY worker effort values to fixed cost weights", () => {
   expect(getSwarmWorkerWeight(undefined)).toBe(2);
 });
 
+test("rejects Leader-only, numeric, and unknown effort before scheduler admission", async () => {
+  const invalid = ["minimal", "auto", "unknown", 50, 95, Number.NaN];
+  for (const effort of invalid) {
+    expect(() => getSwarmWorkerWeight(effort)).toThrow(
+      "Invalid Worker effort",
+    );
+  }
+
+  const policy = new AdaptiveSwarmConcurrencyPolicy(8);
+  for (const effort of invalid) {
+    await expect(
+      policy.acquire("invalid-effort", {
+        effort: effort as never,
+      }),
+    ).rejects.toThrow("Invalid Worker effort");
+  }
+  expect(policy.snapshot()).toMatchObject({
+    activeWorkers: 0,
+    queuedRequests: 0,
+    activeWeight: 0,
+    queuedWeight: 0,
+  });
+});
+
 test("reads only the canonical budget environment variable", () => {
   expect(
     new AdaptiveSwarmConcurrencyPolicy({

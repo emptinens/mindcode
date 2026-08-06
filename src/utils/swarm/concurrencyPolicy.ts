@@ -1,4 +1,4 @@
-import type { EffortValue } from "../effort.js";
+import type { WorkerEffort } from "../model/resolvers.js";
 import {
   CreditsFirstPolicy,
   type CreditsLease,
@@ -26,6 +26,23 @@ export const SWARM_EFFORT_WEIGHTS = Object.freeze({
 
 export const EFFORT_WEIGHTS = SWARM_EFFORT_WEIGHTS;
 
+function resolveSchedulerWorkerEffort(value: unknown): WorkerEffort {
+  if (value === undefined || value === null) return "medium";
+  if (
+    typeof value === "string" &&
+    Object.prototype.hasOwnProperty.call(SWARM_EFFORT_WEIGHTS, value)
+  ) {
+    return value as WorkerEffort;
+  }
+  const rendered =
+    typeof value === "string" ? JSON.stringify(value) : String(value);
+  throw new Error(
+    `Invalid Worker effort ${rendered}; expected one of ${Object.keys(
+      SWARM_EFFORT_WEIGHTS,
+    ).join(", ")}`,
+  );
+}
+
 export const SWARM_BUDGET_COMPONENTS = [
   "cpu",
   "memory",
@@ -41,7 +58,7 @@ export type SwarmBudgetComponents = Partial<
   Record<SwarmBudgetComponentName, number | null | undefined>
 >;
 
-export type SwarmEffort = EffortValue | "none";
+export type SwarmEffort = WorkerEffort;
 
 export type SwarmWorkerAcquireOptions = {
   effort?: SwarmEffort;
@@ -258,25 +275,11 @@ function calculateEffectiveBudget(
 }
 
 /**
- * Resolves EffortValue to scheduler cost. The six VEXZY worker levels retain
- * their distinct weights; numeric/leader-only values fall back to medium.
+ * Resolves the exact Worker effort to scheduler cost. Only the six VEXZY
+ * Worker values cross this boundary; missing input alone defaults to medium.
  */
-export function getSwarmWorkerWeight(effort: SwarmEffort | undefined): number {
-  if (effort === undefined) return SWARM_EFFORT_WEIGHTS.medium;
-  if (typeof effort === "number") {
-    if (!Number.isFinite(effort)) {
-      throw new Error("numeric worker effort must be finite");
-    }
-    if (effort <= 50) return SWARM_EFFORT_WEIGHTS.low;
-    if (effort <= 85) return SWARM_EFFORT_WEIGHTS.medium;
-    if (effort <= 95) return SWARM_EFFORT_WEIGHTS.high;
-    if (effort <= 100) return SWARM_EFFORT_WEIGHTS.xhigh;
-    return SWARM_EFFORT_WEIGHTS.max;
-  }
-  return (
-    SWARM_EFFORT_WEIGHTS[effort as keyof typeof SWARM_EFFORT_WEIGHTS] ??
-    SWARM_EFFORT_WEIGHTS.medium
-  );
+export function getSwarmWorkerWeight(effort: unknown): number {
+  return SWARM_EFFORT_WEIGHTS[resolveSchedulerWorkerEffort(effort)];
 }
 
 function normalizeAcquireOptions(
@@ -300,10 +303,10 @@ function normalizeAcquireOptions(
     typeof effortOrOptions === "object" && effortOrOptions !== null
       ? effortOrOptions
       : undefined;
-  const effort =
+  const effort = resolveSchedulerWorkerEffort(
     options?.effort ??
-    (typeof effortOrOptions === "object" ? "medium" : effortOrOptions) ??
-    "medium";
+      (typeof effortOrOptions === "object" ? undefined : effortOrOptions),
+  );
   const positionalWeight =
     typeof signalOrWeight === "number" ? signalOrWeight : undefined;
   const weight = validateWeight(
