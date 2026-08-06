@@ -5,8 +5,13 @@ describe('worker runtime ingress paths', () => {
     const paths = [
       '../AgentTool/runAgent.ts',
       '../AgentTool/AgentTool.tsx',
+      '../AgentTool/resumeAgent.ts',
       './spawnMultiAgent.ts',
+      '../../utils/swarm/backends/InProcessBackend.ts',
+      '../../utils/swarm/backends/PaneBackendExecutor.ts',
+      '../../utils/swarm/inProcessRunner.ts',
       '../../utils/swarm/spawnInProcess.ts',
+      '../../utils/swarm/teammateInit.ts',
     ]
 
     for (const path of paths) {

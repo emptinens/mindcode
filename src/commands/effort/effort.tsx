@@ -162,7 +162,7 @@ function ShowCurrentEffort(t0) {
   const {
     message
   } = showCurrentEffort(effortValue, model, ultracode);
-  onDone(message);
+  onDone(`${message}\n\nLeader effort only: /effort controls the current Leader model. Worker effort is assigned per task by the Leader and never inherits this value.`);
   return null;
 }
 function _temp(s) {
@@ -191,7 +191,7 @@ function EffortSliderStep(t0) {
     const {
       message
     } = showCurrentEffort(effortValue, model, ultracode);
-    onDone(message);
+    onDone(`${message}\n\nLeader effort only: /effort controls the current Leader model. Worker effort is assigned per task by the Leader and never inherits this value.`);
   };
   return <EffortSlider model={model} currentEffort={effortValue} ultracode={ultracode} onSelect={handleSelect} onCancel={handleCancel} />;
 }
@@ -210,14 +210,14 @@ function ApplyEffortAndClose({
       ...(effortUpdate ? { effortValue: effortUpdate.value } : {}),
       ...(ultracode !== undefined ? { ultracode } : {})
     }));
-    onDone(message);
+    onDone(`${message}\n\nLeader effort only: /effort controls the current Leader model. Worker effort is assigned per task by the Leader and never inherits this value.`);
   }, [setAppState, effortUpdate, message, ultracode, onDone]);
   return null;
 }
 export async function call(onDone: LocalJSXCommandOnDone, _context: unknown, args?: string): Promise<React.ReactNode> {
   const commandArgs = args?.trim() || '';
   if (COMMON_HELP_ARGS.includes(commandArgs)) {
-    onDone('Usage: /effort [none|minimal|low|medium|high|xhigh|max|auto|unset|default|ultracode]\n\nEffort levels:\n- low: Quick, straightforward implementation\n- medium: Balanced approach with standard testing\n- high: Comprehensive implementation with extensive testing\n- minimal: Minimal reasoning\n- xhigh: Very deep reasoning\n- max: Maximum reasoning\n- ultracode: xhigh effort plus standing dynamic-workflow orchestration (uses the Workflow tool on every substantive task)\n- auto: Use the provider\'s automatic reasoning value\n- unset/default: Clear the override');
+    onDone('Usage: /effort [none|minimal|low|medium|high|xhigh|max|auto|unset|default|ultracode]\n\nLeader effort only: this command controls the current Leader model. Worker effort is assigned per task by the Leader and never inherits this value.\n\nEffort levels:\n- low: Quick, straightforward implementation\n- medium: Balanced approach with standard testing\n- high: Comprehensive implementation with extensive testing\n- minimal: Minimal reasoning\n- xhigh: Very deep reasoning\n- max: Maximum reasoning\n- ultracode: xhigh effort plus standing dynamic-workflow orchestration (uses the Workflow tool on every substantive task)\n- auto: Use the provider\'s automatic reasoning value\n- unset/default: Clear the override');
     return;
   }
   if (!commandArgs) {
