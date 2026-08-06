@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
+import { createTestWorkerTaskGraph } from '../../runtime/taskGraph/workerGraph.js'
 import { TaskGraph } from '../../tasks/graph/taskGraph.js'
 import {
   buildWorkerReport,
@@ -71,17 +72,20 @@ describe('AgentTool lifecycle integration audit', () => {
       { taskId: 'integration-first', effort: 'high' as const, writeSet: ['src/shared.ts'] },
       { taskId: 'integration-second', effort: 'none' as const, readSet: ['src/shared.ts'] },
     ]
+    const firstTask = decomposed[0]
+    const secondTask = decomposed[1]
+    if (!firstTask || !secondTask) throw new Error('invalid test decomposition')
 
     const first = await acquireWorkerExecution(
       {
-        taskId: decomposed[0]!.taskId,
+        taskId: firstTask.taskId,
         owner: 'worker-first',
         schedulerScope: 'integration',
-        effort: decomposed[0]!.effort,
-        writeSet: decomposed[0]!.writeSet,
+        effort: firstTask.effort,
+        writeSet: firstTask.writeSet,
       },
       {
-        graph,
+        graph: createTestWorkerTaskGraph(graph),
         dependencyPollMs: 2,
         acquireSchedulerLease: (scope, effort, signal) => {
           acquiredEfforts.push(effort)
@@ -109,14 +113,14 @@ describe('AgentTool lifecycle integration audit', () => {
     // the second worker cannot claim until the first worker completes.
     const secondPromise = acquireWorkerExecution(
       {
-        taskId: decomposed[1]!.taskId,
+        taskId: secondTask.taskId,
         owner: 'worker-second',
         schedulerScope: 'integration',
-        effort: decomposed[1]!.effort,
-        readSet: decomposed[1]!.readSet,
+        effort: secondTask.effort,
+        readSet: secondTask.readSet,
       },
       {
-        graph,
+        graph: createTestWorkerTaskGraph(graph),
         dependencyPollMs: 2,
         acquireSchedulerLease: (scope, effort, signal) => {
           acquiredEfforts.push(effort)
@@ -157,7 +161,7 @@ describe('AgentTool lifecycle integration audit', () => {
       model: 'gpt-5.6-luna',
       validation: { verdict: 'pass' },
     })
-    first.complete()
+    await first.complete()
 
     const second = await secondPromise
     expect(acquiredEfforts).toEqual(['high', 'none'])
@@ -179,7 +183,7 @@ describe('AgentTool lifecycle integration audit', () => {
       effortUsed: second.effort,
     })
     expect(secondReport.effort_used).toBe('none')
-    second.complete()
+    await second.complete()
 
     expect(graph.requireTask('integration-first')).toMatchObject({
       status: 'completed',
@@ -209,7 +213,7 @@ describe('AgentTool lifecycle integration audit', () => {
         writeSet: ['src/conflict.ts'],
       },
       {
-        graph,
+        graph: createTestWorkerTaskGraph(graph),
         acquireSchedulerLease: (scope, effort, signal) =>
           scheduler.acquire(scope, { effort, signal }),
       },
@@ -226,7 +230,7 @@ describe('AgentTool lifecycle integration audit', () => {
         isolation: 'worktree',
       },
       {
-        graph,
+        graph: createTestWorkerTaskGraph(graph),
         acquireSchedulerLease: (scope, effort, signal) =>
           scheduler.acquire(scope, { effort, signal }),
       },
@@ -241,8 +245,8 @@ describe('AgentTool lifecycle integration audit', () => {
       activeWorkers: 2,
       activeWeight: SWARM_EFFORT_WEIGHTS.high + SWARM_EFFORT_WEIGHTS.max,
     })
-    first.complete()
-    isolatedExecution.release()
+    await first.complete()
+    await isolatedExecution.release()
     expect(graph.requireTask('shared-writer').status).toBe('completed')
     expect(graph.requireTask('isolated-writer').status).toBe('pending')
     expect(scheduler.snapshot().activeWeight).toBe(0)
@@ -250,7 +254,9 @@ describe('AgentTool lifecycle integration audit', () => {
 
   test('atomic claim race produces exactly one winner', async () => {
     const graph = createGraph()
-    const databasePath = join(temporaryDirectories[0]!, 'tasks.db')
+    const firstDirectory = temporaryDirectories[0]
+    if (!firstDirectory) throw new Error('test directory was not created')
+    const databasePath = join(firstDirectory, 'tasks.db')
     const competingGraph = new TaskGraph({ databasePath })
     openGraphs.push(competingGraph)
     graph.route({ id: 'claim-race', write_set: ['src/race.ts'] })
@@ -282,7 +288,7 @@ describe('AgentTool lifecycle integration audit', () => {
           writeSet: [`src/${effort}.ts`],
         },
         {
-          graph,
+          graph: createTestWorkerTaskGraph(graph),
           acquireSchedulerLease: (scope, selectedEffort, signal) => {
             observed.push(selectedEffort)
             return scheduler.acquire(scope, { effort: selectedEffort, signal })
@@ -293,7 +299,7 @@ describe('AgentTool lifecycle integration audit', () => {
       expect(scheduler.snapshot().activeWeight).toBe(
         SWARM_EFFORT_WEIGHTS[effort],
       )
-      execution.complete()
+      await execution.complete()
     }
 
     expect(observed).toEqual(efforts)
@@ -340,6 +346,7 @@ describe('AgentTool lifecycle integration audit', () => {
       'evidence',
       'model',
       'policy_epoch',
+      'report_id',
       'run_id',
       'schema_version',
       'status',
@@ -362,7 +369,7 @@ describe('AgentTool lifecycle integration audit', () => {
         effort: 'high',
       },
       {
-        graph,
+        graph: createTestWorkerTaskGraph(graph),
         acquireSchedulerLease: (scope, effort, signal) =>
           scheduler.acquire(scope, { effort, signal }),
       },
@@ -377,22 +384,24 @@ describe('AgentTool lifecycle integration audit', () => {
       effortUsed: 'high',
     })
     const events: string[] = []
+    let settlement: Promise<void> | undefined
     const accepted = persistValidatedWorkerReport(
       { workerReport: report },
       {
         persist: () => events.push('persist'),
         complete: () => {
           events.push('complete')
-          execution.complete()
+          settlement = execution.complete()
         },
         reject: () => {
           events.push('reject')
-          execution.fail()
+          settlement = execution.fail()
         },
       },
     )
 
     expect(accepted).toBe(false)
+    await settlement
     expect(events).toEqual(['reject'])
     expect(graph.requireTask(execution.taskId).status).toBe('failed')
     expect(scheduler.snapshot().activeWeight).toBe(0)

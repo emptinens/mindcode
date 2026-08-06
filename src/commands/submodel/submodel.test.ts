@@ -7,30 +7,17 @@ mock.module(
   agentSdkTypesMock,
 )
 
-let configuredModel = 'gpt-5.6-luna'
 const subagentModelMock = () => ({
   FIXED_SUBAGENT_MODEL: 'gpt-5.6-luna',
   FIXED_SUBAGENT_MODEL_DISPLAY: 'GPT-5.6 Luna',
-  getConfiguredSubagentModel: () => configuredModel,
-  setConfiguredSubagentModel: (model: string) => {
-    configuredModel = model
-    return model
-  },
+  getConfiguredSubagentModel: () => 'gpt-5.6-luna',
+  setConfiguredSubagentModel: () => 'gpt-5.6-luna',
 })
 mock.module('../../utils/model/subagentModel.js', subagentModelMock)
 mock.module(
   new URL('../../utils/model/subagentModel.ts', import.meta.url).pathname,
   subagentModelMock,
 )
-const settingsMock = () => ({
-  updateSettingsForSource: () => ({ error: null }),
-})
-mock.module('../../utils/settings/settings.js', settingsMock)
-mock.module(
-  new URL('../../utils/settings/settings.ts', import.meta.url).pathname,
-  settingsMock,
-)
-
 const { configureVexzyModelCatalog, resetVexzyModelCatalog } = await import(
   '../../services/api/vexzy/modelCatalog.js'
 )
@@ -63,7 +50,6 @@ const model = (
 let catalogLoads = 0
 
 beforeEach(async () => {
-  configuredModel = 'gpt-5.6-luna'
   catalogLoads = 0
   const registry = createVexzyModelRegistry({
     object: 'list',
@@ -92,28 +78,26 @@ afterEach(() => resetVexzyModelCatalog())
 describe('/submodel', () => {
   test('reuses the ready catalog without entering a loading UI state', async () => {
     await ensureSubmodelCatalogReady()
-    expect(getSubmodelOptions()).toHaveLength(2)
+    expect(getSubmodelOptions()).toHaveLength(1)
     expect(catalogLoads).toBe(1)
   })
 
-  test('offers only available VEXZY models with tool execution', () => {
+  test('offers only the fixed Luna model when it is available for tools', () => {
     expect(getSubmodelOptions().map(option => option.value)).toEqual([
       'gpt-5.6-luna',
-      'gpt-5.6-terra',
     ])
   })
 
-  test('persists the exact selection without changing the Leader model', async () => {
-    await expect(setSubmodel('gpt-5.6-terra')).resolves.toContain(
-      'gpt-5.6-terra',
+  test('reports the fixed model without persisting a mutable selection', async () => {
+    await expect(setSubmodel('gpt-5.6-luna')).resolves.toContain(
+      'fixed to gpt-5.6-luna',
     )
-    expect(configuredModel).toBe('gpt-5.6-terra')
   })
 
-  test('rejects unavailable and non-tool models', async () => {
-    await expect(setSubmodel('text-only')).rejects.toThrow(/tool model/)
-    await expect(setSubmodel('offline-tool-model')).rejects.toThrow(
-      /tool model/,
+  test('rejects every alternate Worker model even when it supports tools', async () => {
+    await expect(setSubmodel('gpt-5.6-terra')).rejects.toThrow(
+      /fixed to gpt-5\.6-luna/,
     )
+    await expect(setSubmodel('text-only')).rejects.toThrow(/fixed to/)
   })
 })

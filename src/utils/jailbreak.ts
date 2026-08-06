@@ -71,12 +71,17 @@ export function getJailbreakLevel(): JailbreakLevel {
 }
 
 export function setJailbreakLevel(level: JailbreakLevel): void {
+  const normalizedLevel = parseJailbreakLevel(String(level))
+  if (normalizedLevel === undefined) {
+    throw new TypeError('invalid jailbreak level')
+  }
   const path = getStatePath()
+  if (path === cachedPath && cachedLevel === normalizedLevel) return
   cachedPath = path
-  cachedLevel = level
+  cachedLevel = normalizedLevel
   try {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
-    writeFileSync(path, level, { encoding: 'utf-8', mode: 0o600 })
+    writeFileSync(path, normalizedLevel, { encoding: 'utf-8', mode: 0o600 })
   } catch {
     // Persistence is best-effort; the in-memory value is still active.
   }

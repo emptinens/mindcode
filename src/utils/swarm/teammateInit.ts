@@ -5,16 +5,22 @@
  * Registers a Stop hook to notify the team leader when the teammate becomes idle.
  */
 
+import { randomUUID } from 'node:crypto'
+import { getCompiledWorkerPolicySnapshot } from '../../services/policy/workerPolicySource.js'
+import {
+  parsePolicyEpochEnvironment,
+  readCurrentPolicyEpochState,
+} from '../../services/policy/index.js'
 import type { AppState } from '../../state/AppState.js'
 import { logForDebugging } from '../debug.js'
 import { addFunctionHook } from '../hooks/sessionHooks.js'
 import { applyPermissionUpdate } from '../permissions/PermissionUpdate.js'
 import { getTeammateColor } from '../teammate.js'
+import { createIdleNotification, writeToMailbox } from '../teammateMailbox.js'
 import {
-  createIdleNotification,
-  writeToMailbox,
-} from '../teammateMailbox.js'
-import { resolveWorkerEffort, type WorkerEffortInput } from './backends/types.js'
+  resolveWorkerRuntime,
+  type WorkerEffortInput,
+} from './backends/types.js'
 import { readTeamFile, setMemberActive } from './teamHelpers.js'
 import {
   buildWorkerTeamReportFromMessages,
@@ -22,13 +28,47 @@ import {
   serializeWorkerTeamReportMessage,
 } from './workerTeamReport.js'
 
-function getTeammateWorkerEffort(explicit: WorkerEffortInput | undefined) {
-  const effortFlagIndex = process.argv.indexOf('--effort')
-  const cliEffort =
-    effortFlagIndex >= 0 ? process.argv[effortFlagIndex + 1] : undefined
-  return resolveWorkerEffort(
-    explicit ?? process.env.MINDCODE_WORKER_EFFORT ?? cliEffort,
-  )
+export const WORKER_LIFECYCLE_RUN_ID_ENV = 'MINDCODE_WORKER_RUN_ID'
+
+function resolveWorkerPolicySnapshot() {
+  const snapshot = getCompiledWorkerPolicySnapshot()
+  const inherited = parsePolicyEpochEnvironment()
+  if (
+    inherited &&
+    (inherited.epoch !== snapshot.policyEpoch ||
+      inherited.digest !== snapshot.sourceDigest)
+  ) {
+    throw new Error('Inherited Worker policy epoch/digest mismatch')
+  }
+  const persisted = readCurrentPolicyEpochState()
+  if (
+    inherited &&
+    persisted &&
+    (persisted.epoch !== inherited.epoch ||
+      persisted.digest !== inherited.digest)
+  ) {
+    throw new Error('Inherited Worker policy epoch is stale')
+  }
+  return snapshot
+}
+
+/** Creates an opaque run identifier for one Worker process lifecycle. */
+export function createWorkerLifecycleRunId(): string {
+  return `worker-lifecycle:${randomUUID()}`
+}
+
+export function resolveTeammateWorkerEffort(
+  explicit: WorkerEffortInput | undefined,
+  argv: readonly string[] = process.argv,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+) {
+  const effortFlagIndex = argv.indexOf('--effort')
+  const cliEffort = effortFlagIndex >= 0 ? argv[effortFlagIndex + 1] : undefined
+  // Legacy startup compatibility only. Spawn/runtime paths pass the resolved
+  // effort explicitly and never forward or re-read this environment value.
+  return resolveWorkerRuntime(
+    explicit ?? cliEffort ?? environment.MINDCODE_WORKER_EFFORT,
+  ).effort
 }
 
 /**
@@ -59,8 +99,11 @@ export function initializeTeammateHooks(
   }
 
   const leadAgentId = teamFile.leadAgentId
-  const reportTaskId = teamInfo.taskId ?? sessionId
-  const workerEffort = getTeammateWorkerEffort(teamInfo.effort)
+  const workerPolicy = resolveWorkerPolicySnapshot()
+  const reportTaskId = teamInfo.taskId ?? agentId
+  const workerRunId =
+    process.env[WORKER_LIFECYCLE_RUN_ID_ENV] ?? createWorkerLifecycleRunId()
+  const workerEffort = resolveTeammateWorkerEffort(teamInfo.effort)
 
   // Apply team-wide allowed paths if any exist
   if (teamFile.teamAllowedPaths && teamFile.teamAllowedPaths.length > 0) {
@@ -79,7 +122,7 @@ export function initializeTeammateHooks(
         `[TeammateInit] Applying team permission: ${allowedPath.toolName} allowed in ${allowedPath.path} (rule: ${ruleContent})`,
       )
 
-      setAppState(prev => ({
+      setAppState((prev) => ({
         ...prev,
         toolPermissionContext: applyPermissionUpdate(
           prev.toolPermissionContext,
@@ -100,7 +143,7 @@ export function initializeTeammateHooks(
   }
 
   // Find the leader's name from the members array
-  const leadMember = teamFile.members.find(m => m.agentId === leadAgentId)
+  const leadMember = teamFile.members.find((m) => m.agentId === leadAgentId)
   const leadAgentName = leadMember?.name || 'team-lead'
 
   // Don't register hook if this agent is the leader
@@ -131,9 +174,9 @@ export function initializeTeammateHooks(
       // Earlier transcript content is used only for deduplicated usage totals.
       const report = buildWorkerTeamReportFromMessages({
         taskId: reportTaskId,
-        runId: `${agentId}:${reportTaskId}`,
+        runId: workerRunId,
         workerId: agentId,
-        policyEpoch: 0,
+        policyEpoch: workerPolicy.policyEpoch,
         effortUsed: workerEffort,
         messages,
       })

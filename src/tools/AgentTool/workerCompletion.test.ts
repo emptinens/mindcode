@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import type { WorkerReport } from './workerReport.js'
-import { persistValidatedWorkerReport } from './workerReport.js'
+import {
+  deriveWorkerReportId,
+  persistValidatedWorkerReport,
+} from './workerReport.js'
 
 function resultWith(report: WorkerReport): { workerReport: WorkerReport } {
   return { workerReport: report }
@@ -11,6 +14,7 @@ const validReport: WorkerReport = {
   task_id: 'task-order',
   run_id: 'run-order',
   worker_id: 'worker-order',
+  report_id: deriveWorkerReportId('task-order', 'run-order', 'worker-order'),
   model: 'gpt-5.6-luna',
   effort_used: 'medium',
   policy_epoch: 0,

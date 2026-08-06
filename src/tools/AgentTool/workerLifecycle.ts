@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { TaskGraph } from '../../tasks/graph/taskGraph.js'
-import { openTaskGraph } from '../../tasks/graph/taskGraph.js'
+import {
+  type WorkerTaskGraph,
+  createWorkerTaskGraph,
+} from '../../runtime/taskGraph/workerGraph.js'
 import type {
   OverlapDecision,
   TaskIsolation,
@@ -50,6 +52,12 @@ export class WorkerLifecycleTimeoutError extends Error {
   }
 }
 
+export type WorkerCompletionEvidence = {
+  reportId: string
+  policyEpoch: number
+  policyDigest?: string
+}
+
 export type WorkerExecutionInput = {
   taskId: string
   owner: string
@@ -62,12 +70,18 @@ export type WorkerExecutionInput = {
   isolation?: TaskIsolation
   runtimeScope?: string
   targetScope?: string
+  /** Immutable compiled Worker policy identity captured at admission. */
+  policyEpoch?: number
+  policyDigest?: string
   signal?: AbortSignal
   onPhase?: (phase: WorkerExecutionPhase, detail?: string) => void
 }
 
 export type WorkerExecutionDependencies = {
-  graph?: TaskGraph
+  /** Async graph seam. Production leaves this unset and uses daemon RPC. */
+  graph?: WorkerTaskGraph
+  /** Set when the caller owns an explicitly injected graph. */
+  closeGraph?: boolean
   acquireSchedulerLease?: (
     scope: string,
     effort: WorkerEffort,
@@ -81,7 +95,7 @@ export type WorkerExecutionDependencies = {
   schedulerWaitTimeoutMs?: number
   taskLeaseTtlMs?: number
   taskLeaseHeartbeat?: (
-    heartbeat: () => void,
+    heartbeat: () => void | Promise<void>,
     intervalMs: number,
   ) => () => void
 }
@@ -91,10 +105,12 @@ export type WorkerExecutionLease = {
   owner: string
   effort: WorkerEffort
   routeDecision: OverlapDecision
-  getTask: () => TaskRecord | null
-  complete: () => void
-  fail: () => void
-  release: () => void
+  policyEpoch?: number
+  policyDigest?: string
+  getTask: () => Promise<TaskRecord | null>
+  complete: (evidence?: WorkerCompletionEvidence) => Promise<void>
+  fail: (evidence?: WorkerCompletionEvidence) => Promise<void>
+  release: () => Promise<void>
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {
@@ -141,6 +157,79 @@ function assertTaskIdentity(value: string, field: string): string {
     throw new Error(`${field} must be between 1 and 256 characters`)
   }
   return normalized
+}
+
+const WORKER_REPORT_ID_PATTERN = /^[a-f0-9]{64}$/
+
+function validatePolicyIdentity(
+  policyEpoch: number | undefined,
+  policyDigest: string | undefined,
+): void {
+  if (policyEpoch === undefined && policyDigest === undefined) return
+  if (
+    policyEpoch === undefined ||
+    !Number.isSafeInteger(policyEpoch) ||
+    policyEpoch < 0
+  ) {
+    throw new Error('worker policy epoch must be a nonnegative safe integer')
+  }
+  if (
+    policyDigest === undefined ||
+    !WORKER_REPORT_ID_PATTERN.test(policyDigest)
+  ) {
+    throw new Error('worker policy digest must be a lowercase SHA-256 digest')
+  }
+}
+
+function validateTerminalEvidence(
+  evidence: WorkerCompletionEvidence | undefined,
+  expectedPolicyEpoch: number | undefined,
+  expectedPolicyDigest: string | undefined,
+): WorkerCompletionEvidence | undefined {
+  if (expectedPolicyEpoch === undefined) {
+    if (evidence === undefined) return undefined
+    if (!WORKER_REPORT_ID_PATTERN.test(evidence.reportId)) {
+      throw new Error('worker report_id must be a lowercase SHA-256 digest')
+    }
+    if (
+      !Number.isSafeInteger(evidence.policyEpoch) ||
+      evidence.policyEpoch < 0
+    ) {
+      throw new Error(
+        'worker report policy epoch must be a nonnegative safe integer',
+      )
+    }
+    if (
+      evidence.policyDigest !== undefined &&
+      !WORKER_REPORT_ID_PATTERN.test(evidence.policyDigest)
+    ) {
+      throw new Error(
+        'worker report policy digest must be a lowercase SHA-256 digest',
+      )
+    }
+    return evidence
+  }
+
+  if (evidence === undefined) {
+    throw new Error(
+      'worker completion requires a validated report_id and policy_epoch',
+    )
+  }
+  if (!WORKER_REPORT_ID_PATTERN.test(evidence.reportId)) {
+    throw new Error('worker report_id must be a lowercase SHA-256 digest')
+  }
+  if (evidence.policyEpoch !== expectedPolicyEpoch) {
+    throw new Error(
+      `stale or mismatched worker report policy epoch: expected ${expectedPolicyEpoch}, received ${evidence.policyEpoch}`,
+    )
+  }
+  if (
+    expectedPolicyDigest !== undefined &&
+    evidence.policyDigest !== expectedPolicyDigest
+  ) {
+    throw new Error('stale or mismatched worker report policy digest')
+  }
+  return evidence
 }
 
 function runtimeHash(runtimeScope: string): string {
@@ -317,7 +406,7 @@ async function resolveExternalDependencyWithDeadline(
 async function resolveDependencies(
   blockedBy: readonly string[] | undefined,
   runtimeScope: string | undefined,
-  graph: TaskGraph,
+  graph: WorkerTaskGraph,
   resolveExternalDependency:
     | WorkerExecutionDependencies['resolveExternalDependency']
     | undefined,
@@ -332,7 +421,10 @@ async function resolveDependencies(
   for (const dependency of blockedBy) {
     const dependencyId = assertTaskIdentity(dependency, 'blockedBy task ID')
     const storedDependencyId = namespaceTaskId(dependencyId, runtimeScope)
-    const lifecycleDependency = graph.read(storedDependencyId)
+    const lifecycleDependency = await graph.read(
+      storedDependencyId,
+      input.signal,
+    )
     if (lifecycleDependency) {
       if (
         lifecycleDependency.status === 'failed' ||
@@ -476,6 +568,7 @@ export async function acquireWorkerExecution(
   )
   const runtimeScope = input.runtimeScope?.trim() || undefined
   const targetScope = input.targetScope?.trim() || undefined
+  validatePolicyIdentity(input.policyEpoch, input.policyDigest)
   const storedTaskId = namespaceTaskId(taskId, runtimeScope)
   const dependencyPollMs = positiveInteger(
     dependencies.dependencyPollMs,
@@ -506,10 +599,19 @@ export async function acquireWorkerExecution(
     dependencies.acquireSchedulerLease ??
     ((scope: string, effort: WorkerEffort, signal?: AbortSignal) =>
       acquireSwarmWorkerSlot(scope, { effort, signal }))
-  // Validate all caller/config timing values before opening an owned SQLite
-  // handle. A rejected value must not leak the task graph connection.
-  const graph = dependencies.graph ?? openTaskGraph()
-  const ownsGraph = dependencies.graph === undefined
+
+  // Production always starts with the daemon-backed async adapter. The local
+  // SQLite authority is selected lazily by the adapter only for a classified
+  // pre-dispatch availability failure. Tests may inject an explicit async
+  // wrapper around a TaskGraph through dependencies.graph.
+  const graph =
+    dependencies.graph ??
+    // The adapter passes the admission signal to pre-dispatch operations;
+    // terminal cleanup deliberately uses no signal so leases are released
+    // even after the parent turn is cancelled.
+    createWorkerTaskGraph()
+  const ownsGraph =
+    dependencies.graph === undefined || dependencies.closeGraph === true
 
   let graphLeaseId: string | undefined
   let schedulerLease: SwarmWorkerLease | undefined
@@ -519,10 +621,10 @@ export async function acquireWorkerExecution(
   let heartbeatActive = false
   let stopScheduledHeartbeat: (() => void) | undefined
 
-  const closeGraph = () => {
+  const closeGraph = async () => {
     if (ownsGraph && !closed) {
       closed = true
-      graph.close()
+      await graph.close()
     }
   }
 
@@ -533,20 +635,25 @@ export async function acquireWorkerExecution(
     stopScheduledHeartbeat = undefined
   }
 
-  const heartbeat = () => {
+  const heartbeat = async () => {
     if (!heartbeatActive || terminal || graphLeaseId === undefined) return
+    const leaseId = graphLeaseId
     try {
-      const renewed = graph.renewLease(graphLeaseId, {
+      const renewed = await graph.renewLease(leaseId, {
         owner,
         ttl_ms: taskLeaseTtlMs,
       })
       if (renewed === null || renewed.released_at !== null) {
         graphLeaseId = undefined
         stopHeartbeat()
+        return
+      }
+      if (!heartbeatActive || terminal || graphLeaseId !== leaseId) {
+        return
       }
     } catch {
-      // SQLite can be transiently busy. Keep the timer alive so the next
-      // heartbeat retries instead of silently abandoning an active worker.
+      // Keep the heartbeat alive for transient daemon/SQLite failures. An
+      // ambiguous mutation is never redirected to the other authority.
     }
   }
 
@@ -557,8 +664,10 @@ export async function acquireWorkerExecution(
       graphLeaseId === undefined
     ) return
     heartbeatActive = true
-    const schedule = dependencies.taskLeaseHeartbeat ?? ((callback: () => void, intervalMs: number) => {
-      const timer = setInterval(callback, intervalMs)
+    const schedule = dependencies.taskLeaseHeartbeat ?? ((callback: () => void | Promise<void>, intervalMs: number) => {
+      const timer = setInterval(() => {
+        void callback()
+      }, intervalMs)
       timer.unref?.()
       return () => clearInterval(timer)
     })
@@ -568,8 +677,8 @@ export async function acquireWorkerExecution(
     )
   }
 
-  const failNonTerminalTask = () => {
-    const current = graph.read(storedTaskId)
+  const failNonTerminalTask = async () => {
+    const current = await graph.read(storedTaskId)
     if (!current) return
     const ownsClaim =
       graphLeaseId !== undefined &&
@@ -583,7 +692,7 @@ export async function acquireWorkerExecution(
       current.owner === null &&
       current.lease_id === null
     if (ownsClaim || ownsUnclaimedRoute) {
-      graph.update(storedTaskId, { status: 'failed' }, current.version)
+      await graph.update(storedTaskId, { status: 'failed' }, current.version)
     }
   }
 
@@ -604,7 +713,7 @@ export async function acquireWorkerExecution(
     throwIfAborted(input.signal)
 
     emitPhase(input, 'routing')
-    const routed = graph.route({
+    const routed = await graph.route({
       id: storedTaskId,
       idempotency_key: `agent-lifecycle:${storedTaskId}`,
       // Task IDs are runtime-scoped to avoid stale-lease identity collisions.
@@ -615,18 +724,30 @@ export async function acquireWorkerExecution(
       write_set: namespaceTargets(input.writeSet, targetScope),
       blocked_by: resolvedBlockedBy,
       isolation: input.isolation ?? 'shared',
-    })
+      policy_epoch: input.policyEpoch,
+    }, undefined, input.signal)
     if (!routed.task || !routed.decision.allowed) {
       throw new Error(`Task ${taskId} was rejected by overlap validation`)
+    }
+    if (
+      input.policyEpoch !== undefined &&
+      routed.task.policy_epoch !== input.policyEpoch
+    ) {
+      throw new Error(
+        `Task ${taskId} has stale worker policy epoch ${routed.task.policy_epoch}; expected ${input.policyEpoch}`,
+      )
     }
     routedCreated = routed.created
 
     let announcedDependencyWait = false
     while (graphLeaseId === undefined) {
       throwIfAborted(input.signal)
-      const claim = graph.claimTask(storedTaskId, owner, {
-        ttl_ms: taskLeaseTtlMs,
-      })
+      const claim = await graph.claimTask(
+        storedTaskId,
+        owner,
+        { ttl_ms: taskLeaseTtlMs },
+        input.signal,
+      )
       if (claim.ok) {
         graphLeaseId = claim.lease.lease_id
         startHeartbeat()
@@ -666,73 +787,127 @@ export async function acquireWorkerExecution(
       schedulerWaitTimeoutMs,
     )
 
-    const claimed = graph.requireTask(storedTaskId)
+    throwIfAborted(input.signal)
+    const claimed = await graph.requireTask(storedTaskId, input.signal)
     if (claimed.owner !== owner || claimed.lease_id !== graphLeaseId) {
       throw new Error(`Task ${taskId} lost its claim before execution`)
     }
-    graph.update(storedTaskId, { status: 'running' }, claimed.version)
+    // Once the worker owns a scheduler and graph lease, terminal cleanup must
+    // survive cancellation of the parent turn.
+    await graph.update(storedTaskId, { status: 'running' }, claimed.version)
     emitPhase(input, 'starting')
 
-    const finish = (status: 'completed' | 'failed') => {
-      if (terminal) return
+    const finish = (
+      status: 'completed' | 'failed',
+      evidence?: WorkerCompletionEvidence,
+    ): Promise<void> => {
+      if (terminal) return Promise.resolve()
+      const terminalEvidence = validateTerminalEvidence(
+        evidence,
+        input.policyEpoch,
+        input.policyDigest,
+      )
       terminal = true
       stopHeartbeat()
-      try {
-        const current = graph.read(storedTaskId)
-        if (
-          current &&
-          current.owner === owner &&
-          current.lease_id === graphLeaseId &&
-          (current.status === 'claimed' || current.status === 'running')
-        ) {
-          graph.update(storedTaskId, { status }, current.version)
+      return (async () => {
+        try {
+          let operationError: unknown
+          try {
+            const current = await graph.read(storedTaskId)
+            if (
+              current &&
+              current.owner === owner &&
+              current.lease_id === graphLeaseId &&
+              (current.status === 'claimed' || current.status === 'running')
+            ) {
+              await graph.update(
+                storedTaskId,
+                {
+                  status,
+                  ...(terminalEvidence
+                    ? {
+                        policy_epoch: terminalEvidence.policyEpoch,
+                        report_id: terminalEvidence.reportId,
+                      }
+                    : {}),
+                },
+                current.version,
+              )
+            }
+          } catch (error) {
+            operationError = error
+          }
+          try {
+            // Lease release is attempted even when report persistence fails,
+            // but it remains on the selected authority and is never retried
+            // through the other backend.
+            if (graphLeaseId) {
+              await graph.releaseLease(graphLeaseId, { owner })
+            }
+          } catch (error) {
+            operationError ??= error
+          } finally {
+            graphLeaseId = undefined
+          }
+          if (operationError) {
+            throw operationError
+          }
+        } finally {
+          schedulerLease?.release()
+          schedulerLease = undefined
+          await closeGraph()
         }
-        if (graphLeaseId) {
-          graph.releaseLease(graphLeaseId, { owner })
-          graphLeaseId = undefined
-        }
-      } finally {
-        schedulerLease?.release()
-        schedulerLease = undefined
-        closeGraph()
-      }
+      })()
     }
 
-    const release = () => {
-      if (terminal) return
+    const release = (): Promise<void> => {
+      if (terminal) return Promise.resolve()
       terminal = true
       stopHeartbeat()
-      try {
-        if (graphLeaseId) {
-          graph.releaseLease(graphLeaseId, { owner })
-          graphLeaseId = undefined
+      return (async () => {
+        try {
+          let releaseError: unknown
+          if (graphLeaseId) {
+            try {
+              await graph.releaseLease(graphLeaseId, { owner })
+            } catch (error) {
+              releaseError = error
+            } finally {
+              graphLeaseId = undefined
+            }
+          }
+          if (releaseError) {
+            throw releaseError
+          }
+        } finally {
+          schedulerLease?.release()
+          schedulerLease = undefined
+          await closeGraph()
         }
-      } finally {
-        schedulerLease?.release()
-        schedulerLease = undefined
-        closeGraph()
-      }
+      })()
     }
 
     return {
       taskId,
       owner,
       effort: input.effort,
+      policyEpoch: input.policyEpoch,
+      policyDigest: input.policyDigest,
       routeDecision: publicOverlapDecision(
         routed.decision,
         runtimeScope,
         targetScope,
       ),
-      getTask: () =>
+      getTask: async () =>
         closed
           ? null
           : publicTaskRecord(
-              graph.read(storedTaskId),
+              await graph.read(storedTaskId),
               runtimeScope,
               targetScope,
             ),
-      complete: () => finish('completed'),
-      fail: () => finish('failed'),
+      complete: evidence => finish('completed', evidence),
+      fail: evidence => finish('failed', evidence),
       release,
     }
   } catch (error) {
@@ -740,15 +915,23 @@ export async function acquireWorkerExecution(
     try {
       if (!(error instanceof AbortError) && !input.signal?.aborted) {
         try {
-          failNonTerminalTask()
+          await failNonTerminalTask()
         } catch {
           // A racing update must not prevent lease cleanup.
         }
       }
-      if (graphLeaseId) graph.releaseLease(graphLeaseId, { owner })
+      if (graphLeaseId) {
+        try {
+          await graph.releaseLease(graphLeaseId, { owner })
+        } catch {
+          // Do not switch graph authorities while recovering from an
+          // ambiguous mutation. The original admission error remains primary.
+        }
+        graphLeaseId = undefined
+      }
     } finally {
       schedulerLease?.release()
-      closeGraph()
+      await closeGraph()
     }
     throw error
   }

@@ -34,9 +34,10 @@ import {
 import { createPaneBackendExecutor } from '../../utils/swarm/backends/PaneBackendExecutor.js'
 import { getTeammateModeFromSnapshot } from '../../utils/swarm/backends/teammateModeSnapshot.js'
 import {
-  resolveWorkerEffort,
+  resolveWorkerRuntime,
   type BackendType,
   type WorkerEffortInput,
+  type WorkerRuntime,
 } from '../../utils/swarm/backends/types.js'
 import { isPaneBackend } from '../../utils/swarm/backends/types.js'
 import {
@@ -64,11 +65,14 @@ import {
   upsertTeamMemberAsync,
 } from '../../utils/swarm/teamHelpers.js'
 import {
+  createWorkerLifecycleRunId,
+  WORKER_LIFECYCLE_RUN_ID_ENV,
+} from '../../utils/swarm/teammateInit.js'
+import {
   assignTeammateColor,
   isInsideTmux,
 } from '../../utils/swarm/teammateLayoutManager.js'
 import { acquireSwarmWorkerSlot } from '../../utils/swarm/concurrencyPolicy.js'
-import { getConfiguredSubagentModel } from '../../utils/model/subagentModel.js'
 import { registerTask } from '../../utils/task/framework.js'
 import { writeToMailbox } from '../../utils/teammateMailbox.js'
 import type { CustomAgentDefinition } from '../AgentTool/loadAgentsDir.js'
@@ -83,7 +87,7 @@ export function resolveTeammateModel(
   _inputModel: string | undefined,
   _leaderModel: string | null,
 ): string {
-  return getConfiguredSubagentModel()
+  return resolveWorkerRuntime(undefined).model
 }
 
 // ============================================================================
@@ -293,14 +297,13 @@ export async function generateUniqueTeammateName(
 async function handleSpawnSplitPane(
   input: SpawnInput,
   context: ToolUseContext,
+  workerRuntime: WorkerRuntime,
 ): Promise<{ data: SpawnOutput }> {
   const { setAppState, getAppState } = context
   const { name, prompt, agent_type, cwd, plan_mode_required } = input
 
-  // Resolve model: 'inherit' → leader's model; undefined → default Opus
   const appState = getAppState()
-  const model = resolveTeammateModel(input.model, appState.mainLoopModel)
-  const effort = resolveWorkerEffort(input.effort)
+  const { model, effort } = workerRuntime
 
   if (!name || !prompt) {
     throw new Error('name and prompt are required for spawn operation')
@@ -488,14 +491,13 @@ async function handleSpawnSplitPane(
 async function handleSpawnSeparateWindow(
   input: SpawnInput,
   context: ToolUseContext,
+  workerRuntime: WorkerRuntime,
 ): Promise<{ data: SpawnOutput }> {
   const { setAppState, getAppState } = context
   const { name, prompt, agent_type, cwd, plan_mode_required } = input
 
-  // Resolve model: 'inherit' → leader's model; undefined → default Opus
   const appState = getAppState()
-  const model = resolveTeammateModel(input.model, appState.mainLoopModel)
-  const effort = resolveWorkerEffort(input.effort)
+  const { model, effort } = workerRuntime
 
   if (!name || !prompt) {
     throw new Error('name and prompt are required for spawn operation')
@@ -534,6 +536,8 @@ async function handleSpawnSeparateWindow(
     effort,
     signal: context.abortController.signal,
   })
+  const lifecycleStartedAtMs = Date.now()
+  const workerRunId = createWorkerLifecycleRunId()
   const paneExecutor = createPaneBackendExecutor(getBackendByType('tmux'))
   paneExecutor.setContext(context)
   let paneId = ''
@@ -610,7 +614,7 @@ async function handleSpawnSeparateWindow(
   const flagsStr = inheritedFlags ? ` ${inheritedFlags}` : ''
   // Propagate env vars that teammates need but may not inherit from tmux split-window shells.
   // Includes MINDCODE, MINDCODE_EXPERIMENTAL_AGENT_TEAMS, and API provider vars.
-  const envStr = buildInheritedEnvVars()
+  const envStr = `${buildInheritedEnvVars()} ${WORKER_LIFECYCLE_RUN_ID_ENV}=${quote([workerRunId])}`
   const spawnCommand = `cd ${quote([workingDir])} && env ${envStr} exec ${quote([binaryPath])} ${teammateArgs}${flagsStr}`
   const sendKeysResult = await runSwarmTmux([
     'send-keys',
@@ -632,6 +636,10 @@ async function handleSpawnSeparateWindow(
     insideTmux: false,
     teamName,
     concurrencyLeaseId: workerLease.leaseId,
+    effort,
+    taskId: teammateId,
+    workerRunId,
+    lifecycleStartedAtMs,
   })
   tracked = true
 
@@ -822,14 +830,13 @@ function registerOutOfProcessTeammateTask(
 async function handleSpawnInProcess(
   input: SpawnInput,
   context: ToolUseContext,
+  workerRuntime: WorkerRuntime,
 ): Promise<{ data: SpawnOutput }> {
   const { setAppState, getAppState } = context
   const { name, prompt, agent_type, plan_mode_required } = input
 
-  // Resolve model: 'inherit' → leader's model; undefined → default Opus
   const appState = getAppState()
-  const model = resolveTeammateModel(input.model, appState.mainLoopModel)
-  const effort = resolveWorkerEffort(input.effort)
+  const { model, effort } = workerRuntime
 
   if (!name || !prompt) {
     throw new Error('name and prompt are required for spawn operation')
@@ -1024,10 +1031,11 @@ async function handleSpawnInProcess(
 async function handleSpawn(
   input: SpawnInput,
   context: ToolUseContext,
+  workerRuntime: WorkerRuntime,
 ): Promise<{ data: SpawnOutput }> {
   // Check if in-process mode is enabled via feature flag
   if (isInProcessEnabled()) {
-    return handleSpawnInProcess(input, context)
+    return handleSpawnInProcess(input, context, workerRuntime)
   }
 
   // Pre-flight: ensure a pane backend is available before attempting pane-based spawn.
@@ -1049,16 +1057,16 @@ async function handleSpawn(
     // Record the fallback so isInProcessEnabled() reflects the actual mode
     // (fixes banner and other UI that would otherwise show tmux attach commands).
     markInProcessFallback()
-    return handleSpawnInProcess(input, context)
+    return handleSpawnInProcess(input, context, workerRuntime)
   }
 
   // Backend is available (and now cached) - proceed with pane spawning.
   // Any errors here (user cancellation, validation, etc.) propagate to the caller.
   const useSplitPane = input.use_splitpane !== false
   if (useSplitPane) {
-    return handleSpawnSplitPane(input, context)
+    return handleSpawnSplitPane(input, context, workerRuntime)
   }
-  return handleSpawnSeparateWindow(input, context)
+  return handleSpawnSeparateWindow(input, context, workerRuntime)
 }
 
 // ============================================================================
@@ -1073,5 +1081,6 @@ export async function spawnTeammate(
   config: SpawnTeammateConfig,
   context: ToolUseContext,
 ): Promise<{ data: SpawnOutput }> {
-  return handleSpawn(config, context)
+  const workerRuntime = resolveWorkerRuntime(config.effort)
+  return handleSpawn(config, context, workerRuntime)
 }

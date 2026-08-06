@@ -3,7 +3,7 @@ import type { Command } from '../../commands.js'
 export default {
   type: 'local-jsx',
   name: 'submodel',
-  description: 'Choose the persistent VEXZY model for Workers/subagents',
-  argumentHint: '[exact-model-id]',
+  description: 'Show the fixed VEXZY model for Workers/subagents',
+  argumentHint: '[gpt-5.6-luna]',
   load: () => import('./submodel.js'),
 } satisfies Command

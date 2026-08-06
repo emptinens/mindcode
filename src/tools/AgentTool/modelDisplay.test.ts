@@ -56,7 +56,7 @@ test('agent configuration exposes only the configured validated Worker model', (
     {
       value: 'gpt-5.6-luna',
       label: 'GPT-5.6 Luna',
-      description: 'Configured exact VEXZY model for every Worker/subagent',
+      description: 'Fixed exact VEXZY model for every Worker/subagent',
     },
   ])
 })

@@ -3,9 +3,8 @@ import {
   loadVexzyModelCatalog,
 } from '../../services/api/vexzy/modelCatalog.js'
 import {
-  setConfiguredSubagentModel,
+  FIXED_SUBAGENT_MODEL,
 } from '../../utils/model/subagentModel.js'
-import { updateSettingsForSource } from '../../utils/settings/settings.js'
 
 export async function ensureSubmodelCatalogReady(): Promise<void> {
   if (getDefaultVexzyModelCatalog().state === 'ready') return
@@ -13,20 +12,29 @@ export async function ensureSubmodelCatalogReady(): Promise<void> {
 }
 
 export async function setSubmodel(model: string): Promise<string> {
-  const entry = getDefaultVexzyModelCatalog().registry?.get(model)
-  if (!entry || !entry.available || !entry.tools || !entry.capabilities.tools) {
-    throw new Error(`Model '${model}' is not an available VEXZY tool model`)
+  if (model !== FIXED_SUBAGENT_MODEL) {
+    throw new Error(
+      `Worker/subagent model is fixed to ${FIXED_SUBAGENT_MODEL}`,
+    )
   }
-  const result = updateSettingsForSource('userSettings', { subagentModel: model })
-  if (result.error) throw result.error
-  setConfiguredSubagentModel(model)
-  return `Worker/subagent model set to ${model}`
+
+  const entry = getDefaultVexzyModelCatalog().registry?.get(
+    FIXED_SUBAGENT_MODEL,
+  )
+  if (!entry || !entry.available || !entry.tools || !entry.capabilities.tools) {
+    throw new Error(
+      `Fixed Worker model '${FIXED_SUBAGENT_MODEL}' is not an available VEXZY tool model`,
+    )
+  }
+  return `Worker/subagent model is fixed to ${FIXED_SUBAGENT_MODEL}`
 }
 
 export function getSubmodelOptions() {
   const catalog = getDefaultVexzyModelCatalog()
   const registry = catalog.registry
-  return catalog.getOptions()
+  return catalog
+    .getOptions()
+    .filter(option => option.value === FIXED_SUBAGENT_MODEL)
     .filter(option => {
       const entry = registry?.get(option.value)
       return entry?.available === true && entry.tools === true && entry.capabilities.tools === true

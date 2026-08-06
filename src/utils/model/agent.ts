@@ -26,7 +26,7 @@ export class FixedSubagentModelUnavailableError extends Error {
   readonly code = 'FIXED_SUBAGENT_MODEL_UNAVAILABLE'
 
   constructor(reason: string) {
-    super(`Configured subagent model is unavailable: ${reason}`)
+    super(`Fixed Worker model is unavailable: ${reason}`)
     this.name = 'FixedSubagentModelUnavailableError'
   }
 }
@@ -39,7 +39,7 @@ export class FixedSubagentModelUnavailableError extends Error {
  * closed when the catalog is loading, stale, missing, or incompatible.
  */
 export function resolveFixedSubagentModel(): string {
-  const configuredModel = getConfiguredSubagentModel()
+  const configuredModel = FIXED_SUBAGENT_MODEL
   const catalog = getVexzyModelCatalogState()
   if (catalog.state !== 'ready' || catalog.registry === undefined) {
     throw new FixedSubagentModelUnavailableError(
@@ -83,9 +83,7 @@ export function getAgentModel(
 }
 
 export function getAgentModelDisplay(_model: string | undefined): string {
-  return getConfiguredSubagentModel() === FIXED_SUBAGENT_MODEL
-    ? FIXED_SUBAGENT_MODEL_DISPLAY
-    : getConfiguredSubagentModel()
+  return FIXED_SUBAGENT_MODEL_DISPLAY
 }
 
 /**
@@ -102,7 +100,7 @@ export function getAgentModelOptions(): AgentModelOption[] {
     {
       value: model,
       label: getAgentModelDisplay(model),
-      description: 'Configured exact VEXZY model for every Worker/subagent',
+      description: 'Fixed exact VEXZY model for every Worker/subagent',
     },
   ]
 }

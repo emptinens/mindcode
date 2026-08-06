@@ -3,6 +3,7 @@ import {
   appendWorkerReportEvidence,
   buildWorkerReport,
   buildWorkerReportInstruction,
+  deriveWorkerReportId,
   isWorkerReportCompletionEligible,
   serializeWorkerReport,
   workerReportSchema,
@@ -10,7 +11,7 @@ import {
 } from './workerReport.js'
 
 function candidate(overrides: Partial<WorkerReport> = {}): WorkerReport {
-  return {
+  const report = {
     schema_version: 'worker-report/1',
     task_id: 'worker-task',
     run_id: 'worker-run',
@@ -33,10 +34,87 @@ function candidate(overrides: Partial<WorkerReport> = {}): WorkerReport {
     validation: { verdict: 'pass' },
     blockers: [],
     ...overrides,
+  } as Omit<WorkerReport, 'report_id'> & Partial<Pick<WorkerReport, 'report_id'>>
+  return {
+    ...report,
+    report_id:
+      overrides.report_id ??
+      deriveWorkerReportId(report.task_id, report.run_id, report.worker_id),
   }
 }
 
 describe('WorkerReport v1', () => {
+  test('derives a golden report identity with unambiguous tuple framing', () => {
+    expect(deriveWorkerReportId('task-1', 'run-2', 'worker-3')).toBe(
+      '769838ab964b39dcc9bf8d98ed8e3c293a54841c1e42348f43cd775e05423e36',
+    )
+    expect(deriveWorkerReportId('ab', 'c', 'd')).not.toBe(
+      deriveWorkerReportId('a', 'bc', 'd'),
+    )
+    const identity = deriveWorkerReportId('task', 'run', 'worker')
+    expect(deriveWorkerReportId('task-2', 'run', 'worker')).not.toBe(identity)
+    expect(deriveWorkerReportId('task', 'run-2', 'worker')).not.toBe(identity)
+    expect(deriveWorkerReportId('task', 'run', 'worker-2')).not.toBe(identity)
+  })
+
+  test('reconstructs the same identity across success and failure', () => {
+    const success = buildWorkerReport({
+      taskId: 'same-task',
+      runId: 'same-run',
+      workerId: 'same-worker',
+      status: 'completed',
+      finalText: JSON.stringify(candidate()),
+      tokensUsed: 2,
+    })
+    const failure = buildWorkerReport({
+      taskId: 'same-task',
+      runId: 'same-run',
+      workerId: 'same-worker',
+      status: 'failed',
+      finalText: 'not-json',
+      tokensUsed: 2,
+    })
+    expect(success.report_id).toBe(failure.report_id)
+    expect(failure.report_id).toBe(
+      deriveWorkerReportId('same-task', 'same-run', 'same-worker'),
+    )
+  })
+
+  test('ignores a model-supplied report identity', () => {
+    const report = buildWorkerReport({
+      taskId: 'runtime-task',
+      runId: 'runtime-run',
+      workerId: 'runtime-worker',
+      status: 'completed',
+      finalText: JSON.stringify(
+        candidate({ report_id: 'f'.repeat(64) }),
+      ),
+      tokensUsed: 1,
+    })
+    expect(report.report_id).toBe(
+      deriveWorkerReportId('runtime-task', 'runtime-run', 'runtime-worker'),
+    )
+    expect(isWorkerReportCompletionEligible(report)).toBe(true)
+  })
+
+  test('rejects missing and tampered report identities on the wire', () => {
+    const valid = candidate()
+    const { report_id: _missing, ...missing } = valid
+    expect(workerReportSchema.safeParse(missing).success).toBe(false)
+    expect(
+      workerReportSchema.safeParse({
+        ...valid,
+        report_id: '0'.repeat(64),
+      }).success,
+    ).toBe(false)
+    expect(
+      isWorkerReportCompletionEligible({
+        ...valid,
+        report_id: '0'.repeat(64),
+      }),
+    ).toBe(false)
+  })
+
   test('rejects reports from a model other than the configured Worker model', () => {
     expect(
       workerReportSchema.safeParse(
@@ -225,6 +303,7 @@ describe('WorkerReport v1', () => {
       'worker-report/1',
     )
     const instruction = buildWorkerReportInstruction('task-4', 'max')
+    expect(instruction).toContain('report_id')
     expect(instruction).toContain('validation')
     for (const key of ['id', 'type', 'path', 'command', 'exit_code', 'digest']) {
       expect(instruction).toContain(key)

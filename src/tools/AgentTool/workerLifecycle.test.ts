@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
+import { createTestWorkerTaskGraph } from '../../runtime/taskGraph/workerGraph.js'
 import { TaskGraph } from '../../tasks/graph/taskGraph.js'
 import { AdaptiveSwarmConcurrencyPolicy } from '../../utils/swarm/concurrencyPolicy.js'
 import type { WorkerEffort } from '../../utils/swarm/backends/types.js'
@@ -44,7 +45,7 @@ describe('Agent worker lifecycle', () => {
         writeSet: ['src/a.ts'],
       },
       {
-        graph: taskGraph,
+        graph: createTestWorkerTaskGraph(taskGraph),
         acquireSchedulerLease: (scope, effort, signal) =>
           scheduler.acquire(scope, { effort, signal }),
       },
@@ -60,20 +61,20 @@ describe('Agent worker lifecycle', () => {
       activeWeight: 4,
     })
 
-    execution.complete()
+    await execution.complete()
     expect(taskGraph.requireTask('task-a')).toMatchObject({
       status: 'completed',
       lease_id: null,
     })
     expect(scheduler.snapshot().activeWeight).toBe(0)
-    execution.complete()
+    await execution.complete()
   })
 
   test('serializes overlapping workers until the dependency completes', async () => {
     const taskGraph = graph()
     const scheduler = new AdaptiveSwarmConcurrencyPolicy(8)
     const dependencies = {
-      graph: taskGraph,
+      graph: createTestWorkerTaskGraph(taskGraph),
       dependencyPollMs: 5,
       acquireSchedulerLease: (
         scope: string,
@@ -108,11 +109,11 @@ describe('Agent worker lifecycle', () => {
       status: 'pending',
       blocked_by: ['first'],
     })
-    first.complete()
+    await first.complete()
 
     const second = await secondPromise
     expect(taskGraph.requireTask('second').status).toBe('running')
-    second.complete()
+    await second.complete()
     expect(taskGraph.requireTask('second').status).toBe('completed')
   })
 
@@ -129,7 +130,7 @@ describe('Agent worker lifecycle', () => {
         readSet: ['src/a.ts'],
         signal: controller.signal,
       },
-      { graph: taskGraph, dependencyPollMs: 5 },
+      { graph: createTestWorkerTaskGraph(taskGraph), dependencyPollMs: 5 },
     )
     await Bun.sleep(15)
     controller.abort()
@@ -153,13 +154,13 @@ describe('Agent worker lifecycle', () => {
         effort: 'medium',
       },
       {
-        graph: taskGraph,
+        graph: createTestWorkerTaskGraph(taskGraph),
         acquireSchedulerLease: (scope, effort, signal) =>
           scheduler.acquire(scope, { effort, signal }),
       },
     )
 
-    execution.release()
+    await execution.release()
     expect(taskGraph.requireTask('released')).toMatchObject({
       status: 'pending',
       owner: null,
@@ -172,7 +173,7 @@ describe('Agent worker lifecycle', () => {
     const taskGraph = graph()
     const scheduler = new AdaptiveSwarmConcurrencyPolicy(4)
     const dependencies = {
-      graph: taskGraph,
+      graph: createTestWorkerTaskGraph(taskGraph),
       acquireSchedulerLease: (
         scope: string,
         effort: WorkerEffort,
@@ -201,7 +202,7 @@ describe('Agent worker lifecycle', () => {
       dependencies,
     )
 
-    expect(fresh.getTask()).toMatchObject({
+    expect(await fresh.getTask()).toMatchObject({
       id: 'same-public-id',
       status: 'running',
     })
@@ -209,8 +210,8 @@ describe('Agent worker lifecycle', () => {
       activeWorkers: 2,
       activeWeight: 4,
     })
-    fresh.complete()
-    orphan.release()
+    await fresh.complete()
+    await orphan.release()
   })
 
   test('duplicate task IDs cannot fail the active owner lifecycle', async () => {
@@ -223,7 +224,7 @@ describe('Agent worker lifecycle', () => {
         runtimeScope: 'same-runtime',
         effort: 'low',
       },
-      { graph: taskGraph },
+      { graph: createTestWorkerTaskGraph(taskGraph) },
     )
 
     await expect(
@@ -235,15 +236,15 @@ describe('Agent worker lifecycle', () => {
           runtimeScope: 'same-runtime',
           effort: 'low',
         },
-        { graph: taskGraph },
+        { graph: createTestWorkerTaskGraph(taskGraph) },
       ),
     ).rejects.toThrow('cannot be claimed: status_not_pending')
-    expect(first.getTask()).toMatchObject({
+    expect(await first.getTask()).toMatchObject({
       status: 'running',
       owner: 'first-owner',
     })
-    first.complete()
-    expect(first.getTask()).toMatchObject({ status: 'completed' })
+    await first.complete()
+    expect(await first.getTask()).toMatchObject({ status: 'completed' })
   })
 
   test('preserves overlap serialization across runtime namespaces', async () => {
@@ -258,7 +259,7 @@ describe('Agent worker lifecycle', () => {
         effort: 'low',
         writeSet: ['src/shared.ts'],
       },
-      { graph: taskGraph },
+      { graph: createTestWorkerTaskGraph(taskGraph) },
     )
     const phases: WorkerExecutionPhase[] = []
     const secondPromise = acquireWorkerExecution(
@@ -273,7 +274,7 @@ describe('Agent worker lifecycle', () => {
         onPhase: phase => phases.push(phase),
       },
       {
-        graph: taskGraph,
+        graph: createTestWorkerTaskGraph(taskGraph),
         dependencyPollMs: 2,
         dependencyWaitTimeoutMs: 200,
       },
@@ -281,17 +282,17 @@ describe('Agent worker lifecycle', () => {
 
     await Bun.sleep(15)
     expect(phases).toContain('waiting_dependency')
-    first.complete()
+    await first.complete()
     const second = await secondPromise
     expect(second.routeDecision).toMatchObject({
       action: 'blocked',
       blocked_by: ['first-runtime-task'],
     })
-    expect(second.getTask()).toMatchObject({
+    expect(await second.getTask()).toMatchObject({
       status: 'running',
       read_set: ['src/shared.ts'],
     })
-    second.complete()
+    await second.complete()
   })
 
   test('does not report equal relative paths in different projects as overlap', async () => {
@@ -306,7 +307,7 @@ describe('Agent worker lifecycle', () => {
         effort: 'low',
         writeSet: ['src/shared.ts'],
       },
-      { graph: taskGraph },
+      { graph: createTestWorkerTaskGraph(taskGraph) },
     )
     const second = await acquireWorkerExecution(
       {
@@ -318,13 +319,13 @@ describe('Agent worker lifecycle', () => {
         effort: 'low',
         writeSet: ['src/shared.ts'],
       },
-      { graph: taskGraph },
+      { graph: createTestWorkerTaskGraph(taskGraph) },
     )
 
     expect(second.routeDecision.conflicts).toEqual([])
-    expect(second.getTask()?.write_set).toEqual(['src/shared.ts'])
-    second.complete()
-    first.complete()
+    expect((await second.getTask())?.write_set).toEqual(['src/shared.ts'])
+    await second.complete()
+    await first.complete()
   })
 
   test('accepts completed shared task dependencies without storing foreign IDs', async () => {
@@ -339,17 +340,17 @@ describe('Agent worker lifecycle', () => {
         blockedBy: ['1'],
       },
       {
-        graph: taskGraph,
+        graph: createTestWorkerTaskGraph(taskGraph),
         resolveExternalDependency: async id =>
           id === '1' ? 'completed' : 'missing',
       },
     )
 
-    expect(execution.getTask()).toMatchObject({
+    expect(await execution.getTask()).toMatchObject({
       status: 'running',
       blocked_by: [],
     })
-    execution.complete()
+    await execution.complete()
   })
 
   test('rejects missing shared dependencies and waits for incomplete ones', async () => {
@@ -365,7 +366,7 @@ describe('Agent worker lifecycle', () => {
 
     await expect(
       acquireWorkerExecution(input, {
-        graph: taskGraph,
+        graph: createTestWorkerTaskGraph(taskGraph),
         resolveExternalDependency: async () => 'missing',
       }),
     ).rejects.toThrow('references missing dependency 1')
@@ -374,7 +375,7 @@ describe('Agent worker lifecycle', () => {
     const execution = await acquireWorkerExecution(
       { ...input, onPhase: phase => phases.push(phase) },
       {
-        graph: taskGraph,
+        graph: createTestWorkerTaskGraph(taskGraph),
         dependencyPollMs: 2,
         // This case verifies polling semantics, not the timeout boundary.
         // Keep enough headroom when the full suite, typecheck, and builds run
@@ -386,11 +387,11 @@ describe('Agent worker lifecycle', () => {
     )
     expect(checks).toBe(3)
     expect(phases).toContain('waiting_dependency')
-    expect(execution.getTask()).toMatchObject({
+    expect(await execution.getTask()).toMatchObject({
       status: 'running',
       blocked_by: [],
     })
-    execution.complete()
+    await execution.complete()
   })
 
   test('bounds waits for incomplete shared dependencies', async () => {
@@ -406,7 +407,7 @@ describe('Agent worker lifecycle', () => {
           blockedBy: ['shared-pending'],
         },
         {
-          graph: taskGraph,
+          graph: createTestWorkerTaskGraph(taskGraph),
           dependencyPollMs: 2,
           dependencyWaitTimeoutMs: 10,
           resolveExternalDependency: async () => 'incomplete',
@@ -428,7 +429,7 @@ describe('Agent worker lifecycle', () => {
           blockedBy: ['stalled-shared-task'],
         },
         {
-          graph: taskGraph,
+          graph: createTestWorkerTaskGraph(taskGraph),
           dependencyWaitTimeoutMs: 10,
           resolveExternalDependency: () => new Promise(() => {}),
         },
@@ -456,7 +457,10 @@ describe('Agent worker lifecycle', () => {
           effort: 'medium',
           blockedBy: ['failed-dependency'],
         },
-        { graph: taskGraph, dependencyWaitTimeoutMs: 10_000 },
+        {
+          graph: createTestWorkerTaskGraph(taskGraph),
+          dependencyWaitTimeoutMs: 10_000,
+        },
       ),
     ).rejects.toThrow('depends on failed task failed-dependency')
     expect(taskGraph.read('never-started')).toBeNull()
@@ -480,7 +484,7 @@ describe('Agent worker lifecycle', () => {
           onPhase: phase => phases.push(phase),
         },
         {
-          graph: taskGraph,
+          graph: createTestWorkerTaskGraph(taskGraph),
           dependencyPollMs: 2,
           dependencyWaitTimeoutMs: 10,
         },
@@ -523,7 +527,7 @@ describe('Agent worker lifecycle', () => {
           effort: 'medium',
         },
         {
-          graph: taskGraph,
+          graph: createTestWorkerTaskGraph(taskGraph),
           schedulerWaitTimeoutMs: 10,
           acquireSchedulerLease: async () => lateLease,
         },
@@ -559,7 +563,7 @@ describe('Agent worker lifecycle', () => {
           effort: 'low',
         },
         {
-          graph: taskGraph,
+          graph: createTestWorkerTaskGraph(taskGraph),
           schedulerWaitTimeoutMs: 10,
           acquireSchedulerLease: () => {
             throw new Error('synchronous scheduler failure')
@@ -582,7 +586,7 @@ describe('Agent worker lifecycle', () => {
           effort: 'medium',
         },
         {
-          graph: taskGraph,
+          graph: createTestWorkerTaskGraph(taskGraph),
           schedulerWaitTimeoutMs: 10,
           acquireSchedulerLease: (_scope, _effort, signal) =>
             new Promise((_resolve, reject) => {
@@ -613,7 +617,7 @@ describe('Agent worker lifecycle', () => {
         effort: 'low',
       },
       {
-        graph: taskGraph,
+        graph: createTestWorkerTaskGraph(taskGraph),
         taskLeaseTtlMs: 100,
         taskLeaseHeartbeat: (callback, intervalMs) => {
           expect(intervalMs).toBe(33)
@@ -628,7 +632,7 @@ describe('Agent worker lifecycle', () => {
     const initialLease = taskGraph.getTaskLease('heartbeat-renewal')
     expect(initialLease).not.toBeNull()
     now = new Date(Date.parse(initialLease?.expires_at ?? '') - 1)
-    heartbeat?.()
+    await heartbeat?.()
 
     const renewedLease = taskGraph.getTaskLease('heartbeat-renewal')
     expect(renewedLease?.expires_at).toBe(
@@ -638,7 +642,7 @@ describe('Agent worker lifecycle', () => {
     expect(taskGraph.expireLeases().expired_leases).toHaveLength(0)
     expect(taskGraph.requireTask('heartbeat-renewal').status).toBe('running')
 
-    execution.complete()
+    await execution.complete()
     expect(stopped).toBe(1)
   })
 
@@ -654,7 +658,7 @@ describe('Agent worker lifecycle', () => {
           effort: 'low',
         },
         {
-          graph: taskGraph,
+          graph: createTestWorkerTaskGraph(taskGraph),
           taskLeaseTtlMs: 100,
           taskLeaseHeartbeat: () => () => {
             stopped += 1
@@ -678,7 +682,7 @@ describe('Agent worker lifecycle', () => {
         signal: controller.signal,
       },
       {
-        graph: taskGraph,
+        graph: createTestWorkerTaskGraph(taskGraph),
         taskLeaseTtlMs: 100,
         taskLeaseHeartbeat: () => () => {
           stopped += 1
@@ -692,7 +696,7 @@ describe('Agent worker lifecycle', () => {
     // keep renewing until the worker lifecycle is explicitly settled.
     expect(stopped).toBe(0)
     expect(taskGraph.requireTask('heartbeat-abort').status).toBe('running')
-    execution.release()
+    await execution.release()
     expect(stopped).toBe(1)
   })
 
@@ -716,7 +720,7 @@ describe('Agent worker lifecycle', () => {
         effort: 'low',
       },
       {
-        graph: taskGraph,
+        graph: createTestWorkerTaskGraph(taskGraph),
         taskLeaseTtlMs: 300,
         taskLeaseHeartbeat: callback => {
           heartbeat = callback
@@ -728,15 +732,90 @@ describe('Agent worker lifecycle', () => {
     expect(initial).not.toBeNull()
 
     now = new Date(Date.parse(initial?.acquired_at ?? '') + 100)
-    heartbeat?.()
+    await heartbeat?.()
     now = new Date(Date.parse(initial?.acquired_at ?? '') + 200)
-    heartbeat?.()
+    await heartbeat?.()
 
     expect(attempts).toBe(2)
     expect(taskGraph.getTaskLease('heartbeat-retry')?.expires_at).toBe(
       new Date(now.getTime() + 300).toISOString(),
     )
-    execution.complete()
+    await execution.complete()
+  })
+
+  test('persists validated report identity and policy epoch on terminal completion', async () => {
+    const taskGraph = graph()
+    const policyDigest = 'a'.repeat(64)
+    const reportId = 'b'.repeat(64)
+    const execution = await acquireWorkerExecution(
+      {
+        taskId: 'report-backed-completion',
+        owner: 'worker-report',
+        schedulerScope: 'session',
+        effort: 'medium',
+        policyEpoch: 12,
+        policyDigest,
+      },
+      { graph: createTestWorkerTaskGraph(taskGraph) },
+    )
+
+    expect(taskGraph.requireTask('report-backed-completion')).toMatchObject({
+      status: 'running',
+      policy_epoch: 12,
+      report_id: null,
+    })
+    await execution.complete({
+      reportId,
+      policyEpoch: 12,
+      policyDigest,
+    })
+
+    expect(taskGraph.requireTask('report-backed-completion')).toMatchObject({
+      status: 'completed',
+      policy_epoch: 12,
+      report_id: reportId,
+    })
+  })
+
+  test('rejects stale report policy epochs before terminalizing the task', async () => {
+    const taskGraph = graph()
+    const policyDigest = 'c'.repeat(64)
+    const reportId = 'd'.repeat(64)
+    const execution = await acquireWorkerExecution(
+      {
+        taskId: 'stale-report',
+        owner: 'worker-stale',
+        schedulerScope: 'session',
+        effort: 'low',
+        policyEpoch: 21,
+        policyDigest,
+      },
+      { graph: createTestWorkerTaskGraph(taskGraph) },
+    )
+
+    expect(() =>
+      execution.complete({
+        reportId,
+        policyEpoch: 20,
+        policyDigest,
+      }),
+    ).toThrow('stale or mismatched worker report policy epoch')
+    expect(taskGraph.requireTask('stale-report')).toMatchObject({
+      status: 'running',
+      policy_epoch: 21,
+      report_id: null,
+    })
+
+    await execution.fail({
+      reportId,
+      policyEpoch: 21,
+      policyDigest,
+    })
+    expect(taskGraph.requireTask('stale-report')).toMatchObject({
+      status: 'failed',
+      policy_epoch: 21,
+      report_id: reportId,
+    })
   })
 
   test('renews only the active owner lease and handles expired and released leases', async () => {
@@ -749,7 +828,7 @@ describe('Agent worker lifecycle', () => {
         schedulerScope: 'session',
         effort: 'low',
       },
-      { graph: taskGraph, taskLeaseTtlMs: 100 },
+      { graph: createTestWorkerTaskGraph(taskGraph), taskLeaseTtlMs: 100 },
     )
     const lease = taskGraph.getTaskLease('renewal-semantics')
     expect(lease).not.toBeNull()
@@ -770,7 +849,7 @@ describe('Agent worker lifecycle', () => {
       status: 'pending',
       lease_id: null,
     })
-    execution.release()
+    await execution.release()
 
     const releasedExecution = await acquireWorkerExecution(
       {
@@ -779,10 +858,10 @@ describe('Agent worker lifecycle', () => {
         schedulerScope: 'session',
         effort: 'low',
       },
-      { graph: taskGraph, taskLeaseTtlMs: 100 },
+      { graph: createTestWorkerTaskGraph(taskGraph), taskLeaseTtlMs: 100 },
     )
     const releasedLease = taskGraph.getTaskLease('released-renewal')
-    releasedExecution.release()
+    await releasedExecution.release()
     const released = taskGraph.renewLease(releasedLease?.lease_id ?? '', {
       owner: 'owner-a',
     })

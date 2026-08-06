@@ -12,9 +12,13 @@ import { join } from 'path'
 import { z } from 'zod/v4'
 import { TEAMMATE_MESSAGE_TAG } from '../constants/xml.js'
 import { PermissionModeSchema } from '../entrypoints/sdk/coreSchemas.js'
+import {
+  isWorkerReportCompletionEligible,
+  type WorkerReport,
+} from '../tools/AgentTool/workerReport.js'
 import { SEND_MESSAGE_TOOL_NAME } from '../tools/SendMessageTool/constants.js'
 import type { Message } from '../types/message.js'
-import { generateRequestId } from './agentId.js'
+import { generateRequestId, parseAgentId } from './agentId.js'
 import { count } from './array.js'
 import { logForDebugging } from './debug.js'
 import { getTeamsDir } from './envUtils.js'
@@ -433,6 +437,137 @@ export function isIdleNotification(
   messageText: string,
 ): IdleNotificationMessage | null {
   return parseWorkerTeamReportMessage(messageText) as IdleNotificationMessage | null
+}
+
+/**
+ * Transport-only view of a structured WorkerReport mailbox message.
+ * Lifecycle code validates task/run identity and freshness separately.
+ */
+export type WorkerReportEnvelope = Readonly<{
+  report: WorkerReport
+  timestamp: string
+}>
+
+export type WorkerLifecycleCorrelation = Readonly<{
+  workerId: string
+  taskId: string
+  runId: string
+  startedAtMs: number
+}>
+
+/**
+ * Validates report identity and freshness without mutating task state or
+ * deciding whether the report is terminal.
+ */
+export function isWorkerReportFreshAndCorrelated(
+  envelope: WorkerReportEnvelope | null | undefined,
+  expected: WorkerLifecycleCorrelation,
+): boolean {
+  if (!envelope) return false
+  const timestampMs = Date.parse(envelope.timestamp)
+  if (!Number.isFinite(timestampMs) || timestampMs < expected.startedAtMs) {
+    return false
+  }
+  const { report } = envelope
+  return (
+    report.worker_id === expected.workerId &&
+    report.task_id === expected.taskId &&
+    report.run_id === expected.runId
+  )
+}
+
+/**
+ * Finds the newest structured report sent by a worker without applying
+ * lifecycle correlation rules. A newer structured report always wins, even
+ * when its payload is mismatched; callers must reject it rather than falling
+ * back to an older report.
+ */
+export function findLatestWorkerReportEnvelope(
+  messages: readonly TeammateMessage[],
+  workerId: string,
+): WorkerReportEnvelope | null {
+  const workerName = parseAgentId(workerId)?.agentName
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (!message) continue
+    if (message.from !== workerId && message.from !== workerName) continue
+
+    const notification = isIdleNotification(message.text)
+    if (notification) {
+      return {
+        report: notification.report,
+        timestamp: notification.timestamp,
+      }
+    }
+
+    try {
+      const parsed = jsonParse(message.text)
+      if (
+        parsed &&
+        typeof parsed === 'object' &&
+        'type' in parsed &&
+        parsed.type === 'idle_notification'
+      ) {
+        return null
+      }
+    } catch {
+      // Free-form peer communication is not a completion report.
+    }
+  }
+  return null
+}
+
+/**
+ * Finds the newest structured WorkerReport for a worker without changing
+ * mailbox read state. Mailbox transport remains the source of communication;
+ * callers decide independently whether the report permits task completion.
+ */
+export function findLatestWorkerReport(
+  messages: readonly TeammateMessage[],
+  workerId: string,
+): WorkerReport | null {
+  const envelope = findLatestWorkerReportEnvelope(messages, workerId)
+  return envelope?.report.worker_id === workerId ? envelope.report : null
+}
+
+/** Reads the newest structured WorkerReport envelope without consuming it. */
+export async function readLatestWorkerReportEnvelope(
+  recipientName: string,
+  workerId: string,
+  teamName?: string,
+): Promise<WorkerReportEnvelope | null> {
+  return findLatestWorkerReportEnvelope(
+    await readMailbox(recipientName, teamName),
+    workerId,
+  )
+}
+
+/**
+ * Reads the newest structured WorkerReport for a worker without consuming it.
+ */
+export async function readLatestWorkerReport(
+  recipientName: string,
+  workerId: string,
+  teamName?: string,
+): Promise<WorkerReport | null> {
+  return findLatestWorkerReport(
+    await readMailbox(recipientName, teamName),
+    workerId,
+  )
+}
+
+export type WorkerReportTerminalStatus = 'completed' | 'failed'
+
+/**
+ * Converts report evidence into a terminal outcome without mutating task
+ * state. Missing, failed, or invalid reports always fail closed.
+ */
+export function resolveWorkerReportTerminalStatus(
+  report: WorkerReport | null | undefined,
+): WorkerReportTerminalStatus {
+  return report && isWorkerReportCompletionEligible(report)
+    ? 'completed'
+    : 'failed'
 }
 
 /**

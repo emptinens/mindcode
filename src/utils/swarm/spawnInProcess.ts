@@ -29,7 +29,10 @@ import { registerCleanup } from '../cleanupRegistry.js'
 import { logForDebugging } from '../debug.js'
 import { emitTaskTerminatedSdk } from '../sdkEventQueue.js'
 import { evictTaskOutput } from '../task/diskOutput.js'
-import { resolveWorkerEffort, type WorkerEffortInput } from './backends/types.js'
+import {
+  resolveWorkerRuntime,
+  type WorkerEffortInput,
+} from './backends/types.js'
 import {
   evictTerminalTask,
   registerTask,
@@ -112,9 +115,10 @@ export async function spawnInProcessTeammate(
   config: InProcessSpawnConfig,
   context: SpawnContext,
 ): Promise<InProcessSpawnOutput> {
-  const { name, teamName, prompt, color, planModeRequired, model } = config
+  const { name, teamName, prompt, color, planModeRequired } = config
   const { setAppState } = context
-  const resolvedEffort = resolveWorkerEffort(config.effort)
+  const workerRuntime = resolveWorkerRuntime(config.effort)
+  const { model, effort: resolvedEffort } = workerRuntime
   const workerLease = await acquireSwarmWorkerSlot(config.teamName, {
     effort: resolvedEffort,
     signal: context.abortController?.signal,

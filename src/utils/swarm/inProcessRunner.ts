@@ -9,11 +9,12 @@
  * - Cleanup on completion or abort
  */
 
+import { randomUUID } from 'node:crypto'
 import { feature } from 'bun:bundle'
 import type { ContentBlockParam } from '../../services/api/vexzy/protocolTypes.js'
 import {
+  getCompiledWorkerPolicySnapshot,
   getSystemPrompt,
-  getWorkerPolicySnapshot,
 } from '../../constants/prompts.js'
 import { MINDCODE_WORKER_PROMPT } from '../../constants/prompts/mindcodeArchitecture.js'
 import { TEAMMATE_MESSAGE_TAG } from '../../constants/xml.js'
@@ -28,6 +29,10 @@ import {
   logEvent,
 } from '../../services/analytics/index.js'
 import { getAutoCompactThreshold } from '../../services/compact/autoCompact.js'
+import {
+  parsePolicyEpochEnvironment,
+  readCurrentPolicyEpochState,
+} from '../../services/policy/index.js'
 import {
   buildPostCompactMessages,
   compactConversation,
@@ -97,6 +102,7 @@ import {
   isShutdownRequest,
   markMessageAsReadByIndex,
   readMailbox,
+  resolveWorkerReportTerminalStatus,
   writeToMailbox,
 } from '../teammateMailbox.js'
 import { unregisterAgent as unregisterPerfettoAgent } from '../telemetry/perfettoTracing.js'
@@ -124,6 +130,32 @@ import {
 type SetAppStateFn = (updater: (prev: AppState) => AppState) => void
 
 const PERMISSION_POLL_INTERVAL_MS = 500
+
+function resolveWorkerPolicySnapshot() {
+  const snapshot = getCompiledWorkerPolicySnapshot()
+  const inherited = parsePolicyEpochEnvironment()
+  if (
+    inherited &&
+    (inherited.epoch !== snapshot.policyEpoch ||
+      inherited.digest !== snapshot.sourceDigest)
+  ) {
+    throw new Error('Inherited Worker policy epoch/digest mismatch')
+  }
+  const persisted = readCurrentPolicyEpochState()
+  if (
+    inherited &&
+    persisted &&
+    (persisted.epoch !== inherited.epoch ||
+      persisted.digest !== inherited.digest)
+  ) {
+    throw new Error('Inherited Worker policy epoch is stale')
+  }
+  return snapshot
+}
+
+function createWorkerLifecycleRunId(): string {
+  return `worker-lifecycle:${randomUUID()}`
+}
 
 /**
  * Creates a canUseTool function for in-process teammates that properly resolves
@@ -208,7 +240,7 @@ function createInProcessCanUseTool(
 
     // Standard path: use ToolUseConfirm dialog with worker badge
     if (setToolUseConfirmQueue) {
-      return new Promise<PermissionDecision>(resolve => {
+      return new Promise<PermissionDecision>((resolve) => {
         let decisionMade = false
         const permissionStartMs = Date.now()
 
@@ -223,8 +255,8 @@ function createInProcessCanUseTool(
           decisionMade = true
           reportPermissionWait()
           resolve({ behavior: 'ask', message: SUBAGENT_REJECT_MESSAGE })
-          setToolUseConfirmQueue(queue =>
-            queue.filter(item => item.toolUseID !== toolUseID),
+          setToolUseConfirmQueue((queue) =>
+            queue.filter((item) => item.toolUseID !== toolUseID),
           )
         }
 
@@ -232,7 +264,7 @@ function createInProcessCanUseTool(
           once: true,
         })
 
-        setToolUseConfirmQueue(queue => [
+        setToolUseConfirmQueue((queue) => [
           ...queue,
           {
             assistantMessage,
@@ -330,8 +362,8 @@ function createInProcessCanUseTool(
                   onAbortListener,
                 )
                 reportPermissionWait()
-                setToolUseConfirmQueue(queue =>
-                  queue.filter(item => item.toolUseID !== toolUseID),
+                setToolUseConfirmQueue((queue) =>
+                  queue.filter((item) => item.toolUseID !== toolUseID),
                 )
                 resolve({
                   ...freshResult,
@@ -346,7 +378,7 @@ function createInProcessCanUseTool(
     }
 
     // Fallback: use mailbox system when leader UI queue is unavailable
-    return new Promise<PermissionDecision>(resolve => {
+    return new Promise<PermissionDecision>((resolve) => {
       const request = createPermissionRequest({
         toolName: (tool as Tool).name,
         toolUseId: toolUseID,
@@ -528,7 +560,7 @@ export type InProcessRunnerResult = {
   /** Messages produced by the agent */
   messages: Message[]
   /** Canonical result delivered to the Leader mailbox */
-  workerReport?: ReturnType<typeof buildWorkerTeamReport>
+  workerReport: ReturnType<typeof buildWorkerTeamReport>
 }
 
 /**
@@ -539,7 +571,7 @@ function updateTaskState(
   updater: (task: InProcessTeammateTaskState) => InProcessTeammateTaskState,
   setAppState: SetAppStateFn,
 ): void {
-  setAppState(prev => {
+  setAppState((prev) => {
     const task = prev.tasks[taskId]
     if (!task || task.type !== 'in_process_teammate') {
       return prev
@@ -612,13 +644,13 @@ async function sendIdleNotification(
  */
 function findAvailableTask(tasks: Task[]): Task | undefined {
   const unresolvedTaskIds = new Set(
-    tasks.filter(t => t.status !== 'completed').map(t => t.id),
+    tasks.filter((t) => t.status !== 'completed').map((t) => t.id),
   )
 
-  return tasks.find(task => {
+  return tasks.find((task) => {
     if (task.status !== 'pending') return false
     if (task.owner) return false
-    return task.blockedBy.every(id => !unresolvedTaskIds.has(id))
+    return task.blockedBy.every((id) => !unresolvedTaskIds.has(id))
   })
 }
 
@@ -731,7 +763,7 @@ async function waitForNextPromptOrShutdown(
       const message = task.pendingUserMessages[0]
       if (message === undefined) continue
       // Pop the message from the queue
-      setAppState(prev => {
+      setAppState((prev) => {
         const prevTask = prev.tasks[taskId]
         if (!prevTask || prevTask.type !== 'in_process_teammate') {
           return prev
@@ -806,7 +838,7 @@ async function waitForNextPromptOrShutdown(
         if (!msg) continue
         const skippedUnread = count(
           allMessages.slice(0, shutdownIndex),
-          m => !m.read,
+          (m) => !m.read,
         )
         logForDebugging(
           `[inProcessRunner] ${identity.agentName} received shutdown request from ${shutdownParsed?.from} (prioritized over ${skippedUnread} unread messages)`,
@@ -840,7 +872,7 @@ async function waitForNextPromptOrShutdown(
 
       // Fall back to first unread message (any sender)
       if (selectedIndex === -1) {
-        selectedIndex = allMessages.findIndex(m => !m.read)
+        selectedIndex = allMessages.findIndex((m) => !m.read)
       }
 
       if (selectedIndex !== -1) {
@@ -922,6 +954,8 @@ export async function runInProcessTeammate(
   const { setAppState } = toolUseContext
   const { model: workerModel, effort: workerEffort } =
     resolveWorkerRuntime(effort)
+  const workerPolicy = resolveWorkerPolicySnapshot()
+  const workerRunId = createWorkerLifecycleRunId()
 
   logForDebugging(
     `[inProcessRunner] Starting agent loop for ${identity.agentId}`,
@@ -947,7 +981,7 @@ export async function runInProcessTeammate(
   if (systemPromptMode === 'replace' && systemPrompt) {
     teammateSystemPrompt = [
       systemPrompt,
-      getWorkerPolicySnapshot(),
+      workerPolicy.prompt,
       TEAMMATE_SYSTEM_PROMPT_ADDENDUM,
     ]
       .filter(Boolean)
@@ -960,13 +994,13 @@ export async function runInProcessTeammate(
       toolUseContext.options.mcpClients,
     )
 
-    const hasBasePolicy = fullSystemPromptParts.some(section =>
+    const hasBasePolicy = fullSystemPromptParts.some((section) =>
       section.includes('# Handling injected reminder tags'),
     )
     const systemPromptParts = [
       ...fullSystemPromptParts,
       TEAMMATE_SYSTEM_PROMPT_ADDENDUM,
-      hasBasePolicy ? MINDCODE_WORKER_PROMPT : getWorkerPolicySnapshot(),
+      hasBasePolicy ? MINDCODE_WORKER_PROMPT : workerPolicy.prompt,
     ]
 
     // If custom agent definition provided, append its prompt
@@ -1055,7 +1089,7 @@ export async function runInProcessTeammate(
     // Add initial prompt to task.messages for display (wrapped with XML)
     updateTaskState(
       taskId,
-      task => ({
+      (task) => ({
         ...task,
         messages: appendCappedMessage(
           task.messages,
@@ -1091,7 +1125,7 @@ export async function runInProcessTeammate(
       // Store the work controller in task state so UI can abort it
       updateTaskState(
         taskId,
-        task => ({ ...task, currentWorkAbortController }),
+        (task) => ({ ...task, currentWorkAbortController }),
         setAppState,
       )
 
@@ -1153,7 +1187,7 @@ export async function runInProcessTeammate(
         // Replace with the compacted messages, matching allMessages.
         updateTaskState(
           taskId,
-          task => ({ ...task, messages: [...contextMessages, userMessage] }),
+          (task) => ({ ...task, messages: [...contextMessages, userMessage] }),
           setAppState,
         )
       }
@@ -1195,7 +1229,7 @@ export async function runInProcessTeammate(
           // Mark task as running (not idle)
           updateTaskState(
             taskId,
-            task => ({ ...task, status: 'running', isIdle: false }),
+            (task) => ({ ...task, status: 'running', isIdle: false }),
             setAppState,
           )
 
@@ -1215,7 +1249,7 @@ export async function runInProcessTeammate(
               (waitMs: number) => {
                 updateTaskState(
                   taskId,
-                  task => ({
+                  (task) => ({
                     ...task,
                     totalPausedMs: (task.totalPausedMs ?? 0) + waitMs,
                   }),
@@ -1270,7 +1304,7 @@ export async function runInProcessTeammate(
 
             updateTaskState(
               taskId,
-              task => {
+              (task) => {
                 // Track in-progress tool use IDs for animation in transcript view
                 let inProgressToolUseIDs = task.inProgressToolUseIDs
                 if (message.type === 'assistant') {
@@ -1318,7 +1352,7 @@ export async function runInProcessTeammate(
       // Clear the work controller from state (it's no longer valid)
       updateTaskState(
         taskId,
-        task => ({ ...task, currentWorkAbortController: undefined }),
+        (task) => ({ ...task, currentWorkAbortController: undefined }),
         setAppState,
       )
 
@@ -1339,7 +1373,7 @@ export async function runInProcessTeammate(
         })
         updateTaskState(
           taskId,
-          task => ({
+          (task) => ({
             ...task,
             messages: appendCappedMessage(task.messages, interruptMessage),
           }),
@@ -1356,7 +1390,7 @@ export async function runInProcessTeammate(
       // Mark task as idle (NOT completed) and notify any waiters
       updateTaskState(
         taskId,
-        task => {
+        (task) => {
           // Call any registered idle callbacks
           for (const callback of task.onIdleCallbacks ?? []) callback()
           return { ...task, isIdle: true, onIdleCallbacks: [] }
@@ -1372,9 +1406,9 @@ export async function runInProcessTeammate(
       if (!wasAlreadyIdle) {
         lastWorkerReport = buildWorkerTeamReportFromMessages({
           taskId,
-          runId: `${identity.agentId}:${taskId}`,
+          runId: workerRunId,
           workerId: identity.agentId,
-          policyEpoch: 0,
+          policyEpoch: workerPolicy.policyEpoch,
           status: workWasAborted ? 'failed' : undefined,
           tokensUsed: totalTokensUsed,
           effortUsed: workerEffort,
@@ -1470,12 +1504,44 @@ export async function runInProcessTeammate(
       }
     }
 
-    // Mark as completed when exiting the loop
+    // Preserve a structured report even when the runner exits before a normal
+    // idle turn produced one. The report is the only evidence allowed to cross
+    // the Worker/Leader boundary and it also gates task completion.
+    if (!lastWorkerReport) {
+      lastWorkerReport = buildWorkerTeamReportFromMessages({
+        taskId,
+        runId: workerRunId,
+        workerId: identity.agentId,
+        policyEpoch: workerPolicy.policyEpoch,
+        status: 'failed',
+        tokensUsed: totalTokensUsed,
+        effortUsed: workerEffort,
+        evidence: ['worker_report_missing'],
+        messages: allMessages,
+      })
+      await sendIdleNotification(
+        identity.agentName,
+        identity.color,
+        identity.teamName,
+        {
+          idleReason: 'failed',
+          report: lastWorkerReport,
+        },
+      )
+    }
+
+    const terminalStatus = resolveWorkerReportTerminalStatus(lastWorkerReport)
+    const completionEligible = terminalStatus === 'completed'
+    const terminalError = completionEligible
+      ? undefined
+      : 'Worker report validation failed; task completion was rejected'
+
+    // Mark as terminal only after the report gate above.
     let alreadyTerminal = false
     let toolUseId: string | undefined
     updateTaskState(
       taskId,
-      task => {
+      (task) => {
         // killInProcessTeammate may have already set status:killed +
         // notified:true + cleared fields. Don't overwrite (would flip
         // killed → completed and double-emit the SDK bookend).
@@ -1489,8 +1555,9 @@ export async function runInProcessTeammate(
         const lastMessage = task.messages?.at(-1)
         return {
           ...task,
-          status: 'completed' as const,
+          status: terminalStatus,
           notified: true,
+          ...(terminalError ? { error: terminalError, isIdle: true } : {}),
           endTime: Date.now(),
           messages: lastMessage ? [lastMessage] : undefined,
           pendingUserMessages: [],
@@ -1509,7 +1576,7 @@ export async function runInProcessTeammate(
     // notified:true pre-set → no XML notification → print.ts won't emit
     // the SDK task_notification. Close the task_started bookend directly.
     if (!alreadyTerminal) {
-      emitTaskTerminatedSdk(taskId, 'completed', {
+      emitTaskTerminatedSdk(taskId, terminalStatus, {
         toolUseId,
         summary: identity.agentId,
       })
@@ -1517,7 +1584,8 @@ export async function runInProcessTeammate(
 
     unregisterPerfettoAgent(identity.agentId)
     return {
-      success: true,
+      success: completionEligible,
+      ...(terminalError ? { error: terminalError } : {}),
       messages: allMessages,
       workerReport: lastWorkerReport,
     }
@@ -1534,7 +1602,7 @@ export async function runInProcessTeammate(
     let toolUseId: string | undefined
     updateTaskState(
       taskId,
-      task => {
+      (task) => {
         if (task.status !== 'running') {
           alreadyTerminal = true
           return task
@@ -1575,9 +1643,9 @@ export async function runInProcessTeammate(
     // Send idle notification with failure via file-based mailbox
     lastWorkerReport = buildWorkerTeamReportFromMessages({
       taskId,
-      runId: `${identity.agentId}:${taskId}`,
+      runId: workerRunId,
       workerId: identity.agentId,
-      policyEpoch: 0,
+      policyEpoch: workerPolicy.policyEpoch,
       status: 'failed',
       tokensUsed: totalTokensUsed,
       effortUsed: workerEffort,
@@ -1618,8 +1686,10 @@ export function startInProcessTeammate(config: InProcessRunnerConfig): void {
   // pending - which can be hours for a long-running teammate.
   const agentId = config.identity.agentId
   void runInProcessTeammate(config)
-    .catch(error => {
-      logForDebugging(`[inProcessRunner] Unhandled error in ${agentId}: ${error}`)
+    .catch((error) => {
+      logForDebugging(
+        `[inProcessRunner] Unhandled error in ${agentId}: ${error}`,
+      )
     })
     .finally(() => {
       if (config.concurrencyLeaseId) {

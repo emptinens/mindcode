@@ -16,6 +16,12 @@ import {
   getJailbreakLevel,
   parseJailbreakLevel,
 } from '../jailbreak.js'
+import {
+  POLICY_DIGEST_ENV_VAR,
+  POLICY_EPOCH_ENV_VAR,
+  resolvePolicyEpochForSource,
+} from '../../services/policy/index.js'
+import { getWorkerPolicySourceDigest } from '../../services/policy/workerPolicySource.js'
 import { getConfiguredSubagentModel } from '../model/subagentModel.js'
 import type { PermissionMode } from '../permissions/PermissionMode.js'
 import { getTeammateModeFromSnapshot } from './backends/teammateModeSnapshot.js'
@@ -99,7 +105,6 @@ const TEAMMATE_ENV_VARS = [
   'MINDCODE_MODEL',
   'MINDCODE_SUBAGENT_MODEL',
   'MINDCODE_COMPACT_MODEL',
-  'MINDCODE_WORKER_EFFORT',
   'MINDCODE_DISABLE_COMPACT_CACHE_SHARING',
   // Config directory override
   'MINDCODE_CONFIG_DIR',
@@ -130,6 +135,8 @@ const TEAMMATE_ENV_VARS = [
 export function isTeammateEnvVarForwarded(name: string): boolean {
   return (
     name === JAILBREAK_LEVEL_ENV_VAR ||
+    name === POLICY_EPOCH_ENV_VAR ||
+    name === POLICY_DIGEST_ENV_VAR ||
     (TEAMMATE_ENV_VARS as readonly string[]).includes(name)
   )
 }
@@ -142,15 +149,17 @@ export function isTeammateEnvVarForwarded(name: string): boolean {
 export function buildInheritedEnvVars(
   jailbreakLevel: JailbreakLevel = getJailbreakLevel(),
 ): string {
-  // Always derive this value from the validated enum, never from the raw
-  // parent environment. This makes pane-worker propagation deterministic and
-  // prevents shell metacharacters or secrets from entering the spawn command.
   const normalizedJailbreakLevel =
-    parseJailbreakLevel(String(jailbreakLevel)) ?? getJailbreakLevel()
+    parseJailbreakLevel(String(jailbreakLevel))
+  const level = normalizedJailbreakLevel ?? getJailbreakLevel()
+  const sourceDigest = getWorkerPolicySourceDigest(level)
+  const policyEpoch = resolvePolicyEpochForSource(sourceDigest, level)
   const envVars = [
     'MINDCODE=1',
     'MINDCODE_EXPERIMENTAL_AGENT_TEAMS=1',
-    `${JAILBREAK_LEVEL_ENV_VAR}=${quote([normalizedJailbreakLevel])}`,
+    `${JAILBREAK_LEVEL_ENV_VAR}=${quote([level])}`,
+    `${POLICY_EPOCH_ENV_VAR}=${quote([String(policyEpoch.epoch)])}`,
+    `${POLICY_DIGEST_ENV_VAR}=${quote([sourceDigest])}`,
   ]
 
   for (const key of TEAMMATE_ENV_VARS) {

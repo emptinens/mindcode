@@ -5,9 +5,10 @@ import type { Message as MessageType, NormalizedUserMessage } from 'src/types/me
 import { getQuerySourceForAgent } from 'src/utils/promptCategory.js';
 import { z } from 'zod/v4';
 import { clearInvokedSkillsForAgent, getSdkAgentProgressSummariesEnabled, getSessionId } from '../../bootstrap/state.js';
-import { enhanceSystemPromptWithEnvDetails, getSystemPrompt, getWorkerPolicySnapshot } from '../../constants/prompts.js';
+import { enhanceSystemPromptWithEnvDetails, getCompiledWorkerPolicySnapshot, getSystemPrompt } from '../../constants/prompts.js';
 import { isCoordinatorMode } from '../../coordinator/coordinatorMode.js';
 import { startAgentSummarization } from '../../services/AgentSummary/agentSummary.js';
+import { parsePolicyEpochEnvironment, readCurrentPolicyEpochState } from '../../services/policy/index.js';
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js';
 import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEvent } from '../../services/analytics/index.js';
 import { clearDumpState } from '../../services/api/dumpPrompts.js';
@@ -20,14 +21,13 @@ import { getCwd, runWithCwdOverride } from '../../utils/cwd.js';
 import { logForDebugging } from '../../utils/debug.js';
 import { isEnvTruthy } from '../../utils/envUtils.js';
 import {
-  resolveWorkerEffort,
+  resolveWorkerRuntime,
   WORKER_EFFORT_LEVELS,
 } from '../../utils/swarm/backends/types.js';
 import { AbortError, errorMessage, toError } from '../../utils/errors.js';
 import type { CacheSafeParams } from '../../utils/forkedAgent.js';
 import { lazySchema } from '../../utils/lazySchema.js';
 import { createUserMessage, extractTextContent, isSyntheticMessage, normalizeMessages } from '../../utils/messages.js';
-import { getAgentModel } from '../../utils/model/agent.js';
 import { permissionModeSchema } from '../../utils/permissions/PermissionMode.js';
 import type { PermissionResult } from '../../utils/permissions/PermissionResult.js';
 import { filterDeniedAgents, getDenyRuleForAgent } from '../../utils/permissions/permissions.js';
@@ -59,8 +59,8 @@ import { filterAgentsByMcpRequirements, hasRequiredMcpServers, isBuiltInAgent } 
 import { getPrompt } from './prompt.js';
 import { runAgent } from './runAgent.js';
 import { filterWorkerTools } from './workerTools.js';
-import { acquireWorkerExecution, getWorkerRuntimeScope, type WorkerExecutionLease, type WorkerExecutionPhase } from './workerLifecycle.js';
-import { appendWorkerReportEvidence, buildWorkerReport, buildWorkerReportInstruction, persistValidatedWorkerReport, serializeWorkerReport } from './workerReport.js';
+import { acquireWorkerExecution, getWorkerRuntimeScope, type WorkerCompletionEvidence, type WorkerExecutionLease, type WorkerExecutionPhase } from './workerLifecycle.js';
+import { appendWorkerReportEvidence, buildWorkerReport, buildWorkerReportInstruction, persistValidatedWorkerReport, serializeWorkerReport, type WorkerReport } from './workerReport.js';
 import { renderGroupedAgentToolUse, renderToolResultMessage, renderToolUseErrorMessage, renderToolUseMessage, renderToolUseProgressMessage, renderToolUseRejectedMessage, renderToolUseTag, userFacingName, userFacingNameBackgroundColor } from './UI.js';
 
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -70,6 +70,19 @@ const proactiveModule = feature('PROACTIVE') || feature('KAIROS') ? require('../
 // Progress display constants (for showing background hint)
 const PROGRESS_THRESHOLD_MS = 2000; // Show background hint after 2 seconds
 const DEFAULT_AGENT_WORKTREE_TIMEOUT_MS = 60_000;
+
+function resolveWorkerPolicySnapshot() {
+  const snapshot = getCompiledWorkerPolicySnapshot();
+  const inherited = parsePolicyEpochEnvironment();
+  if (inherited && (inherited.epoch !== snapshot.policyEpoch || inherited.digest !== snapshot.sourceDigest)) {
+    throw new Error('Inherited Worker policy epoch/digest mismatch');
+  }
+  const persisted = readCurrentPolicyEpochState();
+  if (inherited && persisted && (persisted.epoch !== inherited.epoch || persisted.digest !== inherited.digest)) {
+    throw new Error('Inherited Worker policy epoch is stale');
+  }
+  return snapshot;
+}
 
 function getAgentWorktreeTimeoutMs(): number {
   const configured = Number(process.env.MINDCODE_AGENT_WORKTREE_TIMEOUT_MS);
@@ -315,7 +328,7 @@ export const AgentTool = buildTool({
     blocked_by,
     subagent_type,
     description,
-    model: modelParam,
+    model: _modelParam,
     effort: workerEffortInput,
     run_in_background,
     name,
@@ -325,12 +338,14 @@ export const AgentTool = buildTool({
     cwd
   }: AgentToolInput, toolUseContext, canUseTool, assistantMessage, onProgress?) {
     const startTime = Date.now();
-    const resolvedWorkerEffort = resolveWorkerEffort(workerEffortInput);
+    const workerRuntime = resolveWorkerRuntime(workerEffortInput);
+    const resolvedWorkerEffort = workerRuntime.effort;
+    const workerModel = workerRuntime.model;
+    const workerPolicy = resolveWorkerPolicySnapshot();
     // One stable ID spans task graph, scheduler lifecycle, report, resume, and
     // SendMessage. A Leader-provided ID remains addressable after completion.
     const earlyAgentId = task_id?.trim() || createAgentId();
     const workerRunId = createAgentId('run');
-    const model = isCoordinatorMode() ? undefined : modelParam;
     const emitPreflight = (phase: AgentPreflightProgress['phase'], message: string) => {
       onProgress?.({
         toolUseID: toolUseContext.toolUseId ?? `agent_${assistantMessage.message.id}`,
@@ -349,7 +364,6 @@ export const AgentTool = buildTool({
 
     // Get app state for permission mode and agent filtering
     const appState = toolUseContext.getAppState();
-    const permissionMode = appState.toolPermissionContext.mode;
     // In-process teammates get a no-op setAppState; setAppStateForTasks
     // reaches the root store so task registration/progress/kill stay visible.
     const rootSetAppState = toolUseContext.setAppStateForTasks ?? toolUseContext.setAppState;
@@ -390,7 +404,7 @@ export const AgentTool = buildTool({
         team_name: teamName,
         use_splitpane: true,
         plan_mode_required: spawnMode === 'plan',
-        model: model ?? agentDef?.model,
+        model: workerModel,
         effort: resolvedWorkerEffort,
         agent_type: subagent_type,
         invokingRequestId: assistantMessage?.requestId
@@ -512,7 +526,7 @@ export const AgentTool = buildTool({
     }
 
     // Resolve agent params for logging (these are already resolved in runAgent)
-    const resolvedAgentModel = getAgentModel(selectedAgent.model, toolUseContext.options.mainLoopModel, isForkPath ? undefined : model, permissionMode);
+    const resolvedAgentModel = workerModel;
     logEvent('tengu_agent_tool_selected', {
       agent_type: selectedAgent.agentType as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       model: resolvedAgentModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -545,7 +559,7 @@ export const AgentTool = buildTool({
     const workerPrompt = `${prompt}\n\n${buildWorkerReportInstruction(earlyAgentId, resolvedWorkerEffort, {
       runId: workerRunId,
       workerId: earlyAgentId,
-      policyEpoch: 0
+      policyEpoch: workerPolicy.policyEpoch
     })}`;
     if (isForkPath) {
       if (toolUseContext.renderedSystemPrompt) {
@@ -554,7 +568,7 @@ export const AgentTool = buildTool({
         // Fallback: recompute. May diverge from parent's cached bytes if
         // GrowthBook state changed between parent turn-start and fork spawn.
         const mainThreadAgentDefinition = appState.agent ? appState.agentDefinitions.activeAgents.find(a => a.agentType === appState.agent) : undefined;
-        const additionalWorkingDirectories = Array.from(appState.toolPermissionContext.additionalWorkingDirectories.keys());
+        const additionalWorkingDirectories: string[] = Array.from(appState.toolPermissionContext.additionalWorkingDirectories.keys());
         const defaultSystemPrompt = await getSystemPrompt(toolUseContext.options.tools, toolUseContext.options.mainLoopModel, additionalWorkingDirectories, toolUseContext.options.mcpClients);
         forkParentSystemPrompt = buildEffectiveSystemPrompt({
           mainThreadAgentDefinition,
@@ -566,12 +580,12 @@ export const AgentTool = buildTool({
       }
       forkParentSystemPrompt = asSystemPrompt([
         ...forkParentSystemPrompt,
-        getWorkerPolicySnapshot(),
+        workerPolicy.prompt,
       ]);
       promptMessages = buildForkedMessages(workerPrompt, assistantMessage);
     } else {
       try {
-        const additionalWorkingDirectories = Array.from(appState.toolPermissionContext.additionalWorkingDirectories.keys());
+        const additionalWorkingDirectories: string[] = Array.from(appState.toolPermissionContext.additionalWorkingDirectories.keys());
 
         // All agents have getSystemPrompt - pass toolUseContext to all
         const agentPrompt = selectedAgent.getSystemPrompt({
@@ -590,7 +604,7 @@ export const AgentTool = buildTool({
         }
 
         // Apply environment details enhancement
-        enhancedSystemPrompt = await enhanceSystemPromptWithEnvDetails([agentPrompt, getWorkerPolicySnapshot()], resolvedAgentModel, additionalWorkingDirectories);
+        enhancedSystemPrompt = await enhanceSystemPromptWithEnvDetails([agentPrompt, workerPolicy.prompt], resolvedAgentModel, additionalWorkingDirectories);
       } catch (error) {
         logForDebugging(`Failed to get system prompt for agent ${selectedAgent.agentType}: ${errorMessage(error)}`);
       }
@@ -598,7 +612,7 @@ export const AgentTool = buildTool({
         content: workerPrompt
       })];
     }
-    const declaredChangedFiles = [...new Set([...(files_touched ?? []), ...(write_set ?? [])])];
+    const declaredChangedFiles: string[] = [...new Set([...(files_touched ?? []), ...(write_set ?? [])])];
     const metadata = {
       prompt,
       resolvedAgentModel,
@@ -609,7 +623,7 @@ export const AgentTool = buildTool({
       taskId: earlyAgentId,
       runId: workerRunId,
       workerId: earlyAgentId,
-      policyEpoch: 0,
+      policyEpoch: workerPolicy.policyEpoch,
       effort: resolvedWorkerEffort,
       declaredChangedFiles
     };
@@ -673,7 +687,7 @@ export const AgentTool = buildTool({
       canUseTool,
       isAsync: shouldRunAsync,
       querySource: toolUseContext.options.querySource ?? getQuerySourceForAgent(selectedAgent.agentType, isBuiltInAgent(selectedAgent)),
-      model: isForkPath ? undefined : model,
+      model: isForkPath ? undefined : workerModel,
       effort: resolvedWorkerEffort,
       // Fork path: pass parent's system prompt AND parent's exact tool
       // array (cache-identical prefix). workerTools is rebuilt under
@@ -777,6 +791,8 @@ export const AgentTool = buildTool({
         isolation: effectiveIsolation === 'worktree' ? 'worktree' : 'shared',
         runtimeScope,
         targetScope: cwdOverridePath ?? getCwd(),
+        policyEpoch: workerPolicy.policyEpoch,
+        policyDigest: workerPolicy.sourceDigest,
         signal: toolUseContext.abortController.signal,
         onPhase: phaseProgress
       }, {
@@ -792,15 +808,29 @@ export const AgentTool = buildTool({
       await cleanupWorktreeIfNeeded();
       throw error;
     }
-    const settleWorkerExecution = (action: 'complete' | 'fail' | 'release') => {
-      try {
-        workerExecution[action]();
-      } catch (error) {
+    const settleWorkerExecution = (action: 'complete' | 'fail' | 'release', report?: WorkerReport) => {
+      const evidence: WorkerCompletionEvidence | undefined = report ? {
+        reportId: report.report_id,
+        policyEpoch: report.policy_epoch,
+        policyDigest: workerPolicy.sourceDigest
+      } : undefined;
+      void workerExecution[action](evidence).catch(error => {
         logForDebugging(`Failed to ${action} task graph lifecycle for ${earlyAgentId}: ${errorMessage(error)}`, {
           level: 'error'
         });
-      }
+      });
     };
+    const buildLifecycleFailureReport = (reason: string): WorkerReport => buildWorkerReport({
+      taskId: metadata.taskId,
+      runId: metadata.runId,
+      workerId: metadata.workerId ?? earlyAgentId,
+      policyEpoch: workerPolicy.policyEpoch,
+      status: 'failed',
+      declaredChangedFiles: metadata.declaredChangedFiles,
+      finalText: reason,
+      tokensUsed: 0,
+      effortUsed: metadata.effort
+    });
     let executionHandedOff = false;
     let registeredAsyncAgentId: string | undefined;
     try {
@@ -871,8 +901,8 @@ export const AgentTool = buildTool({
         agentIdForCleanup: asyncAgentId,
         enableSummarization: isCoordinator || isForkSubagentEnabled() || getSdkAgentProgressSummariesEnabled(),
         getWorktreeResult: cleanupWorktreeIfNeeded,
-        onExecutionCompleted: () => settleWorkerExecution('complete'),
-        onExecutionFailed: () => settleWorkerExecution('fail'),
+        onExecutionCompleted: result => settleWorkerExecution('complete', result.workerReport),
+        onExecutionFailed: error => settleWorkerExecution('fail', buildLifecycleFailureReport(errorMessage(error))),
         onExecutionReleased: () => settleWorkerExecution('release')
       })));
       executionHandedOff = true;
@@ -1088,10 +1118,10 @@ export const AgentTool = buildTool({
                     const validationError = 'Worker report validation failed; task completion was rejected';
                     const reportCanComplete = persistValidatedWorkerReport(agentResult, {
                       persist: result => completeAsyncAgent(result, rootSetAppState),
-                      complete: () => settleWorkerExecution('complete'),
-                      reject: () => {
+                      complete: result => settleWorkerExecution('complete', result.workerReport),
+                      reject: result => {
                         failAsyncAgent(backgroundedTaskId, validationError, rootSetAppState);
-                        settleWorkerExecution('fail');
+                        settleWorkerExecution('fail', result.workerReport);
                       }
                     });
                     if (!reportCanComplete) {
@@ -1179,8 +1209,8 @@ export const AgentTool = buildTool({
                       });
                       return;
                     }
-                    settleWorkerExecution('fail');
                     const errMsg = errorMessage(error);
+                    settleWorkerExecution('fail', buildLifecycleFailureReport(errMsg));
                     failAsyncAgent(backgroundedTaskId, errMsg, rootSetAppState);
                     const worktreeResult = await cleanupWorktreeIfNeeded();
                     enqueueAgentNotification({
@@ -1398,7 +1428,7 @@ export const AgentTool = buildTool({
           const hasAssistantMessages = agentMessages.some(msg => msg.type === 'assistant');
           if (!hasAssistantMessages) {
             // No messages collected, re-throw the error
-            settleWorkerExecution('fail');
+            settleWorkerExecution('fail', buildLifecycleFailureReport(syncAgentError.message));
             throw syncAgentError;
           }
 
@@ -1417,12 +1447,12 @@ export const AgentTool = buildTool({
               completeAsyncAgent(result, rootSetAppState);
             }
           },
-          complete: () => settleWorkerExecution('complete'),
-          reject: () => {
+          complete: result => settleWorkerExecution('complete', result.workerReport),
+          reject: result => {
             if (foregroundTaskId) {
               failAsyncAgent(foregroundTaskId, validationError.message, rootSetAppState);
             }
-            settleWorkerExecution('fail');
+            settleWorkerExecution('fail', result.workerReport);
           }
         });
         if (feature('TRANSCRIPT_CLASSIFIER')) {

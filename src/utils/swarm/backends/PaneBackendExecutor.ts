@@ -1,12 +1,20 @@
+import { randomUUID } from 'node:crypto'
 import { getSessionId } from '../../../bootstrap/state.js'
+import type { WorkerReport } from '../../../tools/AgentTool/workerReport.js'
 import type { ToolUseContext } from '../../../Tool.js'
+import type { TaskState } from '../../../tasks/types.js'
 import { formatAgentId, parseAgentId } from '../../../utils/agentId.js'
 import { quote } from '../../../utils/bash/shellQuote.js'
 import { registerCleanup } from '../../../utils/cleanupRegistry.js'
 import { logForDebugging } from '../../../utils/debug.js'
-import { getConfiguredSubagentModel } from '../../../utils/model/subagentModel.js'
 import { jsonStringify } from '../../../utils/slowOperations.js'
-import { writeToMailbox } from '../../../utils/teammateMailbox.js'
+import {
+  createIdleNotification,
+  isWorkerReportFreshAndCorrelated,
+  readLatestWorkerReportEnvelope,
+  resolveWorkerReportTerminalStatus,
+  writeToMailbox,
+} from '../../../utils/teammateMailbox.js'
 import { readTeamFile } from '../teamHelpers.js'
 import {
   acquireSwarmWorkerSlot,
@@ -20,10 +28,20 @@ import {
 import { assignTeammateColor } from '../teammateLayoutManager.js'
 import {
   getPaneTeammateTerminalPatch,
+  type PaneTaskTerminalTarget,
   type PaneTeammateTerminalStatus,
 } from '../lifecyclePolicy.js'
+import { TEAM_LEAD_NAME } from '../constants.js'
+import {
+  buildWorkerTeamReport,
+  serializeWorkerTeamReportMessage,
+} from '../workerTeamReport.js'
 import { isInsideTmux } from './detection.js'
-import { resolveWorkerEffort } from './types.js'
+import {
+  resolveWorkerRuntime,
+  type WorkerEffort,
+  type WorkerEffortInput,
+} from './types.js'
 import type {
   BackendType,
   PaneBackend,
@@ -32,6 +50,12 @@ import type {
   TeammateSpawnConfig,
   TeammateSpawnResult,
 } from './types.js'
+
+const WORKER_LIFECYCLE_RUN_ID_ENV = 'MINDCODE_WORKER_RUN_ID'
+
+function createWorkerLifecycleRunId(): string {
+  return `worker-lifecycle:${randomUUID()}`
+}
 
 /**
  * PaneBackendExecutor adapts a PaneBackend to the TeammateExecutor interface.
@@ -53,6 +77,23 @@ export type ExistingPaneTrackingConfig = {
   insideTmux: boolean
   teamName: string
   concurrencyLeaseId: string
+  effort?: WorkerEffortInput
+  taskId?: string
+  workerRunId?: string
+  lifecycleStartedAtMs?: number
+}
+
+/**
+ * Pane exit is successful only when the worker's latest mailbox report is a
+ * schema-valid, completion-eligible WorkerReport. Explicit kills never become
+ * successful completions.
+ */
+export function resolvePaneTeammateTerminalStatus(
+  report: WorkerReport | null | undefined,
+  requestedStatus: 'completed' | 'killed' = 'completed',
+): PaneTeammateTerminalStatus {
+  if (requestedStatus === 'killed') return 'killed'
+  return resolveWorkerReportTerminalStatus(report)
 }
 
 export class PaneBackendExecutor implements TeammateExecutor {
@@ -73,6 +114,10 @@ export class PaneBackendExecutor implements TeammateExecutor {
       concurrencyLeaseId: string
       teamName: string
       seenInTeamFile: boolean
+      workerEffort: WorkerEffort
+      taskId: string
+      workerRunId?: string
+      lifecycleStartedAtMs: number
     }
   >
   private cleanupRegistered = false
@@ -124,11 +169,15 @@ export class PaneBackendExecutor implements TeammateExecutor {
       }
     }
 
-    const resolvedEffort = resolveWorkerEffort(config.effort)
+    const { model: workerModel, effort: workerEffort } = resolveWorkerRuntime(
+      config.effort,
+    )
     const workerLease = await acquireSwarmWorkerSlot(config.teamName, {
-      effort: resolvedEffort,
+      effort: workerEffort,
       signal: config.abortSignal,
     })
+    const lifecycleStartedAtMs = Date.now()
+    const workerRunId = createWorkerLifecycleRunId()
     let createdPaneId: string | undefined
     let createdPaneUsesExternalSession = false
 
@@ -176,7 +225,7 @@ export class PaneBackendExecutor implements TeammateExecutor {
         permissionMode: appState.toolPermissionContext.mode,
       })
 
-      // Every pane worker is pinned to Luna; never inherit another model.
+      // Every pane worker is pinned to the canonical VEXZY Worker runtime.
       inheritedFlags = inheritedFlags
         .split(' ')
         .filter(
@@ -184,15 +233,20 @@ export class PaneBackendExecutor implements TeammateExecutor {
         )
         .join(' ')
       inheritedFlags = inheritedFlags
-        ? `${inheritedFlags} --model ${quote([getConfiguredSubagentModel()])}`
-        : `--model ${quote([getConfiguredSubagentModel()])}`
-      inheritedFlags = `${inheritedFlags} --effort ${quote([resolvedEffort])}`
+        ? `${inheritedFlags} --model ${quote([workerModel])}`
+        : `--model ${quote([workerModel])}`
+      inheritedFlags = `${inheritedFlags} --effort ${quote([workerEffort])}`
 
       const flagsStr = inheritedFlags ? ` ${inheritedFlags}` : ''
       const workingDir = config.cwd
 
       // Build environment variables to forward to teammate
-      const envStr = buildInheritedEnvVars()
+      const envStr = [
+        buildInheritedEnvVars(),
+        `${WORKER_LIFECYCLE_RUN_ID_ENV}=${quote([workerRunId])}`,
+      ]
+        .filter(Boolean)
+        .join(' ')
 
       const spawnCommand = `cd ${quote([workingDir])} && env ${envStr} exec ${quote([binaryPath])} ${teammateArgs}${flagsStr}`
 
@@ -206,6 +260,10 @@ export class PaneBackendExecutor implements TeammateExecutor {
         insideTmux,
         teamName: config.teamName,
         concurrencyLeaseId: workerLease.leaseId,
+        effort: workerEffort,
+        taskId: agentId,
+        workerRunId,
+        lifecycleStartedAtMs,
       })
 
       // Send initial instructions to teammate via mailbox
@@ -229,7 +287,7 @@ export class PaneBackendExecutor implements TeammateExecutor {
         paneId,
       }
     } catch (error) {
-      this.releaseTrackedTeammate(agentId, 'killed')
+      void this.releaseTrackedTeammate(agentId, 'killed')
       if (createdPaneId) {
         try {
           await this.backend.killPane(
@@ -261,12 +319,17 @@ export class PaneBackendExecutor implements TeammateExecutor {
    * lifecycle watcher used by executor-owned panes.
    */
   trackExistingPane(config: ExistingPaneTrackingConfig): void {
+    const { effort: workerEffort } = resolveWorkerRuntime(config.effort)
     this.spawnedTeammates.set(config.agentId, {
       paneId: config.paneId,
       insideTmux: config.insideTmux,
       concurrencyLeaseId: config.concurrencyLeaseId,
       teamName: config.teamName,
       seenInTeamFile: false,
+      workerEffort,
+      taskId: config.taskId ?? config.agentId,
+      workerRunId: config.workerRunId,
+      lifecycleStartedAtMs: config.lifecycleStartedAtMs ?? Date.now(),
     })
     this.startLifecycleWatcher(config.agentId)
     this.ensureCleanupRegistered()
@@ -321,7 +384,7 @@ export class PaneBackendExecutor implements TeammateExecutor {
     const parsed = parseAgentId(agentId)
     if (!parsed) {
       logForDebugging(
-        `[PaneBackendExecutor] terminate() failed: invalid agentId format`,
+        '[PaneBackendExecutor] terminate() failed: invalid agentId format',
       )
       return false
     }
@@ -371,10 +434,19 @@ export class PaneBackendExecutor implements TeammateExecutor {
 
     // Kill the pane via the backend
     // Use external session socket when we spawned outside tmux
-    const killed = await this.backend.killPane(paneId, !insideTmux)
+    let killed = false
+    try {
+      killed = await this.backend.killPane(paneId, !insideTmux)
+    } catch (error) {
+      logForDebugging(
+        `[PaneBackendExecutor] kill backend failed for ${agentId}: ${error}`,
+      )
+      await this.reconcileTeammateLifecycle(agentId)
+      return false
+    }
 
     if (killed) {
-      this.releaseTrackedTeammate(agentId)
+      await this.releaseTrackedTeammate(agentId, 'killed')
       logForDebugging(`[PaneBackendExecutor] kill() succeeded for ${agentId}`)
     } else {
       // A failed kill can mean the pane already exited between the lookup and
@@ -414,7 +486,7 @@ export class PaneBackendExecutor implements TeammateExecutor {
             `[PaneBackendExecutor] Cleanup failed for ${id}: ${error}`,
           )
         } finally {
-          this.releaseTrackedTeammate(id, 'killed')
+          await this.releaseTrackedTeammate(id, 'killed')
         }
       }
       this.spawnedTeammates.clear()
@@ -431,42 +503,57 @@ export class PaneBackendExecutor implements TeammateExecutor {
     if (this.lifecycleWatchers.has(agentId)) return
 
     const watcher = setInterval(() => {
-      void this.reconcileTeammateLifecycle(agentId)
+      void this.reconcileTeammateLifecycle(agentId).catch(error => {
+        logForDebugging(
+          `[PaneBackendExecutor] Lifecycle watcher failed for ${agentId}: ${error}`,
+        )
+      })
     }, this.lifecyclePollIntervalMs)
     watcher.unref?.()
     this.lifecycleWatchers.set(agentId, watcher)
   }
 
-  private releaseTrackedTeammate(
+  private captureTaskTerminalTargets(
     agentId: string,
-    terminalStatus: PaneTeammateTerminalStatus = 'completed',
-  ): boolean {
-    const teammateInfo = this.spawnedTeammates.get(agentId)
-    if (!teammateInfo) return false
+  ): PaneTaskTerminalTarget[] {
+    const appState = this.context?.getAppState()
+    if (!appState) return []
 
-    const watcher = this.lifecycleWatchers.get(agentId)
-    if (watcher) {
-      clearInterval(watcher)
-      this.lifecycleWatchers.delete(agentId)
-    }
-
-    this.spawnedTeammates.delete(agentId)
-    releaseSwarmWorkerSlot(teammateInfo.concurrencyLeaseId)
-    this.markTaskTerminal(agentId, terminalStatus)
-    return true
+    return Object.entries<TaskState>(appState.tasks).flatMap(
+      ([taskKey, task]) => {
+        if (
+          task.type !== 'in_process_teammate' ||
+          task.status !== 'running' ||
+          task.identity?.agentId !== agentId
+        ) {
+          return []
+        }
+        return [
+          {
+            taskKey,
+            taskId: task.id,
+            startTime: task.startTime,
+            agentId,
+          },
+        ]
+      },
+    )
   }
 
   private markTaskTerminal(
-    agentId: string,
+    targets: readonly PaneTaskTerminalTarget[],
     terminalStatus: PaneTeammateTerminalStatus,
   ): void {
+    if (targets.length === 0) return
     this.context?.setAppState(prev => {
       let changed = false
       const tasks = Object.fromEntries(
-        Object.entries(prev.tasks).map(([taskId, task]) => {
+        Object.entries<TaskState>(prev.tasks).map(([taskId, task]) => {
+          const target = targets.find(candidate => candidate.taskKey === taskId)
+          if (!target) return [taskId, task]
           const patch = getPaneTeammateTerminalPatch(
             task,
-            agentId,
+            target,
             terminalStatus,
           )
           if (!patch) return [taskId, task]
@@ -483,12 +570,21 @@ export class PaneBackendExecutor implements TeammateExecutor {
     if (!teammateInfo) return false
 
     if (this.backend.isPaneAlive) {
-      const paneAlive = await this.backend.isPaneAlive(
-        teammateInfo.paneId,
-        !teammateInfo.insideTmux,
-      )
+      let paneAlive: boolean
+      try {
+        paneAlive = await this.backend.isPaneAlive(
+          teammateInfo.paneId,
+          !teammateInfo.insideTmux,
+        )
+      } catch (error) {
+        logForDebugging(
+          `[PaneBackendExecutor] Pane liveness check failed for ${agentId}: ${error}`,
+        )
+        await this.releaseTrackedTeammate(agentId)
+        return false
+      }
       if (!paneAlive) {
-        this.releaseTrackedTeammate(agentId)
+        await this.releaseTrackedTeammate(agentId)
         return false
       }
     }
@@ -499,12 +595,111 @@ export class PaneBackendExecutor implements TeammateExecutor {
       if (member) {
         teammateInfo.seenInTeamFile = true
       } else if (teammateInfo.seenInTeamFile) {
-        this.releaseTrackedTeammate(agentId)
+        await this.releaseTrackedTeammate(agentId)
         return false
       }
     }
 
     return this.spawnedTeammates.has(agentId)
+  }
+
+  private async releaseTrackedTeammate(
+    agentId: string,
+    requestedStatus?: 'completed' | 'killed',
+  ): Promise<boolean> {
+    const teammateInfo = this.spawnedTeammates.get(agentId)
+    if (!teammateInfo) return false
+
+    // Capture exact AppState task keys and generations before any mailbox
+    // await. A new worker may reuse the same agentId while this worker's
+    // report is being finalized; its task must remain untouched.
+    const terminalTargets = this.captureTaskTerminalTargets(agentId)
+
+    const watcher = this.lifecycleWatchers.get(agentId)
+    if (watcher) {
+      clearInterval(watcher)
+      this.lifecycleWatchers.delete(agentId)
+    }
+
+    this.spawnedTeammates.delete(agentId)
+
+    let terminalStatus: PaneTeammateTerminalStatus =
+      requestedStatus === 'killed' ? 'killed' : 'failed'
+    try {
+      const teamFile = readTeamFile(teammateInfo.teamName)
+      const leaderName =
+        teamFile?.members.find(member => member.agentId === teamFile.leadAgentId)
+          ?.name ?? TEAM_LEAD_NAME
+      const reportEnvelope =
+        requestedStatus === 'killed'
+          ? null
+          : await readLatestWorkerReportEnvelope(
+              leaderName,
+              agentId,
+              teammateInfo.teamName,
+            )
+      const report =
+        reportEnvelope &&
+        teammateInfo.workerRunId &&
+        isWorkerReportFreshAndCorrelated(reportEnvelope, {
+          workerId: agentId,
+          taskId: teammateInfo.taskId,
+          runId: teammateInfo.workerRunId,
+          startedAtMs: teammateInfo.lifecycleStartedAtMs,
+        })
+          ? reportEnvelope.report
+          : null
+      if (!report && requestedStatus !== 'killed') {
+        const failedReport = buildWorkerTeamReport({
+          taskId: teammateInfo.taskId,
+          runId: teammateInfo.workerRunId ?? createWorkerLifecycleRunId(),
+          workerId: agentId,
+          status: 'failed',
+          effortUsed: teammateInfo.workerEffort,
+          tokensUsed: 0,
+          evidence: ['worker_report_missing'],
+        })
+        const notification = createIdleNotification(agentId, {
+          idleReason: 'failed',
+          report: failedReport,
+        })
+        await writeToMailbox(
+          leaderName,
+          {
+            from: agentId,
+            text: serializeWorkerTeamReportMessage(notification),
+            timestamp: new Date().toISOString(),
+          },
+          teammateInfo.teamName,
+        )
+      }
+      terminalStatus = resolvePaneTeammateTerminalStatus(
+        report,
+        requestedStatus ?? 'completed',
+      )
+    } catch (error) {
+      logForDebugging(
+        `[PaneBackendExecutor] Failed to finalize ${agentId}: ${error}`,
+      )
+    }
+
+    // The map entry is removed before mailbox I/O, so every exit path must
+    // release the lease and attempt task failure independently of reporting.
+    try {
+      releaseSwarmWorkerSlot(teammateInfo.concurrencyLeaseId)
+    } catch (error) {
+      logForDebugging(
+        `[PaneBackendExecutor] Failed to release lease for ${agentId}: ${error}`,
+      )
+    }
+    try {
+      this.markTaskTerminal(terminalTargets, terminalStatus)
+    } catch (error) {
+      logForDebugging(
+        `[PaneBackendExecutor] Failed to mark ${agentId} terminal: ${error}`,
+      )
+    }
+    return true
   }
 }
 

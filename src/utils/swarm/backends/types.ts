@@ -1,5 +1,8 @@
 import type { AgentColorName } from '../../../tools/AgentTool/agentColorManager.js'
-import type { EffortValue } from '../../../utils/effort.js'
+import {
+  type EffortValue,
+  getCatalogEffortLevels,
+} from '../../../utils/effort.js'
 import { resolveFixedSubagentModel } from '../../model/agent.js'
 
 /** Worker-only reasoning levels supported by the fixed VEXZY Luna model. */
@@ -13,25 +16,66 @@ export const WORKER_EFFORT_LEVELS = [
 ] as const
 
 export type WorkerEffort = (typeof WORKER_EFFORT_LEVELS)[number]
+export const DEFAULT_WORKER_EFFORT: WorkerEffort = 'medium'
 export type WorkerEffortInput = WorkerEffort | EffortValue
+
+export type WorkerRuntime = Readonly<{
+  model: string
+  effort: WorkerEffort
+}>
+
+export class InvalidWorkerEffortError extends Error {
+  readonly code = 'INVALID_WORKER_EFFORT'
+
+  constructor(value: unknown) {
+    const rendered =
+      typeof value === 'string' ? JSON.stringify(value) : String(value)
+    super(
+      `Invalid Worker effort ${rendered}; expected one of ${WORKER_EFFORT_LEVELS.join(', ')}`,
+    )
+    this.name = 'InvalidWorkerEffortError'
+  }
+}
 
 /** Resolve worker effort without consulting Leader AppState. */
 export function resolveWorkerEffort(value: unknown): WorkerEffort {
-  return typeof value === 'string' &&
+  if (value === undefined || value === null) {
+    return DEFAULT_WORKER_EFFORT
+  }
+  if (
+    typeof value === 'string' &&
     (WORKER_EFFORT_LEVELS as readonly string[]).includes(value)
-    ? (value as WorkerEffort)
-    : 'medium'
+  ) {
+    return value as WorkerEffort
+  }
+  throw new InvalidWorkerEffortError(value)
 }
 
-export function resolveWorkerRuntime(value: unknown): Readonly<{
-  model: string
-  effort: WorkerEffort
-}> {
+export function resolveWorkerRuntime(value: unknown): WorkerRuntime {
   const model = resolveFixedSubagentModel()
+  const effort = resolveWorkerEffort(value)
+  const advertisedEfforts = getCatalogEffortLevels(model)
+  if (!advertisedEfforts.includes(effort)) {
+    throw new Error(
+      `Fixed Worker model ${model} does not advertise worker effort "${effort}" in the ready VEXZY catalog`,
+    )
+  }
   return Object.freeze({
     model,
-    effort: resolveWorkerEffort(value),
+    effort,
   })
+}
+
+/**
+ * Project a resolved Worker runtime onto the AppState shape consumed by
+ * query(). The query layer forwards AppState.effortValue to the VEXZY request;
+ * this helper prevents a Leader effort from leaking into a Worker request.
+ */
+export function applyWorkerRuntimeToAppState<
+  T extends { effortValue?: unknown },
+>(state: T, runtime: WorkerRuntime): T {
+  if (state.effortValue === runtime.effort) return state
+  return { ...state, effortValue: runtime.effort }
 }
 
 /**

@@ -34,8 +34,28 @@ const MAX_DIGEST_CHARS = 128
 const MAX_CHANGED_FILES = 256
 const MAX_EVIDENCE_ITEMS = 32
 const MAX_BLOCKERS = 32
+const WORKER_REPORT_ID_HEX_LENGTH = 64
+const WORKER_REPORT_ID_DOMAIN = 'mindcode/worker-report/1'
 
 const boundedId = z.string().trim().min(1).max(MAX_ID_CHARS)
+
+/**
+ * Derives the runtime-owned report identity from the complete worker
+ * execution identity. Length-prefixing each UTF-8 component prevents tuple
+ * boundary collisions such as ["ab", "c"] vs ["a", "bc"].
+ */
+export function deriveWorkerReportId(
+  taskId: string,
+  runId: string,
+  workerId: string,
+): string {
+  const hash = createHash('sha256').update(WORKER_REPORT_ID_DOMAIN)
+  for (const value of [taskId, runId, workerId]) {
+    const byteLength = Buffer.byteLength(value, 'utf8')
+    hash.update(':').update(String(byteLength)).update(':').update(value)
+  }
+  return hash.digest('hex')
+}
 
 function isNormalizedWorkspacePath(value: string): boolean {
   if (!value || value.startsWith('/') || /^[A-Za-z]:\//.test(value)) {
@@ -71,12 +91,15 @@ const workerValidationSchema = z
   })
   .strict()
 
-export const workerReportSchema = z
+const workerReportShapeSchema = z
   .object({
     schema_version: z.literal(WORKER_REPORT_SCHEMA_VERSION),
     task_id: boundedId,
     run_id: boundedId,
     worker_id: boundedId,
+    report_id: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/, 'report_id must be a lowercase SHA-256 digest'),
     model: z
       .string()
       .min(1)
@@ -98,16 +121,39 @@ export const workerReportSchema = z
   })
   .strict()
 
+export const workerReportSchema = workerReportShapeSchema.superRefine(
+  (report, context) => {
+    const expected = deriveWorkerReportId(
+      report.task_id,
+      report.run_id,
+      report.worker_id,
+    )
+    if (report.report_id !== expected) {
+      context.addIssue({
+        code: 'custom',
+        path: ['report_id'],
+        message: 'report_id must match the runtime worker identity',
+      })
+    }
+  },
+)
+
 export type WorkerReport = z.infer<typeof workerReportSchema>
 export type WorkerReportStatus = WorkerReport['status']
 export type WorkerReportValidationVerdict = WorkerReport['validation']['verdict']
 
 /**
- * The worker-facing payload must itself be complete. Runtime-owned identity,
- * usage, effort, and status fields are checked for shape and then replaced by
+ * The model candidate is shape-checked before crossing the boundary. The
+ * runtime-owned identity, usage, effort, and status fields are replaced by
  * values captured by the runtime before the report reaches the Leader.
  */
-export const workerReportCandidateSchema = workerReportSchema
+export const workerReportCandidateSchema = workerReportShapeSchema
+  .omit({ report_id: true })
+  .extend({
+    // The model may emit this field, but it is never trusted.
+    report_id: z.unknown().optional(),
+  })
+  .strict()
 
 type WorkerReportCandidate = z.infer<typeof workerReportCandidateSchema>
 
@@ -182,12 +228,14 @@ function normalizeEvidence(value: unknown): WorkerEvidence[] | null {
   return result
 }
 
-function normalizeCandidate(candidate: WorkerReportCandidate): WorkerReport | null {
+function normalizeCandidate(
+  candidate: WorkerReportCandidate,
+): WorkerReportCandidate | null {
   const changedFiles = normalizePathList(candidate.changed_files, MAX_CHANGED_FILES)
   if (changedFiles.length !== candidate.changed_files.length) return null
   const evidence = normalizeEvidence(candidate.evidence)
   if (!evidence) return null
-  const parsed = workerReportSchema.safeParse({
+  const parsed = workerReportCandidateSchema.safeParse({
     ...candidate,
     changed_files: changedFiles,
     evidence,
@@ -215,6 +263,7 @@ const WORKER_REPORT_KEYS = [
   'task_id',
   'run_id',
   'worker_id',
+  'report_id',
   'model',
   'effort_used',
   'policy_epoch',
@@ -265,7 +314,9 @@ function sanitizeCandidate(value: unknown): unknown {
   return sanitized
 }
 
-function parseCandidate(value: string | undefined): WorkerReport | null {
+function parseCandidate(
+  value: string | undefined,
+): WorkerReportCandidate | null {
   if (!value?.trim()) return null
   const source = stripJsonFence(value)
   try {
@@ -359,6 +410,7 @@ export function buildWorkerReport(input: BuildWorkerReportInput): WorkerReport {
     task_id: taskId,
     run_id: runId,
     worker_id: workerId,
+    report_id: deriveWorkerReportId(taskId, runId, workerId),
     model: getConfiguredSubagentModel(),
     effort_used: normalizeEffort(input.effortUsed),
     policy_epoch: policyEpoch,
@@ -459,6 +511,7 @@ export function buildWorkerReportInstruction(
     task_id: taskId,
     run_id: context.runId ?? taskId,
     worker_id: context.workerId ?? taskId,
+    report_id: '0'.repeat(WORKER_REPORT_ID_HEX_LENGTH),
     model: getConfiguredSubagentModel(),
     effort_used: effort,
     policy_epoch: context.policyEpoch ?? 0,
@@ -480,6 +533,6 @@ export function buildWorkerReportInstruction(
   return `<worker-report-contract>
 Return exactly one JSON object as your final answer and no prose outside it:
 ${JSON.stringify(sample)}
-Use exactly the top-level keys shown in the sample; put task-specific details only in summary and never add custom top-level fields. Use effort_used exactly as provided. List only workspace-relative files actually changed. Each evidence object may contain only id, type, path, command, exit_code, and digest; type must be file, diff, command, test, or artifact. Do not invent additional evidence keys; use an empty evidence array when none of those fields applies. Set validation.verdict to pass only after the declared checks pass. Use partial, blocked, or failed when completion is not justified. Never include prompts, tool calls, or the worker transcript.
+Use exactly the top-level keys shown in the sample; put task-specific details only in summary and never add custom top-level fields. report_id is runtime-owned: include the key if requested, but never calculate, replace, or rely on it. Use effort_used exactly as provided. List only workspace-relative files actually changed. Each evidence object may contain only id, type, path, command, exit_code, and digest; type must be file, diff, command, test, or artifact. Do not invent additional evidence keys; use an empty evidence array when none of those fields applies. Set validation.verdict to pass only after the declared checks pass. Use partial, blocked, or failed when completion is not justified. Never include prompts, tool calls, or the worker transcript.
 </worker-report-contract>`
 }

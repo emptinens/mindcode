@@ -3,13 +3,14 @@ import {
   type WorkerReport,
   appendWorkerReportEvidence,
   buildWorkerReport,
+  deriveWorkerReportId,
   isWorkerReportCompletionEligible,
   serializeWorkerReport,
   workerReportSchema,
 } from '../../tools/AgentTool/workerReport.js'
 import type { WorkerEffort } from './backends/types.js'
 
-export { isWorkerReportCompletionEligible }
+export { deriveWorkerReportId, isWorkerReportCompletionEligible }
 
 const WORKER_TEAM_REPORT_IDLE_REASONS = [
   'available',

@@ -18,6 +18,10 @@ const {
   getAgentModel,
   resolveFixedSubagentModel,
 } = await import('./agent.js')
+const {
+  getConfiguredSubagentModel,
+  setConfiguredSubagentModel,
+} = await import('./subagentModel.js')
 
 const model = (overrides: Record<string, unknown> = {}) => ({
   id: 'gpt-5.6-luna',
@@ -121,5 +125,26 @@ describe('fixed Luna subagent resolver', () => {
     expect(getAgentModel('opus', 'gpt-5.6-sol', 'haiku')).toBe(
       'gpt-5.6-luna',
     )
+  })
+
+  test('ignores mutable submodel selections and keeps the Worker model fixed', async () => {
+    const catalog = configureVexzyModelCatalog({
+      getModels: async () =>
+        createVexzyModelRegistry({
+          object: 'list',
+          data: [model(), model({ id: 'gpt-5.6-terra' })],
+        }),
+      refresh: async () =>
+        createVexzyModelRegistry({
+          object: 'list',
+          data: [model(), model({ id: 'gpt-5.6-terra' })],
+        }),
+      getSnapshot: () => undefined,
+    })
+    await catalog.load()
+
+    expect(setConfiguredSubagentModel('gpt-5.6-terra')).toBe('gpt-5.6-luna')
+    expect(getConfiguredSubagentModel()).toBe('gpt-5.6-luna')
+    expect(resolveFixedSubagentModel()).toBe('gpt-5.6-luna')
   })
 })

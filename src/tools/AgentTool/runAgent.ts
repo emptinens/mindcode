@@ -45,7 +45,9 @@ import { createAttachmentMessage } from '../../utils/attachments.js'
 import { AbortError } from '../../utils/errors.js'
 import { getDisplayPath } from '../../utils/file.js'
 import {
-  resolveWorkerEffort,
+  applyWorkerRuntimeToAppState,
+  resolveWorkerRuntime,
+  type WorkerEffort,
   type WorkerEffortInput,
 } from '../../utils/swarm/backends/types.js'
 import {
@@ -61,7 +63,6 @@ import { registerFrontmatterHooks } from '../../utils/hooks/registerFrontmatterH
 import { clearSessionHooks } from '../../utils/hooks/sessionHooks.js'
 import { executeSubagentStartHooks } from '../../utils/hooks.js'
 import { createUserMessage } from '../../utils/messages.js'
-import { getAgentModel } from '../../utils/model/agent.js'
 import type { ModelAlias } from '../../utils/model/aliases.js'
 import {
   clearAgentTranscriptSubdir,
@@ -86,6 +87,21 @@ import type { ContentReplacementState } from '../../utils/toolResultStorage.js'
 import { createAgentId } from '../../utils/uuid.js'
 import { resolveAgentTools } from './agentToolUtils.js'
 import { type AgentDefinition, isBuiltInAgent } from './loadAgentsDir.js'
+
+/**
+ * Build the provider thinking gate for a Worker request.
+ *
+ * The exact reasoning depth is carried separately as VEXZY's
+ * `output_config.effort` (projected onto the Worker AppState). The inherited
+ * Leader thinkingConfig must not decide whether or how a Worker thinks:
+ * `none` disables thinking, while every other fixed Luna effort enables the
+ * provider's adaptive thinking path and leaves the exact level to effort.
+ */
+export function getWorkerThinkingConfig(
+  effort: WorkerEffort,
+): ToolUseContext['options']['thinkingConfig'] {
+  return effort === 'none' ? { type: 'disabled' } : { type: 'adaptive' }
+}
 
 /**
  * Initialize agent-specific MCP servers
@@ -261,7 +277,7 @@ export async function* runAgent({
   forkContextMessages,
   querySource,
   override,
-  model,
+  model: _model,
   effort,
   maxTurns,
   preserveToolUseResults,
@@ -342,20 +358,18 @@ export async function* runAgent({
   // Track subagent usage for feature discovery
 
   const appState = toolUseContext.getAppState()
-  const permissionMode = appState.toolPermissionContext.mode
-  const resolvedWorkerEffort = resolveWorkerEffort(effort)
+  const workerRuntime = resolveWorkerRuntime(effort)
+  const resolvedWorkerEffort = workerRuntime.effort
   // Always-shared channel to the root AppState store. toolUseContext.setAppState
   // is a no-op when the *parent* is itself an async agent (nested async→async),
   // so session-scoped writes (hooks, bash tasks) must go through this instead.
   const rootSetAppState =
     toolUseContext.setAppStateForTasks ?? toolUseContext.setAppState
 
-  const resolvedAgentModel = getAgentModel(
-    agentDefinition.model,
-    toolUseContext.options.mainLoopModel,
-    model,
-    permissionMode,
-  )
+  // Worker model and effort are resolved together at the canonical boundary.
+  // The Leader model/effort remain available through the parent context, but
+  // are never used for this query's provider options.
+  const resolvedAgentModel = workerRuntime.model
 
   const agentId = override?.agentId ? override.agentId : createAgentId()
 
@@ -492,19 +506,23 @@ export async function* runAgent({
       }
     }
 
-    // Worker effort is resolved per task. Never read or inherit Leader effort.
-    const effortValue = resolvedWorkerEffort
+    // query() forwards AppState.effortValue to the VEXZY request. Project the
+    // resolved Worker runtime onto this child snapshot instead of inheriting
+    // the Leader's effort value.
+    const stateWithWorkerRuntime = applyWorkerRuntimeToAppState(
+      state,
+      workerRuntime,
+    )
 
     if (
       toolPermissionContext === state.toolPermissionContext &&
-      effortValue === state.effortValue
+      stateWithWorkerRuntime === state
     ) {
       return state
     }
     return {
-      ...state,
+      ...stateWithWorkerRuntime,
       toolPermissionContext,
-      effortValue,
     }
   }
 
@@ -697,10 +715,10 @@ export async function* runAgent({
     debug: toolUseContext.options.debug,
     verbose: toolUseContext.options.verbose,
     mainLoopModel: resolvedAgentModel,
-    // Subagents use the leader's selected thinking mode. Their model is
-    // pinned independently to GPT-5.6 Luna, while /thinking and effort on the
-    // main session remain the source of truth for reasoning behavior.
-    thinkingConfig: toolUseContext.options.thinkingConfig,
+    // Workers must not inherit the Leader's thinkingConfig. The fixed Luna
+    // effort controls both the provider thinking gate and output_config.effort
+    // (the latter is projected onto the child AppState below).
+    thinkingConfig: getWorkerThinkingConfig(resolvedWorkerEffort),
     mcpClients: mergedMcpClients,
     mcpResources: toolUseContext.options.mcpResources,
     agentDefinitions: toolUseContext.options.agentDefinitions,

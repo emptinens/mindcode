@@ -11,6 +11,9 @@ const { buildInheritedEnvVars, isTeammateEnvVarForwarded } = await import(
   './spawnUtils.js'
 )
 const { JAILBREAK_LEVEL_ENV_VAR } = await import('../jailbreak.js')
+const { POLICY_DIGEST_ENV_VAR, POLICY_EPOCH_ENV_VAR } = await import(
+  '../../services/policy/policyEpoch.js',
+)
 
 describe('Vexzy worker environment wiring', () => {
   test('includes VEXZY_API_KEY in tmux worker forwarding', () => {
@@ -26,9 +29,11 @@ describe('Vexzy worker environment wiring', () => {
       process.env.ANTHROPIC_MODEL = 'opus'
 
       expect(isTeammateEnvVarForwarded('MINDCODE_MODEL')).toBe(true)
+      expect(isTeammateEnvVarForwarded('MINDCODE_WORKER_EFFORT')).toBe(false)
       expect(isTeammateEnvVarForwarded('ANTHROPIC_MODEL')).toBe(false)
       expect(buildInheritedEnvVars()).toContain('MINDCODE_MODEL=gpt-5.6-luna')
       expect(buildInheritedEnvVars()).not.toContain('ANTHROPIC_MODEL=')
+      expect(buildInheritedEnvVars()).not.toContain('MINDCODE_WORKER_EFFORT=')
     } finally {
       if (previousModel === undefined) delete process.env.MINDCODE_MODEL
       else process.env.MINDCODE_MODEL = previousModel
@@ -43,6 +48,10 @@ describe('Vexzy worker environment wiring', () => {
 
     expect(isTeammateEnvVarForwarded(JAILBREAK_LEVEL_ENV_VAR)).toBe(true)
     expect(env).toContain(`${JAILBREAK_LEVEL_ENV_VAR}=full`)
+    expect(isTeammateEnvVarForwarded(POLICY_EPOCH_ENV_VAR)).toBe(true)
+    expect(isTeammateEnvVarForwarded(POLICY_DIGEST_ENV_VAR)).toBe(true)
+    expect(env).toMatch(new RegExp(`${POLICY_EPOCH_ENV_VAR}=[0-9]+`))
+    expect(env).toMatch(new RegExp(`${POLICY_DIGEST_ENV_VAR}=[a-f0-9]{64}`))
   })
 
   test('does not put an unvalidated environment value in the spawn command', () => {

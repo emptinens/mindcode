@@ -19,6 +19,9 @@ const {
 const { createVexzyModelClient } = await import(
   '../services/api/vexzy/modelClient.js'
 )
+const { createVexzySDKAdapter } = await import(
+  '../services/api/vexzy/sdkAdapter.js'
+)
 const {
   convertEffortValueToLevel,
   getDisplayedEffortLevel,
@@ -32,6 +35,7 @@ const {
   modelSupportsXhighEffort,
   parseEffortValue,
   resolveAppliedEffort,
+  resolveEffortForQuery,
   toPersistableEffort,
 } = await import('./effort.js')
 const { isPersistableEffort } = await import('./effortCore.js')
@@ -69,7 +73,7 @@ const response = (...models: ReturnType<typeof model>[]) =>
 
 async function withCatalog(
   models: ReturnType<typeof model>[],
-  callback: () => void,
+  callback: () => void | Promise<void>,
   load = true,
 ): Promise<void> {
   process.env.VEXZY_API_KEY = 'forge-effort-test-key'
@@ -82,7 +86,7 @@ async function withCatalog(
 
   try {
     if (load) await catalog.load()
-    callback()
+    await callback()
   } finally {
     resetVexzyModelCatalog()
   }
@@ -175,6 +179,67 @@ describe('VEXZY catalog-backed effort capabilities', () => {
         expect(resolveAppliedEffort('leader-max', undefined)).toBe('auto')
         process.env.MINDCODE_EFFORT_LEVEL = 'unset'
         expect(resolveAppliedEffort('leader-max', 'max')).toBeUndefined()
+      },
+    )
+  })
+
+  test('worker scope ignores the Leader environment override', async () => {
+    await withCatalog(
+      [model('worker-model', ['low', 'max'])],
+      () => {
+        process.env.MINDCODE_EFFORT_LEVEL = 'max'
+
+        expect(resolveAppliedEffort('worker-model', 'low')).toBe('max')
+        expect(
+          resolveAppliedEffort('worker-model', 'low', { scope: 'worker' }),
+        ).toBe('low')
+      },
+    )
+  })
+
+  test('worker request emits its assigned reasoning effort', async () => {
+    await withCatalog(
+      [model('gpt-5.6-luna', ['low', 'max'])],
+      async () => {
+        process.env.MINDCODE_EFFORT_LEVEL = 'max'
+        const effort = resolveEffortForQuery(
+          'gpt-5.6-luna',
+          'low',
+          'worker',
+        )
+        expect(effort).toBe('low')
+
+        let requestBody: Record<string, unknown> | undefined
+        const adapter = createVexzySDKAdapter({
+          apiKey: 'forge-worker-effort-test',
+          fetch: async (_input, init) => {
+            requestBody = JSON.parse(
+              String(init?.body),
+            ) as Record<string, unknown>
+            return new Response(
+              JSON.stringify({
+                type: 'message',
+                id: 'worker-effort-test',
+                role: 'assistant',
+                model: 'gpt-5.6-luna',
+                content: [{ type: 'text', text: 'ok' }],
+                stop_reason: 'end_turn',
+                stop_sequence: null,
+                usage: { input_tokens: 1, output_tokens: 1 },
+              }),
+              { status: 200 },
+            )
+          },
+        })
+
+        await adapter.messages.create({
+          model: 'gpt-5.6-luna',
+          max_tokens: 16,
+          messages: [{ role: 'user', content: 'worker request' }],
+          output_config: { effort },
+        })
+
+        expect(requestBody?.reasoning_effort).toBe('low')
       },
     )
   })

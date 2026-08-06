@@ -1,6 +1,6 @@
-import { getInitialSettings } from './settings/settings.js'
 import { getVexzyModelRegistry } from '../services/api/vexzy/modelCatalog.js'
 import { type CoreEffortLevel, isPersistableEffort } from './effortCore.js'
+import { getInitialSettings } from './settings/settings.js'
 
 export type EffortLevel = CoreEffortLevel
 
@@ -27,6 +27,12 @@ export const EFFORT_LEVELS = [
 ] as const satisfies readonly EffortLevel[]
 
 export type EffortValue = EffortLevel | number
+
+export type EffortResolutionScope = 'leader' | 'worker'
+
+export type EffortResolutionOptions = Readonly<{
+  scope?: EffortResolutionScope
+}>
 
 /** Return the provider's exact advertised order for this catalog model. */
 export function getCatalogEffortLevels(model: string): EffortLevel[] {
@@ -130,8 +136,13 @@ export function getDefaultEffortForModel(
 export function resolveAppliedEffort(
   model: string,
   appStateEffortValue: EffortValue | undefined,
+  options: EffortResolutionOptions = {},
 ): EffortValue | undefined {
-  const envOverride = getEffortEnvOverride()
+  // Leader environment settings are intentionally not visible across the
+  // worker/query boundary. Worker effort is assigned by the Leader and must
+  // reach the provider unchanged.
+  const envOverride =
+    options.scope === 'worker' ? undefined : getEffortEnvOverride()
   if (envOverride === null) return undefined
 
   const resolved =
@@ -140,6 +151,14 @@ export function resolveAppliedEffort(
   return getCatalogEffortLevels(model).includes(resolved)
     ? resolved
     : undefined
+}
+
+export function resolveEffortForQuery(
+  model: string,
+  effortValue: EffortValue | undefined,
+  scope: EffortResolutionScope,
+): EffortValue | undefined {
+  return resolveAppliedEffort(model, effortValue, { scope })
 }
 
 export function getDisplayedEffortLevel(

@@ -1,10 +1,15 @@
 import { describe, expect, test } from 'bun:test'
-import { isIdleNotification } from '../teammateMailbox.js'
+import {
+  findLatestWorkerReport,
+  findLatestWorkerReportEnvelope,
+  isIdleNotification,
+} from '../teammateMailbox.js'
 import {
   accumulateWorkerTokenUsage,
   buildWorkerTeamReport,
   buildWorkerTeamReportFromMessages,
   createWorkerTeamReportMessage,
+  deriveWorkerReportId,
   serializeWorkerTeamReportMessage,
   workerTeamReportMessageSchema,
 } from './workerTeamReport.js'
@@ -15,7 +20,7 @@ type WorkerMessage = Parameters<
 >[0]['messages'][number]
 
 function reportCandidate(overrides: Partial<WorkerReport> = {}): WorkerReport {
-  return {
+  const report = {
     schema_version: 'worker-report/1',
     task_id: 'candidate-task',
     run_id: 'candidate-run',
@@ -38,6 +43,12 @@ function reportCandidate(overrides: Partial<WorkerReport> = {}): WorkerReport {
     validation: { verdict: 'pass' },
     blockers: [],
     ...overrides,
+  } as Omit<WorkerReport, 'report_id'> & Partial<Pick<WorkerReport, 'report_id'>>
+  return {
+    ...report,
+    report_id:
+      overrides.report_id ??
+      deriveWorkerReportId(report.task_id, report.run_id, report.worker_id),
   }
 }
 
@@ -70,7 +81,7 @@ function assistantMessage(
         cache_read_input_tokens: 0,
       },
     },
-  } as WorkerMessage
+  } as unknown as WorkerMessage
 }
 
 function userMessage(content: string): WorkerMessage {
@@ -78,7 +89,7 @@ function userMessage(content: string): WorkerMessage {
     type: 'user',
     uuid: 'user-record',
     message: { content },
-  } as WorkerMessage
+  } as unknown as WorkerMessage
 }
 
 describe('persistent teammate WorkerReport v1 transport', () => {
@@ -107,6 +118,7 @@ describe('persistent teammate WorkerReport v1 transport', () => {
       task_id: 'idle-success',
       run_id: 'run-success',
       worker_id: 'worker-a',
+      report_id: deriveWorkerReportId('idle-success', 'run-success', 'worker-a'),
       model: 'gpt-5.6-luna',
       effort_used: 'high',
       policy_epoch: 8,
@@ -273,6 +285,7 @@ describe('persistent teammate WorkerReport v1 transport', () => {
         task_id: 'idle-only',
         run_id: 'idle-run',
         worker_id: 'worker-c',
+        report_id: deriveWorkerReportId('idle-only', 'idle-run', 'worker-c'),
         model: 'gpt-5.6-luna',
         effort_used: 'none',
         policy_epoch: 0,
@@ -296,5 +309,146 @@ describe('persistent teammate WorkerReport v1 transport', () => {
         }),
       ),
     ).toBeNull()
+  })
+
+  test('latest report lookup ignores free-form and malformed mailbox entries', () => {
+    const report = buildWorkerTeamReport({
+      taskId: 'latest-report-task',
+      runId: 'latest-report-run',
+      workerId: 'worker-pane',
+      status: 'completed',
+      changedFiles: [],
+      evidence: [],
+      tokensUsed: 3,
+      effortUsed: 'medium',
+      finalText: JSON.stringify(
+        reportCandidate({
+          task_id: 'latest-report-task',
+          run_id: 'latest-report-run',
+          worker_id: 'worker-pane',
+          changed_files: [],
+          evidence: [],
+          tokens_used: 3,
+        }),
+      ),
+    })
+    const notification = createWorkerTeamReportMessage({
+      from: 'worker-pane',
+      idleReason: 'available',
+      report,
+    })
+    const messages = [
+      {
+        from: 'worker-pane',
+        text: 'free-form output is not a report',
+        timestamp: new Date().toISOString(),
+        read: false,
+      },
+      {
+        from: 'worker-pane',
+        text: JSON.stringify({
+          type: 'idle_notification',
+          from: 'worker-pane',
+          timestamp: new Date().toISOString(),
+          idleReason: 'available',
+        }),
+        timestamp: new Date().toISOString(),
+        read: false,
+      },
+      {
+        from: 'worker-pane',
+        text: serializeWorkerTeamReportMessage(notification),
+        timestamp: new Date().toISOString(),
+        read: false,
+      },
+    ]
+
+    expect(findLatestWorkerReport(messages, 'worker-pane')).toEqual(report)
+    expect(findLatestWorkerReport(messages.slice(0, 2), 'worker-pane')).toBeNull()
+    expect(
+      findLatestWorkerReport(
+        [
+          ...messages,
+          {
+            from: 'worker-pane',
+            text: JSON.stringify({
+              type: 'idle_notification',
+              from: 'worker-pane',
+              timestamp: new Date().toISOString(),
+              idleReason: 'available',
+            }),
+            timestamp: new Date().toISOString(),
+            read: false,
+          },
+        ],
+        'worker-pane',
+      ),
+    ).toBeNull()
+  })
+
+  test('newer mismatched report wins transport lookup and cannot fall back', async () => {
+    const report = buildWorkerTeamReport({
+      taskId: 'current-task',
+      runId: 'current-run',
+      workerId: 'worker-pane',
+      status: 'completed',
+      changedFiles: [],
+      evidence: [],
+      tokensUsed: 1,
+      effortUsed: 'medium',
+      finalText: JSON.stringify(
+        reportCandidate({
+          task_id: 'current-task',
+          run_id: 'current-run',
+          worker_id: 'worker-pane',
+          changed_files: [],
+          evidence: [],
+          tokens_used: 1,
+        }),
+      ),
+    })
+    const staleReport = {
+      ...report,
+      task_id: 'previous-task',
+      report_id: deriveWorkerReportId(
+        'previous-task',
+        report.run_id,
+        report.worker_id,
+      ),
+    }
+    const currentMessage = createWorkerTeamReportMessage({
+      from: 'worker-pane',
+      idleReason: 'available',
+      report,
+    })
+    const staleMessage = createWorkerTeamReportMessage({
+      from: 'worker-pane',
+      idleReason: 'available',
+      report: staleReport,
+    })
+    const messages = [
+      {
+        from: 'worker-pane',
+        text: serializeWorkerTeamReportMessage(currentMessage),
+        timestamp: currentMessage.timestamp,
+        read: false,
+      },
+      {
+        from: 'worker-pane',
+        text: serializeWorkerTeamReportMessage(staleMessage),
+        timestamp: staleMessage.timestamp,
+        read: false,
+      },
+    ]
+
+    const snapshots = await Promise.all(
+      Array.from({ length: 16 }, () =>
+        Promise.resolve(
+          findLatestWorkerReportEnvelope(messages, 'worker-pane'),
+        ),
+      ),
+    )
+    expect(snapshots.every(snapshot => snapshot?.report.task_id === 'previous-task')).toBe(true)
+    expect(findLatestWorkerReport(messages, 'worker-pane')).toEqual(staleReport)
   })
 })
