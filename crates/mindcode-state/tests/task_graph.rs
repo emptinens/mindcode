@@ -336,7 +336,7 @@ fn migration_rejects_future_schema_versions() {
         .execute_batch(
             r#"
             CREATE TABLE task_graph_meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
-            INSERT INTO task_graph_meta(key,value) VALUES ('schema_version','3');
+            INSERT INTO task_graph_meta(key,value) VALUES ('schema_version','4');
             "#,
         )
         .unwrap();
@@ -349,7 +349,7 @@ fn migration_rejects_future_schema_versions() {
     .unwrap_err();
     assert!(error
         .to_string()
-        .contains("Unsupported future task graph schema version: 3"));
+        .contains("Unsupported future task graph schema version: 4"));
 
     let database = Connection::open(&database_path).unwrap();
     let tables: Vec<String> = database

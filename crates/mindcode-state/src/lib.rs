@@ -7,7 +7,7 @@
 
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -23,7 +23,7 @@ pub use session_index::{
     SessionIndex, SessionIndexConfig, SessionListOptions, SessionRecord, SessionSearchOptions,
 };
 
-pub const TASK_GRAPH_SCHEMA_VERSION: u64 = 2;
+pub const TASK_GRAPH_SCHEMA_VERSION: u64 = 3;
 pub const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 pub const DEFAULT_LEASE_TTL_MS: u64 = 30_000;
 pub const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS task_graph_meta (
   value TEXT NOT NULL
 );
 INSERT OR IGNORE INTO task_graph_meta(key, value) VALUES ('graph_version', '0');
-INSERT OR IGNORE INTO task_graph_meta(key, value) VALUES ('schema_version', '2');
+INSERT OR IGNORE INTO task_graph_meta(key, value) VALUES ('schema_version', '3');
 
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY NOT NULL,
@@ -56,6 +56,10 @@ CREATE TABLE IF NOT EXISTS tasks (
   lease_id TEXT,
   version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
   policy_epoch INTEGER NOT NULL DEFAULT 0 CHECK (policy_epoch >= 0),
+  policy_digest TEXT CHECK (
+    policy_digest IS NULL OR
+    (length(policy_digest) = 64 AND policy_digest NOT GLOB '*[^0-9a-f]*')
+  ),
   report_id TEXT
 );
 CREATE INDEX IF NOT EXISTS tasks_status_idx ON tasks(status);
@@ -241,7 +245,17 @@ pub struct TaskRecord {
     pub lease_id: Option<String>,
     pub version: u64,
     pub policy_epoch: u64,
+    pub policy_digest: Option<String>,
     pub report_id: Option<String>,
+}
+
+fn deserialize_optional_nullable_digest<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -264,6 +278,13 @@ pub struct TaskInput {
     pub isolation: Option<TaskIsolation>,
     pub lease_id: Option<String>,
     pub policy_epoch: Option<u64>,
+    /// `None` means the field was omitted; `Some(None)` is an explicit null.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_nullable_digest"
+    )]
+    pub policy_digest: Option<Option<String>>,
     pub report_id: Option<String>,
     #[serde(alias = "idempotencyKey")]
     pub idempotency_key: Option<String>,
@@ -869,6 +890,7 @@ impl TaskGraph {
                 isolation: Some(current.isolation),
                 lease_id: current.lease_id.clone(),
                 policy_epoch: Some(current.policy_epoch),
+                policy_digest: Some(current.policy_digest.clone()),
                 report_id: current.report_id.clone(),
                 idempotency_key: None,
             })
@@ -997,6 +1019,11 @@ impl TaskGraph {
         if object.is_empty() {
             return Ok(current);
         }
+        if object.contains_key("policy_epoch") != object.contains_key("policy_digest") {
+            return Err(StateError::InvalidTask(
+                "policy_epoch and policy_digest must be provided together in a patch".into(),
+            ));
+        }
         let mutable = [
             "status",
             "owner",
@@ -1014,6 +1041,7 @@ impl TaskGraph {
             "isolation",
             "lease_id",
             "policy_epoch",
+            "policy_digest",
             "report_id",
         ];
         if !mutable.iter().any(|key| object.contains_key(*key)) {
@@ -1083,6 +1111,16 @@ impl TaskGraph {
             json_u64(value, "policy_epoch")?
         } else {
             current.policy_epoch
+        };
+        let next_policy_digest = if object.contains_key("policy_digest") {
+            nullable_policy_digest(
+                object
+                    .get("policy_digest")
+                    .expect("policy_digest key was checked"),
+                "policy_digest",
+            )?
+        } else {
+            current.policy_digest.clone()
         };
         let next_report_id = optional_nullable_string(object, "report_id")?
             .unwrap_or_else(|| current.report_id.clone());
@@ -1158,9 +1196,9 @@ impl TaskGraph {
             claimed_at = Some(now_string(None)?);
         }
 
-        let mut sql = String::from("UPDATE tasks SET status=?1, owner=?2, kind=?3, effort=?4, priority=?5, blocked_by=?6, claimed_at=?7, started_at=?8, finished_at=?9, files_touched=?10, read_set=?11, write_set=?12, isolation=?13, sets_explicit=?14, lease_id=?15, version=version+1, policy_epoch=?16, report_id=?17 WHERE id=?18");
+        let mut sql = String::from("UPDATE tasks SET status=?1, owner=?2, kind=?3, effort=?4, priority=?5, blocked_by=?6, claimed_at=?7, started_at=?8, finished_at=?9, files_touched=?10, read_set=?11, write_set=?12, isolation=?13, sets_explicit=?14, lease_id=?15, version=version+1, policy_epoch=?16, policy_digest=?17, report_id=?18 WHERE id=?19");
         if expected_version.is_some() {
-            sql.push_str(" AND version=?19");
+            sql.push_str(" AND version=?20");
         }
         let mut bind = vec![
             SqlValue::Text(status.as_str().into()),
@@ -1179,6 +1217,7 @@ impl TaskGraph {
             SqlValue::Integer(if explicit_sets { 1 } else { 0 }),
             SqlValue::optional_text(lease_id),
             SqlValue::Integer(u64_to_i64(next_policy_epoch, "policy_epoch")?),
+            SqlValue::optional_text(next_policy_digest),
             SqlValue::optional_text(next_report_id),
             SqlValue::Text(id.clone()),
         ];
@@ -1404,13 +1443,51 @@ impl TaskGraph {
     }
 }
 
-const SELECT_TASKS: &str = "SELECT id,status,owner,kind,effort,priority,blocked_by,claimed_at,started_at,finished_at,files_touched,read_set,write_set,isolation,sets_explicit,lease_id,version,policy_epoch,report_id FROM tasks";
+const SELECT_TASKS: &str = "SELECT id,status,owner,kind,effort,priority,blocked_by,claimed_at,started_at,finished_at,files_touched,read_set,write_set,isolation,sets_explicit,lease_id,version,policy_epoch,policy_digest,report_id FROM tasks";
 
 #[derive(Debug, Clone)]
 enum SqlValue {
     Null,
     Text(String),
     Integer(i64),
+}
+
+fn validate_policy_digest(value: Option<String>, field: &str) -> StateResult<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(StateError::InvalidTask(format!(
+            "{field} must be a lowercase SHA-256 digest"
+        )));
+    }
+    Ok(Some(value))
+}
+
+fn nullable_policy_digest(value: &Value, field: &str) -> StateResult<Option<String>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let value = value
+        .as_str()
+        .ok_or_else(|| StateError::InvalidTask(format!("{field} must be a string or null")))?;
+    validate_policy_digest(Some(value.to_owned()), field)
+}
+
+fn validate_stored_policy_digests(connection: &Connection) -> StateResult<()> {
+    let mut statement = connection.prepare("SELECT id, policy_digest FROM tasks")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    })?;
+    for row in rows {
+        let (id, digest) = row?;
+        validate_policy_digest(digest, &format!("policy_digest for task {id}"))?;
+    }
+    Ok(())
 }
 
 impl SqlValue {
@@ -1470,6 +1547,7 @@ fn migrate_schema(connection: &mut Connection, database_path: &Path) -> StateRes
         ("lease_id", "TEXT"),
         ("version", "INTEGER NOT NULL DEFAULT 0"),
         ("policy_epoch", "INTEGER NOT NULL DEFAULT 0"),
+        ("policy_digest", "TEXT"),
         ("report_id", "TEXT"),
     ];
     for (name, definition) in additions {
@@ -1483,17 +1561,18 @@ fn migrate_schema(connection: &mut Connection, database_path: &Path) -> StateRes
     transaction.execute("UPDATE tasks SET kind='implement' WHERE kind IS NULL OR kind NOT IN ('research','implement','verify','integrate')", [])?;
     transaction.execute("UPDATE tasks SET effort='medium' WHERE effort IS NULL OR effort NOT IN ('none','low','medium','high','xhigh','max')", [])?;
     transaction.execute("UPDATE tasks SET priority=0 WHERE priority IS NULL", [])?;
+    validate_stored_policy_digests(&transaction)?;
     transaction.execute(
         "INSERT OR IGNORE INTO task_graph_meta(key,value) VALUES ('graph_version','0')",
         [],
     )?;
     transaction.execute(
-        "INSERT OR IGNORE INTO task_graph_meta(key,value) VALUES ('schema_version','2')",
+        "INSERT OR IGNORE INTO task_graph_meta(key,value) VALUES ('schema_version','3')",
         [],
     )?;
     if schema_version < TASK_GRAPH_SCHEMA_VERSION {
         transaction.execute(
-            "UPDATE task_graph_meta SET value='2' WHERE key='schema_version'",
+            "UPDATE task_graph_meta SET value='3' WHERE key='schema_version'",
             [],
         )?;
     }
@@ -1669,6 +1748,7 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<TaskRecord> {
     let priority = row.get::<_, i64>(5)?;
     let version = row.get::<_, i64>(16)?;
     let policy_epoch = row.get::<_, i64>(17)?;
+    let policy_digest: Option<String> = row.get(18)?;
     Ok(TaskRecord {
         id: row.get(0)?,
         status: TaskStatus::parse(&status).ok_or_else(|| {
@@ -1699,7 +1779,9 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<TaskRecord> {
         lease_id: row.get(15)?,
         version: safe_sql_u64(version, "version")?,
         policy_epoch: safe_sql_u64(policy_epoch, "policy_epoch")?,
-        report_id: row.get(18)?,
+        policy_digest: validate_policy_digest(policy_digest, "stored policy_digest")
+            .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?,
+        report_id: row.get(19)?,
     })
 }
 
@@ -1791,7 +1873,7 @@ fn bump_graph_version(connection: &Connection) -> StateResult<u64> {
 }
 
 fn insert_prepared(connection: &Connection, task: &PreparedTask) -> StateResult<()> {
-    connection.execute("INSERT INTO tasks(id,status,owner,kind,effort,priority,blocked_by,claimed_at,started_at,finished_at,files_touched,read_set,write_set,isolation,sets_explicit,lease_id,version,policy_epoch,report_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,0,?17,?18)", params![task.id, task.status.as_str(), task.owner, task.kind.as_str(), task.effort.as_str(), task.priority, json_array(&task.blocked_by)?, task.claimed_at, task.started_at, task.finished_at, json_array(&task.files_touched)?, json_array(&task.read_set)?, json_array(&task.write_set)?, task.isolation.as_str(), if task.explicit_sets { 1 } else { 0 }, task.lease_id, u64_to_i64(task.policy_epoch, "policy_epoch")?, task.report_id])?;
+    connection.execute("INSERT INTO tasks(id,status,owner,kind,effort,priority,blocked_by,claimed_at,started_at,finished_at,files_touched,read_set,write_set,isolation,sets_explicit,lease_id,version,policy_epoch,policy_digest,report_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,0,?17,?18,?19)", params![task.id, task.status.as_str(), task.owner, task.kind.as_str(), task.effort.as_str(), task.priority, json_array(&task.blocked_by)?, task.claimed_at, task.started_at, task.finished_at, json_array(&task.files_touched)?, json_array(&task.read_set)?, json_array(&task.write_set)?, task.isolation.as_str(), if task.explicit_sets { 1 } else { 0 }, task.lease_id, u64_to_i64(task.policy_epoch, "policy_epoch")?, task.policy_digest, task.report_id])?;
     Ok(())
 }
 
@@ -2133,6 +2215,7 @@ struct PreparedTask {
     explicit_sets: bool,
     lease_id: Option<String>,
     policy_epoch: u64,
+    policy_digest: Option<String>,
     report_id: Option<String>,
     idempotency_key: Option<String>,
 }
@@ -2169,6 +2252,12 @@ impl PreparedTask {
             .transpose()?;
         let policy_epoch = input.policy_epoch.unwrap_or(0);
         ensure_u64(policy_epoch, "policy_epoch")?;
+        if input.policy_epoch.is_some() != input.policy_digest.is_some() {
+            return Err(StateError::InvalidTask(
+                "policy_epoch and policy_digest must be provided together".into(),
+            ));
+        }
+        let policy_digest = validate_policy_digest(input.policy_digest.flatten(), "policy_digest")?;
         let report_id = input
             .report_id
             .map(|value| nonempty(&value, "report_id"))
@@ -2229,6 +2318,7 @@ impl PreparedTask {
             explicit_sets,
             lease_id,
             policy_epoch,
+            policy_digest,
             report_id,
             idempotency_key,
         })
@@ -2517,6 +2607,7 @@ fn validate_patch_keys(patch: &Value) -> StateResult<()> {
         "isolation",
         "lease_id",
         "policy_epoch",
+        "policy_digest",
         "report_id",
         "expectedVersion",
         "expected_version",

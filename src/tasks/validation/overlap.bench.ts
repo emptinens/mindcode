@@ -1,4 +1,4 @@
-import type { TaskRecord } from "../graph/types.js";
+import type { TaskRecord as DurableTaskRecord } from "../graph/types.js";
 import { findOverlaps } from "./overlap.js";
 
 const taskCount = Number(process.env.MINDCODE_OVERLAP_BENCH_TASKS ?? 2_000);
@@ -92,15 +92,16 @@ function elapsedMs(operation: () => unknown): number {
 }
 
 const tasks = makeTasks();
+const durableTasks = tasks as unknown as readonly DurableTaskRecord[];
 for (let index = 0; index < 2; index += 1) {
   legacyFindOverlaps(tasks);
-  findOverlaps(candidate, tasks);
+  findOverlaps(candidate, durableTasks);
 }
 
 const legacy = elapsedMs(() => legacyFindOverlaps(tasks));
-const indexed = elapsedMs(() => findOverlaps(candidate, tasks));
+const indexed = elapsedMs(() => findOverlaps(candidate, durableTasks));
 const legacyConflicts = legacyFindOverlaps(tasks).length;
-const indexedConflicts = findOverlaps(candidate, tasks).length;
+const indexedConflicts = findOverlaps(candidate, durableTasks).length;
 
 if (legacyConflicts !== indexedConflicts) {
   throw new Error(
@@ -124,3 +125,28 @@ console.log(
     2,
   ),
 );
+
+/**
+ * Legacy benchmark fixture shape. Keep this explicit so adding durable-only
+ * fields does not weaken the production TaskRecord or churn historical gates.
+ */
+interface TaskRecord {
+  id: DurableTaskRecord["id"];
+  status: DurableTaskRecord["status"];
+  owner: DurableTaskRecord["owner"];
+  kind: DurableTaskRecord["kind"];
+  effort: DurableTaskRecord["effort"];
+  priority: DurableTaskRecord["priority"];
+  blocked_by: DurableTaskRecord["blocked_by"];
+  claimed_at: DurableTaskRecord["claimed_at"];
+  started_at: DurableTaskRecord["started_at"];
+  finished_at: DurableTaskRecord["finished_at"];
+  files_touched: DurableTaskRecord["files_touched"];
+  read_set: DurableTaskRecord["read_set"];
+  write_set: DurableTaskRecord["write_set"];
+  isolation: DurableTaskRecord["isolation"];
+  lease_id: DurableTaskRecord["lease_id"];
+  version: DurableTaskRecord["version"];
+  policy_epoch: DurableTaskRecord["policy_epoch"];
+  report_id: DurableTaskRecord["report_id"];
+}

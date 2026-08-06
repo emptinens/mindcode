@@ -112,6 +112,7 @@ describe("SQLite task graph core", () => {
       read_set: ["src/input.ts"],
       write_set: ["src/a.ts"],
       policy_epoch: 7,
+      policy_digest: "7".repeat(64),
     });
 
     expect(created).toEqual({
@@ -132,6 +133,7 @@ describe("SQLite task graph core", () => {
       lease_id: null,
       version: 0,
       policy_epoch: 7,
+      policy_digest: "7".repeat(64),
       report_id: null,
     });
     expect(taskGraph.read("task-a")).toEqual(created);
@@ -143,6 +145,7 @@ describe("SQLite task graph core", () => {
         owner: "leader",
         files_touched: ["src/a.ts", "src/a.test.ts"],
         policy_epoch: 8,
+        policy_digest: "8".repeat(64),
       },
       { expectedVersion: 0 },
     );
@@ -184,6 +187,7 @@ describe("SQLite task graph core", () => {
       write_set: ["docs/output.md"],
       files_touched: ["docs/output.md"],
       policy_epoch: 4,
+      policy_digest: "4".repeat(64),
       report_id: "report-before-run",
     });
 
@@ -297,6 +301,7 @@ describe("SQLite task graph core", () => {
       started_at: null,
       finished_at: null,
       policy_epoch: 0,
+      policy_digest: null,
       report_id: null,
     });
     const columns = databaseColumns(path);
@@ -310,6 +315,7 @@ describe("SQLite task graph core", () => {
         "started_at",
         "finished_at",
         "policy_epoch",
+        "policy_digest",
         "report_id",
       ]),
     );
@@ -363,12 +369,12 @@ describe("SQLite task graph core", () => {
         key TEXT PRIMARY KEY NOT NULL,
         value TEXT NOT NULL
       );
-      INSERT INTO task_graph_meta(key, value) VALUES ('schema_version', '3');
+      INSERT INTO task_graph_meta(key, value) VALUES ('schema_version', '4');
     `);
     database.close();
 
     expect(() => new TaskGraph({ databasePath: path })).toThrow(
-      /Unsupported future task graph schema version: 3/,
+      /Unsupported future task graph schema version: 4/,
     );
 
     const reopened = new Database(path);
@@ -380,7 +386,7 @@ describe("SQLite task graph core", () => {
           )
           .get() as { value: string }
       ).value,
-    ).toBe("3");
+    ).toBe("4");
     reopened.close();
   });
 
@@ -393,12 +399,12 @@ describe("SQLite task graph core", () => {
         key TEXT PRIMARY KEY NOT NULL,
         value TEXT NOT NULL
       );
-      INSERT INTO task_graph_meta(key, value) VALUES ('schema_version', '3');
+      INSERT INTO task_graph_meta(key, value) VALUES ('schema_version', '4');
     `);
     database.close();
 
     expect(() => new TaskGraph({ databasePath: path })).toThrow(
-      /Unsupported future task graph schema version: 3/,
+      /Unsupported future task graph schema version: 4/,
     );
     const reopened = new Database(path);
     expect(

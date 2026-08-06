@@ -147,6 +147,7 @@ const TASK_KEYS = [
   "lease_id",
   "version",
   "policy_epoch",
+  "policy_digest",
   "report_id",
 ] as const;
 
@@ -203,6 +204,18 @@ function nullableString(value: unknown, context: string): string | null {
     throw new TaskGraphProtocolError(`${context} must be a string or null`);
   }
   return value as string | null;
+}
+
+const POLICY_DIGEST_PATTERN = /^[a-f0-9]{64}$/;
+
+function nullablePolicyDigest(value: unknown, context: string): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string" || !POLICY_DIGEST_PATTERN.test(value)) {
+    throw new TaskGraphProtocolError(
+      `${context} must be a lowercase SHA-256 digest or null`,
+    );
+  }
+  return value;
 }
 
 function safeInteger(value: unknown, context: string): number {
@@ -320,9 +333,15 @@ export function validateTaskRecord(
       required(object, "version", context),
       `${context}.version`,
     ),
-    policy_epoch: safeInteger(
+    policy_epoch: nonNegativeSafeInteger(
       required(object, "policy_epoch", context),
       `${context}.policy_epoch`,
+    ),
+    // Legacy daemon payloads may omit the nullable field; normalization
+    // materializes the missing value as null.
+    policy_digest: nullablePolicyDigest(
+      object.policy_digest,
+      `${context}.policy_digest`,
     ),
     report_id: nullableString(
       required(object, "report_id", context),

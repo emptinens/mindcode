@@ -63,6 +63,7 @@ export type BridgeTask = {
   started_at: string | null;
   finished_at: string | null;
   policy_epoch: number;
+  policy_digest?: string | null;
   report_id: string | null;
   metadata?: TaskMetadata;
 };
@@ -84,6 +85,7 @@ export type BridgeTaskPatch = {
   started_at?: string | null;
   finished_at?: string | null;
   policy_epoch?: number;
+  policy_digest?: string | null;
   report_id?: string | null;
   metadata?: TaskMetadata;
 };
@@ -112,6 +114,7 @@ export type BridgeCreateInput = Omit<
   started_at?: string | null;
   finished_at?: string | null;
   policy_epoch?: number;
+  policy_digest?: string | null;
   report_id?: string | null;
 };
 
@@ -182,6 +185,7 @@ type StoredTaskRow = {
   lease_id: string | null;
   version: number;
   policy_epoch: number;
+  policy_digest: string | null;
   report_id: string | null;
 };
 
@@ -490,6 +494,7 @@ function normalizeGraphRecord(
     started_at: record.started_at,
     finished_at: record.finished_at,
     policy_epoch: record.policy_epoch,
+    policy_digest: record.policy_digest,
     report_id: record.report_id,
     metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
   };
@@ -507,6 +512,7 @@ function graphInputFromTask(
   const metadataEffort = metadata.effort;
   const metadataPriority = metadata.priority;
   const metadataPolicyEpoch = metadata.policy_epoch;
+  const metadataPolicyDigest = metadata.policy_digest;
   const metadataReportId = metadata.report_id;
   const kind =
     task.kind ??
@@ -553,6 +559,14 @@ function graphInputFromTask(
       (typeof metadataPolicyEpoch === "number"
         ? metadataPolicyEpoch
         : undefined),
+    policy_digest:
+      task.policy_digest !== undefined
+        ? task.policy_digest
+        : typeof metadataPolicyDigest === "string"
+          ? metadataPolicyDigest
+          : metadataPolicyDigest === null
+            ? null
+            : undefined,
     report_id:
       task.report_id ??
       (typeof metadataReportId === "string" ? metadataReportId : undefined),
@@ -625,8 +639,9 @@ function migrateRawBridgeRows(db: Database): void {
           INSERT INTO tasks(
             id, status, owner, kind, effort, priority, blocked_by, claimed_at,
             started_at, finished_at, files_touched, read_set, write_set,
-            isolation, sets_explicit, lease_id, version, policy_epoch, report_id
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            isolation, sets_explicit, lease_id, version, policy_epoch,
+            policy_digest, report_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           mapping.newId,
           oldTask.status,
@@ -658,6 +673,7 @@ function migrateRawBridgeRows(db: Database): void {
           oldTask.lease_id,
           oldTask.version,
           oldTask.policy_epoch,
+          oldTask.policy_digest ?? null,
           oldTask.report_id ?? null,
         );
         db.prepare("UPDATE task_leases SET task_id = ? WHERE task_id = ?").run(
@@ -1399,6 +1415,12 @@ export async function graphUpdateTask(
       (typeof effectiveMetadata.policy_epoch === "number"
         ? effectiveMetadata.policy_epoch
         : undefined);
+    const effectivePolicyDigest =
+      patch.policy_digest !== undefined
+        ? patch.policy_digest
+        : typeof effectiveMetadata.policy_digest === "string"
+          ? effectiveMetadata.policy_digest
+          : undefined;
     const effectiveReportId =
       patch.report_id !== undefined
         ? patch.report_id
@@ -1494,6 +1516,9 @@ export async function graphUpdateTask(
       ...(effectivePolicyEpoch === undefined
         ? {}
         : { policy_epoch: effectivePolicyEpoch }),
+      ...(effectivePolicyDigest === undefined
+        ? {}
+        : { policy_digest: effectivePolicyDigest }),
       ...(effectiveReportId === undefined
         ? {}
         : { report_id: effectiveReportId }),

@@ -56,7 +56,7 @@ import {
 
 const DEFAULT_LEASE_TTL_MS = 30_000;
 const SQLITE_BUSY_TIMEOUT_MS = 5_000;
-const TASK_GRAPH_SCHEMA_VERSION = 2;
+const TASK_GRAPH_SCHEMA_VERSION = 3;
 
 const TASK_SELECT = `
   SELECT
@@ -78,6 +78,7 @@ const TASK_SELECT = `
     lease_id,
     version,
     policy_epoch,
+    policy_digest,
     report_id
   FROM tasks
 `;
@@ -92,7 +93,7 @@ const SCHEMA = `
   VALUES ('graph_version', '0');
 
   INSERT OR IGNORE INTO task_graph_meta(key, value)
-  VALUES ('schema_version', '2');
+  VALUES ('schema_version', '3');
 
   CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY NOT NULL,
@@ -113,6 +114,10 @@ const SCHEMA = `
     lease_id TEXT,
     version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
     policy_epoch INTEGER NOT NULL DEFAULT 0 CHECK (policy_epoch >= 0),
+    policy_digest TEXT CHECK (
+      policy_digest IS NULL OR
+      (length(policy_digest) = 64 AND policy_digest NOT GLOB '*[^0-9a-f]*')
+    ),
     report_id TEXT
   );
 
@@ -161,6 +166,7 @@ type TaskRow = {
   lease_id: string | null;
   version: number;
   policy_epoch: number;
+  policy_digest: string | null;
   report_id: string | null;
 };
 
@@ -211,6 +217,7 @@ const TASK_INPUT_KEYS = new Set([
   "isolation",
   "lease_id",
   "policy_epoch",
+  "policy_digest",
   "report_id",
   "idempotency_key",
   "idempotencyKey",
@@ -233,6 +240,7 @@ const TASK_PATCH_KEYS = new Set([
   "isolation",
   "lease_id",
   "policy_epoch",
+  "policy_digest",
   "report_id",
   "expectedVersion",
   "expected_version",
@@ -327,6 +335,50 @@ function normalizeNullableText(
 ): string | null {
   if (value === undefined || value === null) return null;
   return assertNonEmptyString(value, field);
+}
+
+const POLICY_DIGEST_PATTERN = /^[a-f0-9]{64}$/;
+
+function normalizePolicyDigest(
+  value: string | null | undefined,
+  field = "policy_digest",
+): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !POLICY_DIGEST_PATTERN.test(value)) {
+    throw new InvalidTaskError(
+      `${field} must be a lowercase SHA-256 digest`,
+    );
+  }
+  return value;
+}
+
+function assertPolicyIdentityPair(
+  policyEpoch: number,
+  policyDigest: string | null,
+  epochProvided: boolean,
+  digestProvided: boolean,
+): void {
+  if (epochProvided !== digestProvided) {
+    throw new InvalidTaskError(
+      "policy_epoch and policy_digest must be provided together",
+    );
+  }
+  if (policyDigest !== null && !epochProvided) {
+    throw new InvalidTaskError(
+      "policy_digest requires an explicit policy_epoch",
+    );
+  }
+  assertNonNegativeInteger(policyEpoch, "policy_epoch");
+}
+
+function assertPolicyPatchPair(patch: object): void {
+  const epochProvided = hasOwn(patch, "policy_epoch");
+  const digestProvided = hasOwn(patch, "policy_digest");
+  if (epochProvided !== digestProvided) {
+    throw new InvalidTaskError(
+      "policy_epoch and policy_digest must be provided together in a patch",
+    );
+  }
 }
 
 function isTerminalTaskStatus(status: TaskStatus): boolean {
@@ -461,6 +513,7 @@ function rowToTask(row: TaskRow): TaskRecord {
   assertSafeInteger(row.priority, "stored priority");
   assertNonNegativeInteger(row.version, "stored version");
   assertNonNegativeInteger(row.policy_epoch, "stored policy_epoch");
+  const policyDigest = normalizePolicyDigest(row.policy_digest);
   const task = {
     id: row.id,
     status: row.status,
@@ -479,6 +532,7 @@ function rowToTask(row: TaskRow): TaskRecord {
     lease_id: row.lease_id,
     version: row.version,
     policy_epoch: row.policy_epoch,
+    policy_digest: policyDigest,
     report_id: row.report_id,
   };
   return task;
@@ -603,6 +657,10 @@ export class TaskGraph {
         "policy_epoch",
         "INTEGER NOT NULL DEFAULT 0 CHECK (policy_epoch >= 0)",
       );
+      addColumn(
+        "policy_digest",
+        "TEXT CHECK (policy_digest IS NULL OR (length(policy_digest) = 64 AND policy_digest NOT GLOB '*[^0-9a-f]*'))",
+      );
 
       // Older experimental builds accepted broader effort/kind values. Keep
       // those rows usable under the current contract while retaining every
@@ -620,6 +678,17 @@ export class TaskGraph {
       this.db
         .prepare("UPDATE tasks SET priority = 0 WHERE priority IS NULL")
         .run();
+      const invalidDigest = this.db
+        .prepare(
+          "SELECT id FROM tasks WHERE policy_digest IS NOT NULL AND (length(policy_digest) != 64 OR policy_digest GLOB '*[^0-9a-f]*') LIMIT 1",
+        )
+        .get() as { id: string } | null | undefined;
+      if (invalidDigest) {
+        throw new TaskGraphError(
+          "INVALID_TASK",
+          `Stored policy_digest for task ${invalidDigest.id} is not a lowercase SHA-256 digest`,
+        );
+      }
       if (schemaVersion < TASK_GRAPH_SCHEMA_VERSION) {
         this.db
           .prepare(
@@ -766,6 +835,13 @@ export class TaskGraph {
       input.policy_epoch ?? 0,
       "policy_epoch",
     );
+    const policyDigest = normalizePolicyDigest(input.policy_digest);
+    assertPolicyIdentityPair(
+      policyEpoch,
+      policyDigest,
+      input.policy_epoch !== undefined,
+      input.policy_digest !== undefined,
+    );
     const reportId = normalizeNullableText(input.report_id, "report_id");
     const key = normalizeIdempotencyKey(
       idempotencyKey ?? input.idempotency_key ?? input.idempotencyKey,
@@ -812,8 +888,8 @@ export class TaskGraph {
               id, status, owner, kind, effort, priority, blocked_by, claimed_at,
               started_at, finished_at,
               files_touched, read_set, write_set, isolation, sets_explicit,
-              lease_id, version, policy_epoch, report_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+              lease_id, version, policy_epoch, policy_digest, report_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
           `)
           .run(
             id,
@@ -833,6 +909,7 @@ export class TaskGraph {
             targetSet.explicit_sets ? 1 : 0,
             leaseId,
             policyEpoch,
+            policyDigest,
             reportId,
           );
       } catch (error) {
@@ -917,6 +994,13 @@ export class TaskGraph {
     const policyEpoch = assertNonNegativeInteger(
       input.policy_epoch ?? 0,
       "policy_epoch",
+    );
+    const policyDigest = normalizePolicyDigest(input.policy_digest);
+    assertPolicyIdentityPair(
+      policyEpoch,
+      policyDigest,
+      input.policy_epoch !== undefined,
+      input.policy_digest !== undefined,
     );
     const reportId = normalizeNullableText(input.report_id, "report_id");
     const key = normalizeIdempotencyKey(
@@ -1017,6 +1101,7 @@ export class TaskGraph {
         setsExplicit: targetSet.explicit_sets,
         leaseId: nextLeaseId,
         policyEpoch,
+        policyDigest,
         reportId,
       });
       if (key !== undefined) {
@@ -1058,6 +1143,7 @@ export class TaskGraph {
     this.assertOpen();
     const id = assertNonEmptyString(taskId, "id");
     assertKnownKeys(patch, TASK_PATCH_KEYS, "patch");
+    assertPolicyPatchPair(patch);
     const expectedVersion = this.extractExpectedVersion(options, patch);
     if (expectedVersion !== undefined) {
       assertNonNegativeInteger(expectedVersion, "expected_version");
@@ -1229,6 +1315,9 @@ export class TaskGraph {
       const policyEpoch = hasOwn(patch, "policy_epoch")
         ? assertNonNegativeInteger(patch.policy_epoch as number, "policy_epoch")
         : current.policy_epoch;
+      const policyDigest = hasOwn(patch, "policy_digest")
+        ? normalizePolicyDigest(patch.policy_digest, "policy_digest")
+        : current.policy_digest;
       const claimedAt =
         nextStatus === "claimed" && nextClaimedAt === null
           ? normalizeNow(undefined, this.clock)
@@ -1250,6 +1339,7 @@ export class TaskGraph {
         explicitSets ? 1 : 0,
         nextLeaseId,
         policyEpoch,
+        policyDigest,
         nextReportId,
         id,
       ];
@@ -1258,7 +1348,7 @@ export class TaskGraph {
           blocked_by = ?, claimed_at = ?, started_at = ?, finished_at = ?,
           files_touched = ?, read_set = ?, write_set = ?, isolation = ?,
           sets_explicit = ?, lease_id = ?, version = version + 1,
-          policy_epoch = ?, report_id = ?
+          policy_epoch = ?, policy_digest = ?, report_id = ?
         WHERE id = ?`;
       if (expectedVersion !== undefined) {
         sql += " AND version = ?";
@@ -1913,6 +2003,7 @@ export class TaskGraph {
     this.assertOpen();
     const id = assertNonEmptyString(taskId, "id");
     assertKnownKeys(patch, TASK_PATCH_KEYS, "patch");
+    assertPolicyPatchPair(patch);
     const expectedVersion = this.extractExpectedVersion(
       expectedVersionOrOptions,
       patch,
@@ -1958,6 +2049,7 @@ export class TaskGraph {
         "isolation",
         "lease_id",
         "policy_epoch",
+        "policy_digest",
         "report_id",
       ] as const;
       if (!mutableKeys.some((key) => hasOwn(patch, key))) {
@@ -2026,6 +2118,9 @@ export class TaskGraph {
       const nextPolicyEpoch = hasOwn(patch, "policy_epoch")
         ? assertNonNegativeInteger(patch.policy_epoch as number, "policy_epoch")
         : current.policy_epoch;
+      const nextPolicyDigest = hasOwn(patch, "policy_digest")
+        ? normalizePolicyDigest(patch.policy_digest, "policy_digest")
+        : current.policy_digest;
       const nextReportId = hasOwn(patch, "report_id")
         ? normalizeNullableText(patch.report_id, "report_id")
         : current.report_id;
@@ -2107,7 +2202,7 @@ export class TaskGraph {
               blocked_by = ?, claimed_at = ?, started_at = ?, finished_at = ?,
               files_touched = ?, read_set = ?, write_set = ?,
                 isolation = ?, sets_explicit = ?, lease_id = ?,
-                version = version + 1, policy_epoch = ?, report_id = ?
+                version = version + 1, policy_epoch = ?, policy_digest = ?, report_id = ?
             WHERE id = ?
           `
           : `
@@ -2116,7 +2211,7 @@ export class TaskGraph {
               blocked_by = ?, claimed_at = ?, started_at = ?, finished_at = ?,
               files_touched = ?, read_set = ?, write_set = ?,
                 isolation = ?, sets_explicit = ?, lease_id = ?,
-                version = version + 1, policy_epoch = ?, report_id = ?
+                version = version + 1, policy_epoch = ?, policy_digest = ?, report_id = ?
             WHERE id = ? AND version = ?
           `;
       const bindings: (string | number | null)[] = [
@@ -2136,6 +2231,7 @@ export class TaskGraph {
         nextSetsExplicit ? 1 : 0,
         nextLeaseId,
         nextPolicyEpoch,
+        nextPolicyDigest,
         nextReportId,
         id,
       ];
@@ -2200,6 +2296,7 @@ export class TaskGraph {
     setsExplicit: boolean;
     leaseId: string | null;
     policyEpoch: number;
+    policyDigest: string | null;
     reportId: string | null;
   }): void {
     try {
@@ -2209,8 +2306,8 @@ export class TaskGraph {
             id, status, owner, kind, effort, priority, blocked_by, claimed_at,
             started_at, finished_at,
             files_touched, read_set, write_set, isolation, sets_explicit,
-            lease_id, version, policy_epoch, report_id
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+            lease_id, version, policy_epoch, policy_digest, report_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
         `)
         .run(
           input.id,
@@ -2230,6 +2327,7 @@ export class TaskGraph {
           input.setsExplicit ? 1 : 0,
           input.leaseId,
           input.policyEpoch,
+          input.policyDigest,
           input.reportId,
         );
     } catch (error) {

@@ -41,6 +41,7 @@ const task: TaskRecord = {
   lease_id: null,
   version: 0,
   policy_epoch: 0,
+  policy_digest: null,
   report_id: null,
 };
 

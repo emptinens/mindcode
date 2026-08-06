@@ -1228,6 +1228,7 @@ fn validate_rpc_patch(patch: &Value) -> std::result::Result<(), RequestResult> {
         "isolation",
         "lease_id",
         "policy_epoch",
+        "policy_digest",
         "report_id",
         "expectedVersion",
         "expected_version",

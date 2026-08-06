@@ -3,7 +3,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { TaskGraph, openTaskGraph } from "../tasks/graph/taskGraph.js";
-import { graphGetTask, graphUpdateTask } from "./taskGraphAdapter.js";
+import {
+  graphCreateTask,
+  graphGetTask,
+  graphUpdateTask,
+} from "./taskGraphAdapter.js";
 import {
   claimTask,
   createTask,
@@ -87,6 +91,7 @@ describe("SQLite task tool bridge", () => {
         effort: "xhigh",
         priority: 8,
         policy_epoch: 11,
+        policy_digest: "a".repeat(64),
         report_id: "report-1",
         custom: "retained",
       },
@@ -109,12 +114,32 @@ describe("SQLite task tool bridge", () => {
       priority: 2,
       report_id: "report-2",
       policy_epoch: 12,
+      policy_digest: "b".repeat(64),
     });
     expect(updated).toMatchObject({
       effort: "none",
       priority: 2,
       report_id: "report-2",
       policy_epoch: 12,
+    });
+  });
+
+  test("preserves an explicit null policy digest in the local fallback", async () => {
+    await useStore();
+    const id = await graphCreateTask("policy-fallback", {
+      id: "1",
+      subject: "Legacy-compatible policy",
+      description: "",
+      status: "pending",
+      blocks: [],
+      blockedBy: [],
+      policy_epoch: 1,
+      policy_digest: null,
+    });
+
+    expect(await graphGetTask("policy-fallback", id)).toMatchObject({
+      policy_epoch: 1,
+      policy_digest: null,
     });
   });
 

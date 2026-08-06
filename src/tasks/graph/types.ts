@@ -50,6 +50,8 @@ export interface TaskRecord {
   lease_id: string | null;
   version: number;
   policy_epoch: number;
+  /** Lowercase SHA-256 identity for the policy epoch; null for legacy tasks. */
+  policy_digest: string | null;
   report_id: string | null;
 }
 
@@ -71,6 +73,7 @@ export interface CreateTaskInput {
   isolation?: TaskIsolation;
   lease_id?: string | null;
   policy_epoch?: number;
+  policy_digest?: string | null;
   report_id?: string | null;
   idempotency_key?: string;
   idempotencyKey?: string;
@@ -93,6 +96,7 @@ export interface TaskUpdate {
   isolation?: TaskIsolation;
   lease_id?: string | null;
   policy_epoch?: number;
+  policy_digest?: string | null;
   report_id?: string | null;
   version?: number;
   expected_version?: number;
