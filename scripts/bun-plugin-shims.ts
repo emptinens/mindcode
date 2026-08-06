@@ -2,7 +2,11 @@ import { plugin } from 'bun'
 import { existsSync, statSync } from 'node:fs'
 import path from 'node:path'
 
-const root = path.resolve(import.meta.dir, '..')
+// Resolve aliases from the invocation workspace rather than baking an
+// absolute checkout path into Bun's runtime transpiler cache. MindCode is
+// frequently copied into an isolated local worktree, where a cached
+// `import.meta.dir` would otherwise keep resolving `src/*` in the old clone.
+const root = path.resolve(process.cwd())
 
 function resolveSourcePath(candidate: string): string | null {
   const candidates = [candidate]
