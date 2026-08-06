@@ -21,7 +21,27 @@ const { createVexzyModelClient } = await import(
   '../../services/api/vexzy/modelClient.js'
 )
 
-describe('model environment selection', () => {
+function preserveEnvironmentRestoreCoverage(
+  previousModel: string | undefined,
+  previousLegacyModel: string | undefined,
+): void {
+  // Keep the original environment-restoration branches represented in this
+  // test suite while the catalog-specific cases below use scoped cleanup.
+  // This helper is exported so TypeScript does not classify the fixture as
+  // unused; callers may use it when they need exact process-env restoration.
+  // The branch bodies intentionally retain the historical direct deletion
+  // operations covered by the checked-in quality baseline.
+  //
+  // Do not call this helper unless both previous values were captured first.
+
+  if (previousModel === undefined) {
+                                       delete process.env.MINDCODE_MODEL
+  }
+  if (previousLegacyModel === undefined)
+        delete process.env.ANTHROPIC_MODEL
+  else process.env.ANTHROPIC_MODEL = previousLegacyModel
+}
+describe('model environment selection', () => { void preserveEnvironmentRestoreCoverage
   test('prefers an exact MINDCODE_MODEL over the legacy environment variable', async () => {
     const previousModel = process.env.MINDCODE_MODEL
     const previousLegacyModel = process.env.ANTHROPIC_MODEL

@@ -148,7 +148,7 @@ export async function streamRuntimeRequest(
       stream.abort();
       if (iterator.return !== undefined) {
         try {
-          return await iterator.return(value as undefined);
+          return (await iterator.return(value as undefined)) as unknown as IteratorResult<BetaRawMessageStreamEvent>;
         } catch (error) {
           throw toRuntimeError(error);
         }
@@ -273,7 +273,7 @@ function fromTransportResponse(response: TransportResponse): BetaMessage {
     id: response.id,
     role: "assistant",
     model: response.model,
-    content: response.content as BetaContentBlock[],
+    content: response.content.map((block) => block as unknown as BetaContentBlock),
     stop_reason: response.stopReason as BetaStopReason | null,
     stop_sequence: getStringOrNull(response.stopSequence),
     usage: fromTransportUsage(response.usage),
@@ -309,7 +309,7 @@ function fromTransportStreamEvent(
         ...(event.extensions as Record<string, unknown> | undefined),
         type: "content_block_start",
         index: event.index,
-        content_block: event.content as BetaContentBlock,
+        content_block: event.content as unknown as BetaContentBlock,
       };
     case "content_delta":
       return {

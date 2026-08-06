@@ -56,7 +56,7 @@ function promise<T>(
 }
 
 function clientFor(
-  create: VexzySDKClient["messages"]["create"],
+  create: (params: VexzySDKMessageParams) => VexzySDKPromise<unknown>,
 ): VexzySDKClient {
   const models = {
     list: () =>
@@ -146,13 +146,13 @@ describe("VEXZY provider adapter for the neutral transport", () => {
   });
 
   test("maps streamed protocol events to semantic events", async () => {
-    const source: VexzySDKStream = {
+    const source = ({
       controller: new AbortController(),
       response: Promise.resolve(new Response(null, { status: 200 })),
       request_id: Promise.resolve("stream_1"),
       aborted: false,
       abort() {
-        this.controller.abort();
+        (this as VexzySDKStream).controller.abort();
       },
       async *[Symbol.asyncIterator]() {
         yield {
@@ -177,7 +177,7 @@ describe("VEXZY provider adapter for the neutral transport", () => {
           usage: { output_tokens: 2 },
         };
       },
-    };
+    } as unknown as VexzySDKStream);
     const client = clientFor(() => promise(source));
     const transport = new VexzyModelTransportAdapter({ client });
     const stream = transport.stream(request);

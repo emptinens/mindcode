@@ -7,7 +7,7 @@ import type {
 } from "./protocolTypes.js";
 import { APIError } from "./errors.js";
 import type {
-  VexzySDKClient,
+  VexzySDKClient, VexzySDKPromise,
   VexzySDKMessageParams,
   VexzySDKResponse,
   VexzySDKStream,
@@ -73,7 +73,7 @@ function sdkPromise<T>(
 }
 
 function clientFor(
-  create: VexzySDKClient["messages"]["create"],
+  create: (params: VexzySDKMessageParams) => VexzySDKPromise<unknown>,
   countTokens: VexzySDKClient["messages"]["countTokens"] = () =>
     sdkPromise({ input_tokens: 9 }),
 ): VexzyClient {
@@ -141,13 +141,13 @@ describe("modelRuntime ModelTransport compatibility bridge", () => {
   });
 
   test("preserves raw stream lifecycle, stop events, and abort wiring", async () => {
-    const source: VexzySDKStream = {
+    const source = ({
       controller: new AbortController(),
       response: Promise.resolve(new Response(null, { status: 200 })),
       request_id: Promise.resolve("stream_1"),
       aborted: false,
       abort() {
-        this.controller.abort();
+        (this as VexzySDKStream).controller.abort();
       },
       async *[Symbol.asyncIterator]() {
         yield {
@@ -156,7 +156,7 @@ describe("modelRuntime ModelTransport compatibility bridge", () => {
         } as BetaRawMessageStreamEvent;
         yield { type: "message_stop" } as BetaRawMessageStreamEvent;
       },
-    };
+    } as unknown as VexzySDKStream);
     const stream = await streamRuntimeRequest(
       clientFor(() => sdkPromise(source, undefined, "stream_1")),
       params,

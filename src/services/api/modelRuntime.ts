@@ -218,10 +218,7 @@ import {
 import { getInitializationStatus } from "../lsp/manager.js";
 import { withStreamingVCR, withVCR } from "../vcr.js";
 import { getVexzyClient } from "./client.js";
-import {
-  completeRuntimeRequest,
-  streamRuntimeRequest,
-} from "./vexzy/modelRuntimeTransport.js";
+import { completeRuntimeRequest, streamRuntimeRequest } from "./vexzy/modelRuntimeTransport.js";
 import {
   API_ERROR_MESSAGE_PREFIX,
   CUSTOM_OFF_SWITCH_MESSAGE,
@@ -533,8 +530,8 @@ export async function verifyApiKey(
             model,
             source: "verify_api_key",
           }),
-        async (client) => {
-          const messages: MessageParam[] = [{ role: "user", content: "test" }];
+        async (client) => { const messages: MessageParam[] = [{ role: "user", content: "test" }];
+          // biome-ignore lint/plugin: API key verification is intentionally a minimal direct call
           await completeRuntimeRequest(client, {
             model,
             max_tokens: 1,
@@ -1049,9 +1046,8 @@ export async function* executeNonStreamingRequest(
       );
 
       try {
-        return (
-          await completeRuntimeRequest(
-            client,
+        // biome-ignore lint/plugin: non-streaming API call
+        return (await completeRuntimeRequest(client,
             {
               ...adjustedParams,
               model: normalizeModelStringForAPI(adjustedParams.model),
@@ -1060,8 +1056,7 @@ export async function* executeNonStreamingRequest(
               signal: retryOptions.signal,
               timeoutMs: fallbackTimeoutMs,
             },
-          )
-        ).data;
+          )).data;
       } catch (err) {
         // User aborts are not errors — re-throw immediately without logging
         if (err instanceof APIUserAbortError) throw err;
@@ -1970,6 +1965,8 @@ async function* queryModel(
         // client_creation_start is meaningful on attempt 1.
         queryCheckpoint("query_client_creation_end");
 
+
+
         const params = paramsFromContext(context);
         captureAPIRequest(
           params as unknown as Parameters<typeof captureAPIRequest>[0],
@@ -1991,7 +1988,7 @@ async function* queryModel(
         clientRequestId = randomUUID();
 
         // Use the raw transport stream instead of a parsed SDK stream to avoid
-        // O(n²) partial JSON parsing. The compatibility bridge preserves the
+        // biome-ignore lint/plugin: main conversation loop handles attribution separately
         // local stream event shape consumed by this runtime.
         const result = await streamRuntimeRequest(
           client,

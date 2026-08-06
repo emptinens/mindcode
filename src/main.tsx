@@ -203,7 +203,6 @@ function logManagedSettings(): void {
 // Check if running in debug/inspection mode
 function isBeingDebugged() {
   const isBun = isRunningWithBun();
-
   // Check for inspect flags in process arguments (including all variants)
   const hasInspectArg = process.execArgv.some(arg => {
     if (isBun) {
@@ -381,13 +380,11 @@ export function startDeferredPrefetches(): void {
   // The required startup catalog fetch already returned current capabilities.
   // Starting a second refresh here temporarily hides the ready registry and
   // races the first prompt/context lookup, especially in --print mode.
-
   // File change detectors deferred from init() to unblock first render
   void settingsChangeDetector.initialize();
   if (!isBareMode()) {
     void skillChangeDetector.initialize();
   }
-
 }
 function loadSettingsFromFlag(settingsFile: string): void {
   try {
@@ -401,7 +398,6 @@ function loadSettingsFromFlag(settingsFile: string): void {
         process.stderr.write(chalk.red('Error: Invalid JSON provided to --settings\n'));
         process.exit(1);
       }
-
       // Create a temporary file and write the JSON to it.
       // Use a content-hash-based path instead of random UUID to avoid
       // busting the Anthropic API prompt cache. The settings path ends up
@@ -522,6 +518,9 @@ export async function main() {
     process.exit(0);
   });
   profileCheckpoint('main_warning_handler_initialized');
+
+
+
 
   // Handle deep link URIs early — this is invoked by the OS protocol handler
   // and should bail out before full init since it only needs to parse the URI
@@ -1380,22 +1379,19 @@ async function run(): Promise<CommanderCommand> {
         process.exit(1);
       }
     }
-
     // Validate --no-session-persistence is only used with print mode
     if (options.sessionPersistence === false && !isNonInteractiveSession) {
+
       writeToStderr(`Error: --no-session-persistence can only be used with --print mode.`);
-      process.exit(1);
-    }
+      process.exit(1); }
     const effectivePrompt = prompt || '';
     let inputPrompt = await getInputPrompt(effectivePrompt, (inputFormat ?? 'text') as 'text' | 'stream-json');
     profileCheckpoint('action_after_input_prompt');
-
     // Activate proactive mode BEFORE getTools() so SleepTool.isEnabled()
     // (which returns isProactiveActive()) passes and Sleep is included.
     // The later REPL-path maybeActivateProactive() calls are idempotent.
     maybeActivateProactive(options);
     let tools = getTools(toolPermissionContext);
-
     // Apply coordinator mode tool filtering for headless path
     // (mirrors useMergedTools.ts filtering for REPL/interactive path)
     if (feature('COORDINATOR_MODE') && isEnvTruthy(process.env.MINDCODE_COORDINATOR_MODE)) {
@@ -1428,7 +1424,6 @@ async function run(): Promise<CommanderCommand> {
         });
       }
     }
-
     // IMPORTANT: setup() must be called before any other code that depends on the cwd or worktree setup
     profileCheckpoint('action_before_setup');
     logForDebugging('[STARTUP] Running setup()...');
@@ -1466,7 +1461,6 @@ async function run(): Promise<CommanderCommand> {
     await setupPromise;
     logForDebugging(`[STARTUP] setup() completed in ${Date.now() - setupStart}ms`);
     profileCheckpoint('action_after_setup');
-
     // Replay user messages into stream-json only when the socket was
     // explicitly requested. The auto-generated socket is passive — it
     // lets tools inject if they want to, but turning it on by default
@@ -1495,7 +1489,6 @@ async function run(): Promise<CommanderCommand> {
       // getSettings_DEPRECATED at managedEnv.ts:86 which merges all enabled
       // sources including projectSettings/localSettings.
       applyConfigEnvironmentVariables();
-
       // Spawn git status/log/branch now so the subprocess execution overlaps
       // with the getCommands await below and startDeferredPrefetches. After
       // setup() so cwd is final (setup.ts:254 may process.chdir(worktreePath)
@@ -1514,7 +1507,6 @@ async function run(): Promise<CommanderCommand> {
       // startDeferredPrefetches becomes a memoize cache-hit.
       void getUserContext();
     }
-
     // Apply --name: cache-only so no orphan file is created before the
     // session ID is finalized by --continue/--resume. materializeSessionFile
     // persists it on the first user message; REPL's useTerminalTitle reads it
@@ -1523,12 +1515,10 @@ async function run(): Promise<CommanderCommand> {
     if (sessionNameArg) {
       cacheSessionTitle(sessionNameArg);
     }
-
     // Leader defaults are catalog-gated. Wait for the VEXZY registry before
     // any caller can resolve the default, so startup never substitutes the
     // fixed Worker model when the catalog is still loading or unavailable.
     await fetchBootstrapData();
-
     // Special case the default model with the null keyword
     const requestedModel = options.model ?? process.env.MINDCODE_MODEL;
     const userSpecifiedModel = requestedModel === 'default'
@@ -1541,7 +1531,6 @@ async function run(): Promise<CommanderCommand> {
       : fallbackModel === undefined
         ? undefined
         : leaderModelResolver.resolveSelectedModel(fallbackModel);
-
     // Reuse preSetupCwd unless setup() chdir'd (worktreeEnabled). Saves a
     // getCwd() syscall in the common path.
     const currentCwd = worktreeEnabled ? getCwd() : preSetupCwd;
@@ -1552,7 +1541,6 @@ async function run(): Promise<CommanderCommand> {
     const [commands, agentDefinitionsResult] = await Promise.all([commandsPromise ?? getCommands(currentCwd), agentDefsPromise ?? getAgentDefinitionsWithOverrides(currentCwd)]);
     logForDebugging(`[STARTUP] Commands and agents loaded in ${Date.now() - commandsStart}ms`);
     profileCheckpoint('action_commands_loaded');
-
     // Parse CLI agents if provided via --agents flag
     let cliAgents: typeof agentDefinitionsResult.activeAgents = [];
     if (agentsJson) {
@@ -1565,7 +1553,6 @@ async function run(): Promise<CommanderCommand> {
         logError(error);
       }
     }
-
     // Merge CLI agents with existing ones
     const allAgents = [...agentDefinitionsResult.allAgents, ...cliAgents];
     const agentDefinitions = {
@@ -1573,7 +1560,6 @@ async function run(): Promise<CommanderCommand> {
       allAgents,
       activeAgents: getActiveAgentsFromList(allAgents)
     };
-
     // Look up main thread agent from CLI flag or settings
     const agentSetting = agentCli ?? getInitialSettings().agent;
     let mainThreadAgentDefinition: (typeof agentDefinitions.activeAgents)[number] | undefined;
@@ -1812,6 +1798,12 @@ async function run(): Promise<CommanderCommand> {
         });
       }
     }
+
+
+
+
+
+
 
     // VEXZY catalog bootstrap is awaited above. Subscription, passes, and
     // provider-specific fast-mode prefetches are intentionally not started.

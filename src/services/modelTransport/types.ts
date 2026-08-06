@@ -178,7 +178,7 @@ export type ModelTransportErrorCode =
 export class ModelTransportError extends Error {
   readonly code: ModelTransportErrorCode;
   readonly status?: number;
-  readonly cause?: unknown;
+  override readonly cause?: unknown;
 
   constructor(code: ModelTransportErrorCode, status?: number, cause?: unknown) {
     super(`Model transport request ${code.replace("_", " ")}`);

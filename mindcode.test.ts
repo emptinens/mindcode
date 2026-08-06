@@ -302,18 +302,17 @@ describe('mindcode.sh', () => {
     expect(log.match(/\[--effort(?:=high)?\]/g)).toHaveLength(1)
   })
 
-  test('uses the curated fallback when the bounded registry request fails', async () => {
+  test('fails closed when the VEXZY model registry is unavailable', async () => {
     const f = await fixture()
     await installCurl(f, '', 28)
-    const result = await runInteractive(f, ['--menu'], '2\n6\n')
-    const log = await Bun.file(f.log).text()
+    const result = await runInteractive(f, ['--menu'], '')
 
-    expect(result.exitCode).toBe(0)
-    expect(result.stdout).toContain('gpt-5.6-luna')
-    expect(result.stdout).toContain('gpt-5.6-terra')
-    expect(result.stdout).toContain('gpt-5.6-sol')
-    expect(result.stdout).toContain('1) none\n2) low\n3) medium\n4) high\n5) xhigh\n6) max')
-    expect(log).toContain('args=[--model][gpt-5.6-terra][--effort][max]')
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain(
+      'VEXZY model registry unavailable; cannot select a Leader model.',
+    )
+    expect(await Bun.file(f.log).exists()).toBe(false)
+    expect(await Bun.file(f.curlLog).text()).toBe('auth=yes\n')
     expect(`${result.stdout}${result.stderr}`).not.toContain('forge-test-key')
   })
 })
