@@ -63,13 +63,9 @@ export class LeaderModelResolver {
       )
     }
 
-    const model = catalog.registry.models.find(
-      entry => entry.available && entry.id !== VEXZY_FIXED_WORKER_MODEL,
-    )
+    const model = catalog.registry.models.find(entry => entry.available)
     if (model === undefined) {
-      throw new LeaderModelUnavailableError(
-        'catalog has no available non-Worker model',
-      )
+      throw new LeaderModelUnavailableError('catalog has no available model')
     }
 
     return model.id

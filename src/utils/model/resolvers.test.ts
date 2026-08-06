@@ -67,10 +67,10 @@ afterEach(() => {
 })
 
 describe('public model and effort resolver boundaries', () => {
-  test('LeaderModelResolver selects an available catalog model, never Worker Luna', async () => {
+  test('LeaderModelResolver selects the first available exact catalog model', async () => {
     await loadCatalog(luna(), terra())
     expect(new LeaderModelResolver().resolveDefaultModel()).toBe(
-      'gpt-5.6-terra',
+      'gpt-5.6-luna',
     )
   })
 
@@ -81,10 +81,15 @@ describe('public model and effort resolver boundaries', () => {
     )
   })
 
-  test('LeaderModelResolver fails closed when Luna is the only available model', async () => {
+  test('LeaderModelResolver allows Luna when it is the only available model', async () => {
     await loadCatalog(luna())
+    expect(new LeaderModelResolver().resolveDefaultModel()).toBe('gpt-5.6-luna')
+  })
+
+  test('LeaderModelResolver fails closed when the catalog has no available model', async () => {
+    await loadCatalog(luna({ available: false }))
     expect(() => new LeaderModelResolver().resolveDefaultModel()).toThrow(
-      /no available non-Worker model/,
+      /catalog has no available model/,
     )
   })
 
