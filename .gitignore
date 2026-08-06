@@ -1,5 +1,6 @@
 .DS_Store
 node_modules/
+.mindcode-cache/
 target/
 crates/*/Cargo.lock
 !crates/mindcode-tui/Cargo.lock
