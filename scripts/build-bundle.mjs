@@ -1,17 +1,16 @@
 #!/usr/bin/env node
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync, statSync, readFileSync, writeFileSync as writeFileBytes } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { execFileSync } from 'node:child_process'
 import esbuild from 'esbuild'
 import { stripBareCommonJsEnvironmentProbes } from './bun-esm-compat.mjs'
+import { packageNativeDaemon, selectBunTargets } from './native-daemon.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const outdir = path.join(root, 'dist')
-const minify = process.argv.includes('--minify')
-const watch = process.argv.includes('--watch')
-
 const srcAliasPlugin = {
   name: 'src-alias',
   setup(build) {
@@ -195,11 +194,35 @@ module.exports = new Proxy({}, {
   },
 }
 
-await mkdir(outdir, { recursive: true })
+export function canonicalizeWreqLoader(source, fileToEmbed = null) {
+  let canonical = source
+    .replace(/\bnativeRequire\("\.\.\/rust\//g, 'require("../rust/')
+    .replace(/\brequire\("\.\.\/rust\//g, 'nativeRequire("../rust/')
+  if (fileToEmbed) {
+    canonical = canonical.replace(
+      `nativeRequire("../rust/${fileToEmbed}")`,
+      `require("../rust/${fileToEmbed}")`,
+    )
+  }
+  return canonical
+}
+
+export async function withCanonicalWreqLoader({ loaderPath, fileToEmbed = null, run }) {
+  if (!existsSync(loaderPath)) return run()
+  const original = await readFile(loaderPath, 'utf8')
+  try {
+    await writeFile(loaderPath, canonicalizeWreqLoader(original, fileToEmbed))
+    return await run()
+  } finally {
+    await writeFile(loaderPath, original)
+  }
+}
+
+export async function build({ minify = false, watch = false } = {}) {
+  await mkdir(outdir, { recursive: true })
 
 // Ensure dist is treated as ESM by bun/node
-import { writeFile as writeFileSync } from 'node:fs/promises'
-await writeFileSync(
+await writeFile(
   path.join(outdir, 'package.json'),
   JSON.stringify({ name: 'mindcode', version: '0.1.0', type: 'module' }, null, 2) + '\n',
 )
@@ -260,7 +283,6 @@ if (watch) {
   await esbuild.build(options)
 
   // Strip absolute paths from the output to avoid leaking personal info
-  const { readFile, writeFile } = await import('node:fs/promises')
   const outfile = path.join(outdir, 'mindcode.js')
   let code = await readFile(outfile, 'utf8')
 
@@ -296,8 +318,7 @@ if (watch) {
 
   // Compile to executables using bun --compile (cross-compilation)
   // Copy to a neutral path first so bun doesn't embed the user's home dir as __filename
-  const { execSync } = await import('node:child_process')
-  const tmpDir = path.join(import.meta.dirname, '.tmp', String(process.pid))
+  const tmpDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '.tmp', String(process.pid))
   await mkdir(tmpDir, { recursive: true })
   const tmpFile = path.join(tmpDir, 'mindcode.js')
   await writeFile(tmpFile, code)
@@ -322,7 +343,7 @@ if (watch) {
     // leaving it external means ssh2 falls back to its pure-JS crypto in the exe.
     '--external', 'cpu-features',
     '--external', 'fsevents',
-  ].join(' ')
+  ]
 
   // wreq-js loads its native .node addon through an aliased `nativeRequire`
   // (const nativeRequire = require). Bun's --compile embedder only traces
@@ -336,7 +357,6 @@ if (watch) {
   // the other branches aliased (so bun skips them). The map ties each bun
   // --compile target to the addon it should embed.
   const wreqLoader = path.join(root, 'node_modules/wreq-js/dist/wreq-js.cjs')
-  const { readFile: rf, writeFile: wf } = await import('node:fs/promises')
   const targetNodeFile = {
     'bun-windows-x64': 'wreq-js.win32-x64-msvc.node',
     'bun-linux-x64': 'wreq-js.linux-x64-gnu.node',
@@ -344,62 +364,37 @@ if (watch) {
     'bun-darwin-x64': 'wreq-js.darwin-x64.node',
     'bun-darwin-arm64': 'wreq-js.darwin-arm64.node',
   }
-  // Rewrite the loader so only `fileToEmbed` is a literal require(); every other
-  // ../rust/*.node stays on the nativeRequire alias. Deterministic regardless of
-  // the loader's current state (normalizes all addon requires to the alias first).
-  async function setEmbeddedAddon(fileToEmbed) {
-    if (!existsSync(wreqLoader)) return
-    let src = await rf(wreqLoader, 'utf8')
-    // Collapse any de-aliased addon require back to alias, then promote all to
-    // alias — net effect: every ../rust/*.node require uses nativeRequire.
-    src = src.replace(/\bnativeRequire\("\.\.\/rust\//g, 'require("../rust/')
-    src = src.replace(/\brequire\("\.\.\/rust\//g, 'nativeRequire("../rust/')
-    // De-alias only the target's addon so bun embeds exactly that one.
-    src = src.replace(
-      `nativeRequire("../rust/${fileToEmbed}")`,
-      `require("../rust/${fileToEmbed}")`,
-    )
-    await wf(wreqLoader, src)
-  }
 
-  const allTargets = [
-    { target: 'bun-windows-x64', outfile: 'mindcode.exe' },
-    { target: 'bun-linux-x64', outfile: 'mindcode-linux-x64' },
-    { target: 'bun-linux-arm64', outfile: 'mindcode-linux-arm64' },
-    { target: 'bun-darwin-x64', outfile: 'mindcode-darwin-x64' },
-    { target: 'bun-darwin-arm64', outfile: 'mindcode-darwin-arm64' },
-  ]
-  const requestedTargets = process.env.MINDCODE_BUILD_TARGETS
-    ?.split(',')
-    .map(value => value.trim())
-    .filter(Boolean)
-  const targets = requestedTargets?.length
-    ? allTargets.filter(({ target }) => requestedTargets.includes(target))
-    : allTargets
-  if (targets.length === 0) {
-    throw new Error(
-      `No build targets matched MINDCODE_BUILD_TARGETS=${process.env.MINDCODE_BUILD_TARGETS}`,
-    )
-  }
-  for (const { target, outfile: out } of targets) {
-    const addon = targetNodeFile[target]
-    if (addon) {
-      await setEmbeddedAddon(addon)
-      console.log(`Embedding wreq-js addon ${addon} for ${target}`)
+  const targets = selectBunTargets()
+  try {
+    for (const target of targets) {
+      const addon = targetNodeFile[target.bunTarget] ?? null
+      await withCanonicalWreqLoader({
+        loaderPath: wreqLoader,
+        fileToEmbed: addon,
+        run: async () => {
+          if (addon) {
+            console.log(`Embedding wreq-js addon ${addon} for ${target.bunTarget}`)
+          }
+          const dest = path.join(outdir, target.mindcodeName)
+          execFileSync('bun', ['build', tmpFile, '--compile', `--target=${target.bunTarget}`, '--outfile', dest, ...externals], { stdio: 'inherit' })
+          scrubBuildPath(dest)
+          await packageNativeDaemon({ root, outdir, target, mindcodePath: dest })
+          console.log(`Compiled ${target.mindcodeName}`)
+        },
+      })
     }
-    const dest = path.join(outdir, out)
-    execSync(`bun build ${tmpFile} --compile --target=${target} --outfile ${dest} ${externals}`, { stdio: 'inherit' })
-    scrubBuildPath(dest)
-    console.log(`Compiled ${out}`)
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true })
   }
-  // Leave the loader fully aliased (its shipped form) so dev runs and reinstalls
-  // see the original; the per-target rewrite above is self-correcting anyway.
-  if (existsSync(wreqLoader)) {
-    let src = await rf(wreqLoader, 'utf8')
-    src = src.replace(/\bnativeRequire\("\.\.\/rust\//g, 'require("../rust/')
-    src = src.replace(/\brequire\("\.\.\/rust\//g, 'nativeRequire("../rust/')
-    await wf(wreqLoader, src)
-  }
-  const { rm } = await import('node:fs/promises')
-  await rm(tmpDir, { recursive: true, force: true })
+}
+
+}
+
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await build({
+    minify: process.argv.includes('--minify'),
+    watch: process.argv.includes('--watch'),
+  })
 }

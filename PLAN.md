@@ -428,7 +428,12 @@ src/commands.ts
    timeout, concurrent cancellation, duplicate-ID protection, socket/runtime
    permissions `0600/0700`, generation-safe reconnect и sanitized spawn env.
    Проверки: `17` Rust tests, `17` TS daemon tests и реальный Rust↔TS interop.
-3. `TODO`: Rust TaskGraph/session SQLite, core tools/index/Git/process/MCP.
-4. `TODO`: model-native VEXZY proxy и immutable prompt snapshots.
-5. `TODO`: streaming DAG, credits-first tuning и тёплый worker pool.
-6. `TODO`: Ratatui input/status/tasks migration и release performance gates.
+3. `DONE`: lazy daemon manager, post-render warm-up, foreground/background
+   liveness, graceful client cleanup и TS fallback. Native sidecar packaging
+   выпускает совпадающие macOS/Linux x64+arm64 bundles, Windows остаётся на TS;
+   CI проверяет Rust quality, interop и target-aware layout. Проверки: `28`
+   daemon/manager/path tests, `10` packaging tests и native handshake smoke.
+4. `TODO`: Rust TaskGraph/session SQLite, core tools/index/Git/process/MCP.
+5. `TODO`: model-native VEXZY proxy и immutable prompt snapshots.
+6. `TODO`: streaming DAG, credits-first tuning и тёплый worker pool.
+7. `TODO`: Ratatui input/status/tasks migration и release performance gates.
