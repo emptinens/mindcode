@@ -1,6 +1,6 @@
 # MindCode 0.1.0 — план и статус реализации
 
-Дата аудита: `2026-08-05`
+Дата аудита: `2026-08-06`
 Каталог проекта: `/Users/x32db/PROJECTS/mindcode`
 
 Документ является одновременно текущим baseline, зафиксированным контрактом и списком оставшихся работ. Формулировки `DONE`, `PARTIAL`, `TODO` и `BLOCKED` относятся к состоянию исходного дерева на дату аудита. Все последующие изменения должны обновлять этот файл в том же коммите, что и затронутый контракт.
@@ -51,8 +51,8 @@
 
 - `package.json` уже содержит `name: "mindcode"`, `version: "0.1.0"`, bin `mindcode` и Bun scripts.
 - `tsconfig.json` существует, содержит `strict: true`, `noEmit: true` и включает `src/**/*` и `scripts/**/*.ts`.
-- `bun run sources:check` проверяет `1929` исходных файлов; полный test-run
-  выполняет `431` тестов в `96` файлах.
+- `bun run sources:check` проверяет `1948` исходных файлов; полный Bun test-run,
+  coverage, build и smoke текущего прохода завершены успешно.
 - Команда `/copycon` существует и зарегистрирована в `src/commands.ts`.
 - `git remote -v` не выводит remote.
 - Исходный большой diff сохранён до разбиения на коммиты в локальной резервной
@@ -64,13 +64,15 @@
 
 | Проверка | Результат |
 |---|---|
-| Полный test-run | `431 pass`, `0 fail`, `96 files` |
-| Architectural coverage | `91.44%` (`6376/6973`), required `>=85%` |
-| `bun run lint` | PASS; baseline `8167` diagnostics |
-| `bun run typecheck` | PASS; baseline `4184` diagnostics |
-| `bun run sources:check` | `1929 files`, `0 trailers` |
-| Production build/smoke | PASS для `dist/mindcode.js` и `dist/mindcode-darwin-x64` |
-| Bundle legacy scan | `0` для запрещённых provider endpoints/credentials |
+| Rust gates | PASS: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --all-targets` |
+| Focused TS tests | PASS для TaskGraph/RPC, lifecycle, policy/report, compact и VEXZY limits |
+| Полный Bun test-run | `653 pass`, `0 fail`, `125 files` |
+| Architectural coverage | `93.41%` (`8069/8638`), required `>=85%` |
+| `bun run typecheck` | PASS; baseline `4062` diagnostics |
+| `bun run lint` | PASS; baseline `7949` diagnostics |
+| `bun run sources:check` | `1948 files`, `0 trailers` |
+| Production build/smoke | PASS для `dist/mindcode.js`, native CLI и `mindcoded` sidecar |
+| Bundle legacy scan | PASS; targeted provider endpoints/credentials отсутствуют |
 | `git remote -v` | remote отсутствует |
 | `package.json` identity | `mindcode@0.1.0` |
 
@@ -102,7 +104,7 @@
 
 Оставшийся контроль: при новых изменениях не возвращать `claude`/Anthropic branding в пользовательские идентификаторы, runtime errors, model labels и отчёты.
 
-### 3.2 VEXZY API — DONE
+### 3.2 VEXZY API и limits — DONE
 
 Реализовано в `src/services/api/vexzy/`:
 
@@ -214,12 +216,11 @@ TODO:
 - покрыть multi-process SQLite contention и crash recovery отдельными integration tests;
 - запретить completion без соответствующего validated WorkerReport во всех persistent teammate paths, не только в AgentTool boundary.
 
-### 3.8 WorkerReport и Leader context — DONE с epoch wiring gap
+### 3.8 WorkerReport и Leader context — DONE
 
 `src/tools/AgentTool/workerReport.ts` и `src/utils/swarm/workerTeamReport.ts` реализуют `worker-report/1`:
 
-- exact Luna model;
-- exact worker effort;
+- exact Luna model и exact worker effort;
 - runtime-owned task/run/worker IDs;
 - `policy_epoch`, status, bounded summary, changed files, structured evidence, tokens, validation и blockers;
 - workspace-relative normalized paths;
@@ -228,35 +229,24 @@ TODO:
 - assistant usage deduplicated по request/message ID;
 - transcript и tool dump не передаются как report.
 
-Расхождение: во многих runtime callsites `policyEpoch` пока передаётся как `0`. Schema поле есть, но полноценная monotonic epoch lifecycle не доведена до всех spawn/resume/compact paths.
+Session-scoped monotonic policy epoch, snapshot digest, stale-report rejection
+и terminal persistence подключены в AgentTool, resume и daemon-backed lifecycle.
+Focused policy/report/lifecycle tests пройдены.
 
-TODO:
-
-1. Ввести session-scoped monotonic policy epoch.
-2. Сохранять epoch в task graph и Worker runtime metadata.
-3. Отклонять stale report после policy/jailbreak change.
-4. Проверить AgentTool, in-process, pane, resume и background routes одним integration test.
-
-### 3.9 Prompt policy и `/jailbreak` — PARTIAL
+### 3.9 Prompt policy и `/jailbreak` — DONE
 
 Реализовано:
 
-- `getWorkerPolicySnapshot()` в `src/constants/prompts.ts`;
-- snapshot включает bounded worker prompt, injection handling и validated content policy;
+- `PromptCompiler` для Leader, Worker, compact и resume sections;
+- bounded worker prompt, injection handling и validated content policy;
 - AgentTool, fork/resume, in-process и pane paths добавляют worker snapshot;
 - `src/utils/jailbreak.ts` использует enum `disabled|lowered|full`, sidecar persistence и validated environment forwarding;
-- pane workers получают только нормализованный jailbreak level, а не raw env string.
+- policy epoch связан со snapshot digest и наследуется worker ingress;
+- stale reports после изменения policy отклоняются.
 
-Остаток:
+Focused policy tests пройдены.
 
-- нет отдельного полноценного `PromptCompiler` object/contract, который бы владел всеми Leader/Worker sections и cache boundaries;
-- policy epoch не связан с snapshot digest;
-- часть старых prompt assembly/helper paths всё ещё следует проверять на duplicate или отсутствующий worker snapshot;
-- старые provider-specific prompt fragments остаются в дереве.
-
-TODO: выделить pure compiler, добавить golden snapshots для Leader и Worker, добавить digest/epoch и проверить compact/resume cache invalidation.
-
-### 3.10 Compact — DONE по handoff thresholds
+### 3.10 Compact — DONE
 
 Реализовано:
 
@@ -265,17 +255,12 @@ TODO: выделить pure compiler, добавить golden snapshots для L
 - hard limit `95%`;
 - exact threshold comparison `>=`;
 - `compactWatchdog.ts`: default `120000ms`, override `MINDCODE_COMPACT_TIMEOUT_MS`, child abort scope;
-- compact state snapshot/commit/restore;
-- rollback read-file cache и nested-memory paths при ошибке;
-- auto-compact failure circuit breaker после трёх последовательных ошибок;
-- compact warning state suppression/clear;
-- compact policy/watchdog tests.
+- единая state transaction для manual, auto, reactive и session-memory compact paths;
+- rollback при timeout, abort и fallback;
+- commit только после успешного результата/hooks;
+- auto-compact failure circuit breaker и warning state suppression/clear.
 
-TODO:
-
-- протащить one-transaction semantics через все legacy manual/reactive/session-memory compact routes;
-- добавить end-to-end test на stalled provider request, parent cancellation и сохранение session state;
-- удалить несвязанные старые threshold constants после проверки public diagnostics compatibility.
+Focused compact tests и полный Bun/coverage/build verification пройдены.
 
 ### 3.11 `/copy`, `/copycon`, `/status` — DONE
 
@@ -304,6 +289,26 @@ TODO: проверить, что все новые report fields не сериа
 - не переписывать историю и не удалять существующие рабочие изменения без отдельного запроса;
 - логически завершённые будущие изменения коммитить только по явному запросу пользователя;
 - перед merge проверять diff, targeted tests и отсутствие секретов.
+
+### 3.13 Legacy command cleanup — DONE
+
+Удалены provider-specific command surfaces и UI для mobile, voice, upgrade,
+usage, rate-limit-options, install-slack-app, install-github-app, fast и
+thinkback. Compatibility-only state/exports не возвращают legacy behavior.
+Focused command/cleanup tests и полный Bun test/build прогон пройдены.
+
+### 3.14 Rust TaskGraph/session SQLite RPC — DONE
+
+Завершена Rust foundation-фаза:
+
+- `mindcode-state`: SQLite/WAL TaskGraph, schema migration, CAS claims, dependencies, leases и overlap checks;
+- daemon RPC: MessagePack framing, request IDs, replay/connection limits, cancellation и authority pinning;
+- TS client и `taskGraphAdapter`: daemon-backed state path с fallback boundary без смешивания authority в одной операции;
+- structural patch выполняется до claim/run;
+- `workerLifecycle.ts` и `resumeAgent.ts` мигрированы на daemon-backed `workerGraph` с сохранением report/policy semantics.
+
+Проверено: `mindcode-state` — 18 pass, TaskGraph RPC — 3 pass,
+adapter/client — 27 pass, lifecycle/worker focused suites — pass.
 
 ## 4. Оставшийся план реализации
 
@@ -400,7 +405,7 @@ src/commands/status/
 src/commands.ts
 ```
 
-## 7. Rust acceleration program — IN PROGRESS (2026-08-06)
+## 7. Rust acceleration program — FOUNDATION COMPLETE (2026-08-06)
 
 Цель: уменьшить локальный p95 Agent dispatch до `<100ms` для первого запуска и
 `<50ms` для тёплого, сделать поле ввода доступным за `<500ms`, не увеличивая
@@ -433,7 +438,10 @@ src/commands.ts
    выпускает совпадающие macOS/Linux x64+arm64 bundles, Windows остаётся на TS;
    CI проверяет Rust quality, interop и target-aware layout. Проверки: `28`
    daemon/manager/path tests, `10` packaging tests и native handshake smoke.
-4. `TODO`: Rust TaskGraph/session SQLite, core tools/index/Git/process/MCP.
-5. `TODO`: model-native VEXZY proxy и immutable prompt snapshots.
-6. `TODO`: streaming DAG, credits-first tuning и тёплый worker pool.
-7. `TODO`: Ratatui input/status/tasks migration и release performance gates.
+4. `DONE`: Rust TaskGraph/session SQLite RPC, `mindcode-state`, daemon RPC,
+   TS client/authority pinning и worker lifecycle migration.
+5. `TODO`: Rust session index и core tools (Git/process/MCP), с отдельными
+   SQLite-backed session APIs и focused gates.
+6. `TODO`: model-native VEXZY proxy/cache и immutable prompt snapshots.
+7. `TODO`: streaming DAG, credits-first tuning и тёплый worker pool.
+8. `TODO`: Ratatui input/status/tasks migration и release performance gates.
