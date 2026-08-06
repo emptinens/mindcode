@@ -1,13 +1,11 @@
 import { getMainLoopModelOverride } from '../../bootstrap/state.js'
-import {
-  getVexzyModelCatalogState,
-} from '../../services/api/vexzy/modelCatalog.js'
-import { VEXZY_FIXED_WORKER_MODEL } from '../../services/api/vexzy/modelRegistry.js'
+import { getVexzyModelCatalogState } from '../../services/api/vexzy/modelCatalog.js'
+import { has1mContext, modelSupports1M } from '../context.js'
 import type { PermissionMode } from '../permissions/PermissionMode.js'
 import { getSettings_DEPRECATED } from '../settings/settings.js'
-import { isModelAllowed } from './modelAllowlist.js'
 import type { ModelAlias } from './aliases.js'
-import { has1mContext, modelSupports1M } from '../context.js'
+import { isModelAllowed } from './modelAllowlist.js'
+import { leaderModelResolver } from './resolvers.js'
 
 export type ModelShortName = string
 export type ModelName = string
@@ -23,8 +21,7 @@ function getReadyModels() {
 
 /** Select the first available exact ID from the provider catalog. */
 function getCatalogDefaultModel(): ModelName {
-  const models = getReadyModels().filter(model => model.available)
-  return models[0]?.id ?? VEXZY_FIXED_WORKER_MODEL
+  return leaderModelResolver.resolveDefaultModel()
 }
 
 export function getSmallFastModel(): ModelName {
