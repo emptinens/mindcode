@@ -129,6 +129,61 @@ describe("Vexzy native Messages client", () => {
     expect(bodies.map((body) => body.stream)).toEqual([false, false]);
   });
 
+  test("dispatches an immutable prompt snapshot without transport credentials", async () => {
+    let body: Record<string, unknown> | undefined;
+    let calls = 0;
+    const client = createVexzyMessagesClient({
+      apiKey: "forge-test-key",
+      fetch: async (_input, init) => {
+        calls += 1;
+        body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return response(message());
+      },
+    });
+    const content = [
+      {
+        type: "tool_result",
+        tool_use_id: "tool-1",
+        content: [{ type: "text", text: "original" }],
+        input: { api_key: "prompt-content-only" },
+      },
+    ];
+    const request = {
+      ...params,
+      messages: [{ role: "user" as const, content }],
+    };
+
+    const pending = client.messages.create(request);
+    const toolResult = content[0];
+    const textBlock = toolResult?.content[0];
+    if (!toolResult || !textBlock) throw new Error("expected tool result fixture");
+    textBlock.text = "mutated-after-dispatch";
+    toolResult.input.api_key = "mutated-after-dispatch";
+    await pending;
+
+    expect(body?.messages).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "tool-1",
+            content: [{ type: "text", text: "original" }],
+            input: { api_key: "prompt-content-only" },
+          },
+        ],
+      },
+    ]);
+
+    await expect(
+      client.messages.create({
+        ...params,
+        headers: { Authorization: "Bearer must-not-enter-request-data" },
+      }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+    expect(calls).toBe(1);
+  });
+
   test("supports create(...).withResponse() with response headers and request-id", async () => {
     const client = createVexzyMessagesClient({
       apiKey: "forge-test-key",

@@ -386,6 +386,7 @@ export class VexzySDKAdapter implements VexzySDKClient {
         ? this.modelClient
         : createVexzyModelClient({
             config: this.config,
+            catalogCache: false,
             timeoutMs: this.timeoutMs,
             now: this.now,
             sleep: this.sleep,

@@ -25,6 +25,7 @@ import {
   getVexzyOutputTokenPolicy,
   normalizeVexzyMaxOutputTokens,
 } from "../../../utils/context.js";
+import { createVexzyRequestSnapshot } from "./requestSnapshot.js";
 
 export const DEFAULT_VEXZY_MESSAGES_TIMEOUT_MS = 600_000;
 
@@ -386,7 +387,11 @@ export class VexzyMessagesClient {
         policy.maxOutputTokens,
         true,
       ).value;
-      body = JSON.stringify({ ...params, max_tokens });
+      const snapshot = createVexzyRequestSnapshot({
+        ...params,
+        max_tokens,
+      });
+      body = JSON.stringify(snapshot.params);
     } catch {
       throw new VexzyMessagesClientError("invalid_request");
     }

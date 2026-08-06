@@ -51,7 +51,7 @@
 
 - `package.json` уже содержит `name: "mindcode"`, `version: "0.1.0"`, bin `mindcode` и Bun scripts.
 - `tsconfig.json` существует, содержит `strict: true`, `noEmit: true` и включает `src/**/*` и `scripts/**/*.ts`.
-- `bun run sources:check` проверяет `1979` исходных файлов; полный Bun test-run,
+- `bun run sources:check` проверяет `1987` исходных файлов; полный Bun test-run,
   coverage, build и smoke текущего прохода завершены успешно.
 - Команда `/copycon` существует и зарегистрирована в `src/commands.ts`.
 - `git remote -v` не выводит remote.
@@ -64,12 +64,12 @@
 
 | Проверка | Результат |
 |---|---|
-| Rust gates | PASS: `76` tests; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --all-targets` |
+| Rust gates | PASS: `83` tests; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --all-targets` |
 | Focused TS tests | PASS для TaskGraph/RPC, lifecycle, policy/report, compact и VEXZY limits |
-| Полный Bun test-run | `715 pass`, `3 skip`, `0 fail`, `138 files` |
+| Полный Bun test-run | `737 pass`, `4 skip`, `0 fail`, `141 files` |
 | Architectural coverage | `93.41%` (`8069/8638`), required `>=85%` |
 | `bun run typecheck` | PASS; baseline `4062` diagnostics |
-| `bun run lint` | PASS; baseline `7949` diagnostics |
+| `bun run lint` | PASS; baseline `7948` diagnostics |
 | `bun run sources:check` | `1957 files`, `0 trailers` |
 | Production build/smoke | PASS для `dist/mindcode.js`, native CLI и `mindcoded` sidecar |
 | Bundle legacy scan | PASS; targeted provider endpoints/credentials отсутствуют |
@@ -316,8 +316,24 @@ Focused command/cleanup tests и полный Bun test/build прогон про
   enrich, stale-path removal, secret redaction и filesystem fallback;
 - Rust↔TypeScript interop проверяет полный SessionIndex lifecycle.
 
-Проверено: Rust — `76 pass`, Bun — `715 pass`, `3 skip`, focused native
-core-tools/MCP interop — `3 pass`, полный build/smoke — pass.
+Проверено: Rust — `83 pass`, Bun — `737 pass`, `4 skip`, focused native
+catalog/core-tools/MCP interop — `4 pass`, полный build/smoke — pass.
+
+### 3.15 Model-native VEXZY broker и immutable request snapshots — DONE
+
+- `mindcoded` хранит только keyless normalized model catalog в bounded
+  immutable memory snapshot; RPC `vexzy.catalog.get|put|status` не принимает
+  credential, provider raw payload, prompts или model responses;
+- TypeScript `runtime/modelBroker` валидирует exact wire schema, canonical
+  SHA-256, monotonic publication, deep-freeze и availability-only fallback;
+- `modelClient.ts` немедленно использует daemon snapshot и параллельно
+  обновляет `/v1/models`; успешный live result публикуется обратно без key/raw;
+- explicit refresh всегда ожидает VEXZY, timestamps монотонны, а snapshots с
+  timestamp дальше пяти минут в будущем отклоняются в Rust и TypeScript;
+- Messages requests получают memory-only defensive snapshot до JSON dispatch;
+  snapshots не персистятся, не отправляются daemon и не кэшируют completion,
+  stream или tool responses;
+- cross-language digest и Rust↔TypeScript RPC покрыты реальным interop test.
 
 ## 4. Оставшийся план реализации
 
@@ -456,6 +472,7 @@ src/commands.ts
    core tools (Git/process), adaptive MCP stdio transport и interop. Rust
    authority pinning исключает fallback после dispatch; SDK fallback получает
    только explicit MCP credentials и никогда не наследует `VEXZY_API_KEY`.
-6. `TODO`: model-native VEXZY proxy/cache и immutable prompt snapshots.
+6. `DONE`: model-native VEXZY catalog broker/cache, keyless daemon snapshots,
+   background refresh и memory-only immutable request/prompt snapshots.
 7. `TODO`: streaming DAG, credits-first tuning и тёплый worker pool.
 8. `TODO`: Ratatui input/status/tasks migration и release performance gates.

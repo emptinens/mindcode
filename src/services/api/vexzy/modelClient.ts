@@ -16,6 +16,12 @@ import {
   createVexzyModelRegistry,
   type VexzyModelRegistry,
 } from "./modelRegistry.js";
+import { getDaemonManager } from "../../../runtime/daemon/manager.js";
+import {
+  ModelCatalogDaemonClient,
+  createModelCatalogSnapshot,
+  type ModelCatalogSnapshot,
+} from "../../../runtime/modelBroker/index.js";
 
 export const DEFAULT_VEXZY_MODEL_TIMEOUT_MS = 10_000;
 
@@ -61,6 +67,16 @@ export interface VexzyModelClientOptions {
   readonly timeoutMs?: number;
   readonly now?: () => number;
   readonly sleep?: (delayMs: number, signal: AbortSignal) => Promise<void>;
+  /** Explicit cache boundary for tests/embedding; false disables daemon cache. */
+  readonly catalogCache?: VexzyModelCatalogCache | false;
+}
+
+export interface VexzyModelCatalogCache {
+  get(options?: VexzyModelRequestOptions): Promise<ModelCatalogSnapshot | null>;
+  put(
+    snapshot: ModelCatalogSnapshot,
+    options?: VexzyModelRequestOptions,
+  ): Promise<{ readonly stored: boolean }>;
 }
 
 export interface VexzyModelRequestOptions {
@@ -96,8 +112,12 @@ export class VexzyModelClient {
     delayMs: number,
     signal: AbortSignal,
   ) => Promise<void>;
+  private readonly explicitCatalogCache: VexzyModelCatalogCache | undefined;
+  private readonly useDefaultCatalogCache: boolean;
+  private defaultCatalogCache: VexzyModelCatalogCache | undefined;
   private cachedSnapshot: VexzyModelSnapshot | undefined;
-  private inFlight: Promise<VexzyModelRegistry> | undefined;
+  private initialInFlight: Promise<VexzyModelRegistry> | undefined;
+  private refreshInFlight: Promise<VexzyModelRegistry> | undefined;
 
   constructor(options: VexzyModelClientOptions = {}) {
     this.config =
@@ -111,6 +131,9 @@ export class VexzyModelClient {
     );
     this.now = options.now ?? Date.now;
     this.sleepImpl = options.sleep ?? sleep;
+    this.explicitCatalogCache =
+      options.catalogCache === false ? undefined : options.catalogCache;
+    this.useDefaultCatalogCache = options.catalogCache === undefined;
   }
 
   get snapshot(): VexzyModelSnapshot | undefined {
@@ -127,11 +150,25 @@ export class VexzyModelClient {
       options.force === true ||
       options.forceRefresh === true;
 
-    if (!forceRefresh && this.cachedSnapshot !== undefined) {
+    if (forceRefresh) return this.refresh(options);
+
+    if (this.cachedSnapshot !== undefined) {
       return Promise.resolve(this.cachedSnapshot.registry);
     }
 
-    return this.refresh(options);
+    if (this.initialInFlight !== undefined) return this.initialInFlight;
+
+    const request = this.loadInitial(options);
+    this.initialInFlight = request;
+    void request.then(
+      () => {
+        if (this.initialInFlight === request) this.initialInFlight = undefined;
+      },
+      () => {
+        if (this.initialInFlight === request) this.initialInFlight = undefined;
+      },
+    );
+    return request;
   }
 
   listModels(options: VexzyModelLoadOptions = {}): Promise<VexzyModelRegistry> {
@@ -151,19 +188,61 @@ export class VexzyModelClient {
   }
 
   refresh(options: VexzyModelRequestOptions = {}): Promise<VexzyModelRegistry> {
-    if (this.inFlight !== undefined) return this.inFlight;
+    if (this.refreshInFlight !== undefined) return this.refreshInFlight;
 
     const request = this.loadFresh(options);
-    this.inFlight = request;
+    this.refreshInFlight = request;
     void request.then(
       () => {
-        if (this.inFlight === request) this.inFlight = undefined;
+        if (this.refreshInFlight === request) this.refreshInFlight = undefined;
       },
       () => {
-        if (this.inFlight === request) this.inFlight = undefined;
+        if (this.refreshInFlight === request) this.refreshInFlight = undefined;
       },
     );
     return request;
+  }
+
+  private async loadInitial(
+    options: VexzyModelRequestOptions,
+  ): Promise<VexzyModelRegistry> {
+    if (options.signal?.aborted) {
+      throw new VexzyModelClientError("aborted");
+    }
+    const cache = this.resolveCatalogCache();
+    if (cache !== undefined) {
+      try {
+        const snapshot = await cache.get(options);
+        if (options.signal?.aborted) {
+          throw new VexzyModelClientError("aborted");
+        }
+        if (snapshot !== null) {
+          const cached = registryFromCatalogSnapshot(snapshot);
+          if (
+            this.cachedSnapshot === undefined ||
+            snapshot.fetched_at_ms >= this.cachedSnapshot.fetchedAt
+          ) {
+            this.cachedSnapshot = {
+              registry: cached,
+              fetchedAt: snapshot.fetched_at_ms,
+              response: createDaemonCatalogResponse(),
+            };
+          }
+          const resolved = this.cachedSnapshot.registry;
+          // A daemon hit makes catalog metadata available immediately. The
+          // provider refresh runs independently and never blocks this read.
+          void this.refresh({ timeoutMs: options.timeoutMs }).catch(
+            () => undefined,
+          );
+          return resolved;
+        }
+      } catch (error) {
+        if (error instanceof VexzyModelClientError) throw error;
+        // Cache availability/protocol failures must not replace the provider
+        // source of truth. The network path below remains authoritative.
+      }
+    }
+    return this.refresh(options);
   }
 
   private async loadFresh(
@@ -232,11 +311,17 @@ export class VexzyModelClient {
           throw new VexzyModelClientError("invalid_response");
         }
 
+        const observedAt = validateCatalogTimestamp(this.now());
+        const fetchedAt = Math.max(
+          observedAt,
+          (this.cachedSnapshot?.fetchedAt ?? -1) + 1,
+        );
         this.cachedSnapshot = {
           registry,
-          fetchedAt: this.now(),
+          fetchedAt,
           response: rawResponse,
         };
+        this.publishCatalogSnapshot(registry, fetchedAt);
         return registry;
       }
 
@@ -281,12 +366,84 @@ export class VexzyModelClient {
       throw error;
     }
   }
+
+  private resolveCatalogCache(): VexzyModelCatalogCache | undefined {
+    if (this.explicitCatalogCache !== undefined) {
+      return this.explicitCatalogCache;
+    }
+    if (!this.useDefaultCatalogCache) return undefined;
+    const manager = getDaemonManager();
+    if (manager.status().state !== "ready") return undefined;
+    this.defaultCatalogCache ??= new ModelCatalogDaemonClient(manager);
+    return this.defaultCatalogCache;
+  }
+
+  private publishCatalogSnapshot(
+    registry: VexzyModelRegistry,
+    fetchedAt: number,
+  ): void {
+    const cache = this.resolveCatalogCache();
+    if (cache === undefined) return;
+    let snapshot: ModelCatalogSnapshot;
+    try {
+      snapshot = createModelCatalogSnapshot(registry.models, fetchedAt);
+    } catch {
+      return;
+    }
+    void cache.put(snapshot).catch(() => undefined);
+  }
+}
+
+function registryFromCatalogSnapshot(
+  snapshot: ModelCatalogSnapshot,
+): VexzyModelRegistry {
+  return createVexzyModelRegistry({
+    object: "list",
+    data: snapshot.models.map((model) => ({
+      id: model.id,
+      object: "model",
+      owned_by: "vexzy",
+      display_name: model.display_name,
+      available: model.available,
+      ...(model.status === undefined ? {} : { status: model.status }),
+      context_length: model.context_length,
+      supported_reasoning_efforts: [...model.efforts],
+      input_modalities: [...model.modalities.input],
+      output_modalities: [...model.modalities.output],
+      capabilities: { ...model.capabilities },
+      ...(model.output_limit === undefined
+        ? {}
+        : { output_limit: model.output_limit }),
+      ...(model.output_credits_per_million === undefined
+        ? {}
+        : {
+            output_credits_per_million:
+              model.output_credits_per_million,
+          }),
+    })),
+  });
+}
+
+function createDaemonCatalogResponse(): Response {
+  return new Response(null, {
+    status: 200,
+    headers: {
+      "x-mindcode-model-catalog-source": "daemon-cache",
+    },
+  });
 }
 
 export function createVexzyModelClient(
   options: VexzyModelClientOptions = {},
 ): VexzyModelClient {
   return new VexzyModelClient(options);
+}
+
+function validateCatalogTimestamp(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new VexzyModelClientError("invalid_response");
+  }
+  return value;
 }
 
 function validateTimeout(timeoutMs: number): number {

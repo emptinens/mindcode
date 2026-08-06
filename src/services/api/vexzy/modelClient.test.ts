@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createModelCatalogSnapshot } from "../../../runtime/modelBroker/index.js";
 import { createVexzyModelClient } from "./modelClient.js";
 import { VexzyError } from "./errors.js";
 
@@ -101,6 +102,133 @@ describe("Vexzy model client", () => {
     expect(second).not.toBe(first);
     expect(second.get("first-dynamic-model")).toBeUndefined();
     expect(second.get("second-dynamic-model")).toBeDefined();
+  });
+
+  test("serves a keyless daemon snapshot immediately and refreshes in background", async () => {
+    const cachedSnapshot = createModelCatalogSnapshot(
+      [model("cached-dynamic-model")],
+      100,
+    );
+    const published: unknown[] = [];
+    let releaseNetwork: (() => void) | undefined;
+    let networkCalls = 0;
+    const networkGate = new Promise<void>((resolve) => {
+      releaseNetwork = resolve;
+    });
+    const client = createVexzyModelClient({
+      apiKey: "forge-test-key",
+      now: () => 200,
+      catalogCache: {
+        get: async () => cachedSnapshot,
+        put: async (snapshot) => {
+          published.push(snapshot);
+          return { stored: true };
+        },
+      },
+      fetch: async () => {
+        networkCalls += 1;
+        await networkGate;
+        return response(payload("fresh-dynamic-model"));
+      },
+    });
+
+    const cached = await client.getModels();
+    expect(cached.get("cached-dynamic-model")).toBeDefined();
+    expect(
+      client
+        .getSnapshot()
+        ?.response?.headers.get("x-mindcode-model-catalog-source"),
+    ).toBe("daemon-cache");
+    expect(await client.getSnapshot()?.response?.clone().text()).toBe("");
+    expect(networkCalls).toBe(1);
+    expect(published).toHaveLength(0);
+
+    releaseNetwork?.();
+    const fresh = await client.refresh();
+    expect(fresh.get("fresh-dynamic-model")).toBeDefined();
+    expect(client.getSnapshot()?.fetchedAt).toBe(200);
+    expect(published).toHaveLength(1);
+    expect(JSON.stringify(published[0])).not.toContain("forge-test-key");
+    expect(JSON.stringify(published[0])).not.toContain("raw");
+    expect(published[0]).toMatchObject({
+      schema_version: 1,
+      fetched_at_ms: 200,
+      models: [{ id: "fresh-dynamic-model" }],
+    });
+  });
+
+  test("explicit refresh bypasses the daemon snapshot and awaits VEXZY", async () => {
+    const cachedSnapshot = createModelCatalogSnapshot(
+      [model("cached-dynamic-model")],
+      100,
+    );
+    let networkCalls = 0;
+    const client = createVexzyModelClient({
+      apiKey: "forge-test-key",
+      now: () => 200,
+      catalogCache: {
+        get: async () => cachedSnapshot,
+        put: async () => ({ stored: true }),
+      },
+      fetch: async () => {
+        networkCalls += 1;
+        return response(payload("fresh-dynamic-model"));
+      },
+    });
+
+    const registry = await client.getModels({ refresh: true });
+    expect(registry.get("cached-dynamic-model")).toBeUndefined();
+    expect(registry.get("fresh-dynamic-model")).toBeDefined();
+    expect(networkCalls).toBe(1);
+  });
+
+  test("keeps live catalog timestamps monotonic across clock rollback", async () => {
+    const timestamps = [200, 100];
+    const published: number[] = [];
+    let call = 0;
+    const client = createVexzyModelClient({
+      apiKey: "forge-test-key",
+      now: () => timestamps.shift() ?? 0,
+      catalogCache: {
+        get: async () => null,
+        put: async (catalog) => {
+          published.push(catalog.fetched_at_ms);
+          return { stored: true };
+        },
+      },
+      fetch: async () => {
+        call += 1;
+        return response(payload(`model-${call}`));
+      },
+    });
+
+    await client.getModels();
+    await client.refresh();
+    await Promise.resolve();
+
+    expect(client.getSnapshot()?.fetchedAt).toBe(201);
+    expect(published).toEqual([200, 201]);
+  });
+
+  test("falls through to VEXZY when the daemon cache is unavailable", async () => {
+    let calls = 0;
+    const client = createVexzyModelClient({
+      apiKey: "forge-test-key",
+      catalogCache: {
+        get: async () => {
+          throw new Error("daemon unavailable");
+        },
+        put: async () => ({ stored: true }),
+      },
+      fetch: async () => {
+        calls += 1;
+        return response(payload("network-authoritative-model"));
+      },
+    });
+
+    const registry = await client.getModels();
+    expect(registry.get("network-authoritative-model")).toBeDefined();
+    expect(calls).toBe(1);
   });
 
   test("does not expose an error body or API key for HTTP failures", async () => {
