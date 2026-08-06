@@ -45,7 +45,7 @@ jobs:
         run: bun run check:rust
 
       - name: TypeScript and packaging unit tests
-        run: bun run test && bun run test:build-bundle
+        run: bun run test && bun run test:build-bundle && bun run test:native-tui
 
       - name: Coverage gate
         run: bun run coverage:changed
@@ -54,7 +54,7 @@ jobs:
         run: bun run test:daemon-interop
 
       - name: Build host bundle and smoke test
-        run: bun run build && bun run smoke && bun run test:native-packaging
+        run: bun run build && bun run smoke && bun run test:native-packaging && bun run perf:native-tui
 
   native:
     name: ${{ matrix.name }}
@@ -106,3 +106,8 @@ jobs:
       - name: Verify target-aware package layout
         shell: bash
         run: MINDCODE_BUILD_TARGETS=${{ matrix.bun_target }} bun run test:native-packaging
+
+      - name: Verify native TUI package layout
+        if: runner.os != 'Windows'
+        shell: bash
+        run: MINDCODE_TUI_VALIDATE=1 MINDCODE_TUI_BUILD_TARGETS=${{ matrix.bun_target }} node --test scripts/native-tui.test.mjs

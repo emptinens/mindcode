@@ -92,7 +92,7 @@ export function showSetupDialog<T = void>(root: Root, renderer: (done: (result: 
  * Render the main UI into the root and wait for it to exit.
  * Handles the common epilogue: start deferred prefetches, wait for exit, graceful shutdown.
  */
-export async function renderAndRun(root: Root, element: React.ReactNode): Promise<void> {
+export async function renderAndRun(root: Root, element: React.ReactNode, beforeShutdown?: () => void | Promise<void>): Promise<void> {
   root.render(element);
   startDeferredPrefetches();
   // Keep the optional native sidecar out of --print/headless startup. This
@@ -103,7 +103,7 @@ export async function renderAndRun(root: Root, element: React.ReactNode): Promis
       .then(({ getDaemonManager }) => getDaemonManager().kickStartup())
       .catch(() => undefined);
   });
-  await root.waitUntilExit();
+  await root.waitUntilExit().finally(beforeShutdown);
   await gracefulShutdown(0);
 }
 export async function showSetupScreens(root: Root, permissionMode: PermissionMode, allowDangerouslySkipPermissions: boolean, commands?: Command[], devChannels?: ChannelEntry[]): Promise<boolean> {

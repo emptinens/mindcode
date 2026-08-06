@@ -1,0 +1,20 @@
+[package]
+name = "mindcode-tui"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Native terminal renderer for the MindCode UI protocol"
+
+# This crate owns its lockfile and is intentionally a standalone workspace so
+# adding the native renderer does not rewrite the repository workspace lock.
+[workspace]
+
+[dependencies]
+crossterm = "0.29"
+mindcode-protocol = { path = "../mindcode-protocol" }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+
+[[bin]]
+name = "mindcode-tui"
+path = "src/main.rs"

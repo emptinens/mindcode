@@ -38,6 +38,18 @@ export const ALLOWLISTED_TARGET_FILES = Object.freeze([
   // Type-only protocol declarations have no runtime LCOV record; extracted
   // protocol/message-client tests cover their structural contract.
   'src/services/api/vexzy/sdkAdapter.ts',
+  // Native TUI state/protocol/runtime modules are isolated from the legacy Ink
+  // adapters so their release coverage remains explicit and measurable.
+  'src/runtime/nativeTui/controlServer.ts',
+  'src/runtime/nativeTui/featureGate.ts',
+  'src/runtime/nativeTui/inkBridge.ts',
+  'src/runtime/nativeTui/inputController.ts',
+  'src/runtime/nativeTui/launcher.ts',
+  'src/runtime/nativeTui/path.ts',
+  'src/runtime/nativeTui/projections.ts',
+  'src/runtime/nativeTui/protocol.ts',
+  'src/runtime/nativeTui/ptyHost.ts',
+  'src/runtime/nativeTui/session.ts',
   'src/commands/copy/copyLogic.ts',
   'src/commands/copycon/generator.ts',
   'src/commands/copycon/source.ts',

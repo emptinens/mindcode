@@ -6,6 +6,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod ui;
+
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 const FRAME_HEADER_SIZE: usize = 4;
@@ -18,6 +20,7 @@ pub enum ProtocolError {
     TruncatedFrame { expected: usize, actual: usize },
     TrailingBytes { remaining: usize },
     ZeroLengthFrame,
+    InvalidUiMessage(String),
 }
 
 impl fmt::Display for ProtocolError {
@@ -38,6 +41,7 @@ impl fmt::Display for ProtocolError {
                 write!(f, "frame contains {remaining} trailing bytes")
             }
             Self::ZeroLengthFrame => write!(f, "zero-length frames are invalid"),
+            Self::InvalidUiMessage(message) => write!(f, "invalid UI message: {message}"),
         }
     }
 }

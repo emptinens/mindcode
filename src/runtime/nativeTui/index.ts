@@ -1,0 +1,146 @@
+export {
+  isNativeTuiEnabled,
+  NATIVE_TUI_ENV,
+  resolveNativeTuiFeatureGate,
+} from "./featureGate.js";
+export type {
+  NativeTuiCapability,
+  NativeTuiDisableReason,
+  NativeTuiFeatureGate,
+  NativeTuiFeatureGateOptions,
+  NativeTuiMode,
+} from "./featureGate.js";
+
+export {
+  NativeTuiLaunchCoordinator,
+  createNativeTuiLaunchCoordinator,
+  launchNativeTuiWithFallback,
+} from "./launcher.js";
+export type {
+  NativeTuiCoordinatorFallback,
+  NativeTuiCoordinatorFallbackReason,
+  NativeTuiCoordinatorNative,
+  NativeTuiCoordinatorResult,
+  NativeTuiLaunchCoordinatorOptions,
+  NativeTuiLaunchCoordinatorState,
+  NativeTuiSessionLaunchResult,
+  NativeTuiSessionLike,
+} from "./launcher.js";
+
+export {
+  DEFAULT_NATIVE_TUI_RUNTIME_DIRECTORY,
+  NativeTuiControlServer,
+  NativeTuiControlServerError,
+  createNativeTuiSocketPath,
+  resolveNativeTuiSocketPath,
+} from "./controlServer.js";
+export type { NativeTuiControlServerOptions } from "./controlServer.js";
+
+export {
+  InputController,
+  NativeTuiInputController,
+} from "./inputController.js";
+export type {
+  NativeTuiInputControllerOptions,
+  NativeTuiInputIntent,
+} from "./inputController.js";
+
+export {
+  NativeTuiProjectionError,
+  NativeTuiProjectionStore,
+  NativeTuiRevisionClock,
+  buildRenderProjection,
+  buildStatusProjection,
+  buildTasksProjection,
+  buildTranscriptProjection,
+  projectRenderSnapshot,
+  projectStatus,
+  projectTasks,
+  projectTranscript,
+} from "./projections.js";
+export type {
+  NativeTuiProjectionInput,
+  NativeTuiStatusInput,
+  NativeTuiTaskInput,
+  NativeTuiTranscriptInput,
+} from "./projections.js";
+
+export {
+  FrameDecoder,
+  MAX_FRAME_BYTES,
+  NATIVE_TUI_MAX_CAPABILITIES,
+  NATIVE_TUI_MAX_CAPABILITY_BYTES,
+  NATIVE_TUI_MAX_CLIENT_BYTES,
+  NATIVE_TUI_MAX_CODE_BYTES,
+  NATIVE_TUI_MAX_FRAME_BYTES,
+  NATIVE_TUI_MAX_ID_BYTES,
+  NATIVE_TUI_MAX_INPUT_BYTES,
+  NATIVE_TUI_MAX_INPUT_MODIFIERS,
+  NATIVE_TUI_MAX_MESSAGE_BYTES,
+  NATIVE_TUI_MAX_PENDING_INPUTS,
+  NATIVE_TUI_MAX_REASON_BYTES,
+  NATIVE_TUI_MAX_SNAPSHOT_BYTES,
+  NATIVE_TUI_MAX_STATUS_BYTES,
+  NATIVE_TUI_MAX_TASKS,
+  NATIVE_TUI_MAX_TASK_ID_BYTES,
+  NATIVE_TUI_MAX_TASK_TITLE_BYTES,
+  NATIVE_TUI_MAX_TRANSCRIPT_ENTRIES,
+  NATIVE_TUI_MAX_TRANSCRIPT_ROLE_BYTES,
+  NATIVE_TUI_MAX_TRANSCRIPT_TEXT_BYTES,
+  NATIVE_TUI_PROTOCOL_VERSION,
+  UI_MAX_CAPABILITIES,
+  UI_MAX_CAPABILITY_BYTES,
+  UI_MAX_CLIENT_BYTES,
+  UI_MAX_CODE_BYTES,
+  UI_MAX_FRAME_SIZE,
+  UI_MAX_ID_BYTES,
+  UI_MAX_INPUT_BYTES,
+  UI_MAX_INPUT_MODIFIERS,
+  UI_MAX_MESSAGE_BYTES,
+  UI_MAX_PENDING_INPUTS,
+  UI_MAX_REASON_BYTES,
+  UI_MAX_SNAPSHOT_BYTES,
+  UI_MAX_STATUS_BYTES,
+  UI_MAX_TASKS,
+  UI_MAX_TASK_ID_BYTES,
+  UI_MAX_TASK_TITLE_BYTES,
+  UI_MAX_TRANSCRIPT_ENTRIES,
+  UI_MAX_TRANSCRIPT_ROLE_BYTES,
+  UI_MAX_TRANSCRIPT_TEXT_BYTES,
+  NativeTuiFrameDecoder,
+  NativeTuiProtocolError,
+  UI_PROTOCOL_VERSION,
+  UiFrameDecoder,
+  decodeFrame,
+  decodeUiFrame,
+  decodeNativeTuiFrame,
+  encodeFrame,
+  encodeUiFrame,
+  encodeNativeTuiFrame,
+  validateNativeTuiClientMessage,
+  validateNativeTuiMessage,
+  validateNativeTuiServerMessage,
+  validateUiMessage,
+} from "./protocol.js";
+export type {
+  NativeTuiAck,
+  NativeTuiCapabilities,
+  NativeTuiClientMessage,
+  NativeTuiError,
+  NativeTuiHandshake,
+  NativeTuiInputEvent,
+  NativeTuiInputEventKind,
+  NativeTuiKeyInput,
+  NativeTuiRenderSnapshot,
+  NativeTuiServerMessage,
+  NativeTuiShutdown,
+  NativeTuiStatusSnapshot,
+  NativeTuiTaskSnapshot,
+  NativeTuiTerminalSize,
+  NativeTuiTranscriptEntry,
+  NativeTuiWireMessage,
+  UiClientMessage,
+  UiMessage,
+  UiServerMessage,
+  UiWireMessage,
+} from "./protocol.js";

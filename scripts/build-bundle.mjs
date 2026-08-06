@@ -8,6 +8,7 @@ import { execFileSync } from 'node:child_process'
 import esbuild from 'esbuild'
 import { stripBareCommonJsEnvironmentProbes } from './bun-esm-compat.mjs'
 import { packageNativeDaemon, selectBunTargets } from './native-daemon.mjs'
+import { nativeTuiTargetForBun, packageNativeTui } from './native-tui.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const outdir = path.join(root, 'dist')
@@ -377,6 +378,10 @@ if (watch) {
           execFileSync('bun', ['build', tmpFile, '--compile', `--target=${target.bunTarget}`, '--outfile', dest, ...externals], { stdio: 'inherit' })
           scrubBuildPath(dest)
           await packageNativeDaemon({ root, outdir, target, mindcodePath: dest })
+          const tuiTarget = nativeTuiTargetForBun(target.bunTarget)
+          if (tuiTarget) {
+            await packageNativeTui({ root, outdir, target: tuiTarget })
+          }
           console.log(`Compiled ${target.mindcodeName}`)
         },
       })

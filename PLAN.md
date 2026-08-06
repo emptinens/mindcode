@@ -51,7 +51,7 @@
 
 - `package.json` уже содержит `name: "mindcode"`, `version: "0.1.0"`, bin `mindcode` и Bun scripts.
 - `tsconfig.json` существует, содержит `strict: true`, `noEmit: true` и включает `src/**/*` и `scripts/**/*.ts`.
-- `bun run sources:check` проверяет `1987` исходных файлов; полный Bun test-run,
+- `bun run sources:check` проверяет `2030` исходных файлов; полный Bun test-run,
   coverage, build и smoke текущего прохода завершены успешно.
 - Команда `/copycon` существует и зарегистрирована в `src/commands.ts`.
 - `git remote -v` не выводит remote.
@@ -64,13 +64,13 @@
 
 | Проверка | Результат |
 |---|---|
-| Rust gates | PASS: `83` tests; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --all-targets` |
+| Rust gates | PASS: `93` workspace tests + `9` native TUI tests; fmt, clippy `-D warnings` и locked manifest gates |
 | Focused TS tests | PASS для TaskGraph/RPC, lifecycle, policy/report, compact и VEXZY limits |
-| Полный Bun test-run | `737 pass`, `4 skip`, `0 fail`, `141 files` |
-| Architectural coverage | `93.41%` (`8069/8638`), required `>=85%` |
+| Полный Bun test-run | `865 pass`, `4 skip`, `0 fail`, `159 files` |
+| Architectural coverage | `93.68%` (`10758/11484`), required `>=85%` across `41` allowlisted files |
 | `bun run typecheck` | PASS; baseline `4062` diagnostics |
 | `bun run lint` | PASS; baseline `7948` diagnostics |
-| `bun run sources:check` | `1957 files`, `0 trailers` |
+| `bun run sources:check` | `2030 files`, `0 trailers` |
 | Production build/smoke | PASS для `dist/mindcode.js`, native CLI и `mindcoded` sidecar |
 | Bundle legacy scan | PASS; targeted provider endpoints/credentials отсутствуют |
 | `git remote -v` | remote отсутствует |
@@ -482,7 +482,14 @@ src/commands.ts
    in-process pool, а high/xhigh/max, overlap и explicit isolation — в холодный
    изолированный runtime. Lifecycle освобождает lease по событиям abort/idle без
    polling и возвращает usage-aware стоимость через `releaseWithCost`.
-8. `IN PROGRESS`: Ratatui input/status/tasks migration и release performance
-   gates. Зафиксирован отдельный Unix control socket с MessagePack, PTY только
-   для terminal stdin/stdout, TypeScript как единственный state authority,
-   `MINDCODE_NATIVE_TUI=auto|on|off` и Ink fallback на Windows/ошибках запуска.
+8. `DONE`: Ratatui input/status/tasks migration и release performance gates.
+   Зафиксирован отдельный Unix control socket с MessagePack, PTY только для
+   terminal stdin/stdout, TypeScript как единственный state authority,
+   `MINDCODE_NATIVE_TUI=auto|on|off` и Ink fallback на Windows, startup failure
+   и раннем завершении native process. Проверки: `58` native TS tests, `3` REPL
+   integration tests, `9` Rust TUI tests, `4` target/layout packaging tests,
+   native sidecar packaging smoke и реальный Rust TUI + TS control/session smoke.
+   Финальный performance gate (`20` запусков): input-ready p95 `401.85ms`
+   (`<500ms`), cold dispatch p95 `12.56ms` (`<100ms`), warm dispatch p95
+   `19.90ms` (`<50ms`). Полный Bun suite: `865 pass`, `4 skip`, `0 fail`;
+   architectural coverage с native TUI allowlist: `93.68%` (`10758/11484`).

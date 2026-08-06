@@ -2,6 +2,7 @@
 node_modules/
 target/
 crates/*/Cargo.lock
+!crates/mindcode-tui/Cargo.lock
 .npm-cache/
 .mindcode/
 .codex-backups/
