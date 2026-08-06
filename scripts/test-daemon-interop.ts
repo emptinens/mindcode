@@ -10,6 +10,7 @@ import {
   FrameDecoder,
   type DaemonWireMessage,
 } from "../src/runtime/daemon/protocol.js";
+import { SessionIndexDaemonClient } from "../src/runtime/sessionIndex/client.js";
 import { TaskGraphDaemonClient } from "../src/runtime/taskGraph/client.js";
 
 const root = resolve(import.meta.dirname, "..");
@@ -66,7 +67,9 @@ try {
     throw new Error(`unexpected list response: ${JSON.stringify(listed)}`);
   const dependents = await graph.listDependents("interop-task");
   if (!Array.isArray(dependents.tasks))
-    throw new Error(`unexpected dependents response: ${JSON.stringify(dependents)}`);
+    throw new Error(
+      `unexpected dependents response: ${JSON.stringify(dependents)}`,
+    );
   const claimed = await graph.claim("interop-task", {
     owner: "gpt-5.6-luna",
     lease_id: "interop-lease",
@@ -97,7 +100,9 @@ try {
   );
   const recovered = await graph.recover("2026-08-06T00:00:02.000Z");
   if (!Array.isArray(recovered.tasks))
-    throw new Error(`unexpected recover response: ${JSON.stringify(recovered)}`);
+    throw new Error(
+      `unexpected recover response: ${JSON.stringify(recovered)}`,
+    );
   const snapshot = await graph.snapshot();
   if (
     completed.task.report_id !== "interop-report" ||
@@ -107,8 +112,61 @@ try {
       `unexpected task graph response: ${JSON.stringify({ completed, snapshot })}`,
     );
   }
+
+  const sessions = new SessionIndexDaemonClient(client);
+  const session = {
+    session_id: "10000000-0000-4000-8000-000000000001",
+    project_path: "/work/project",
+    transcript_path:
+      "/state/projects/work-project/10000000-0000-4000-8000-000000000001.jsonl",
+    modified_at_ms: 1_759_478_400_000,
+    size_bytes: 42,
+    title: "Interop session",
+    first_prompt: "Inspect the project",
+  };
+  const upserted = await sessions.upsert(session);
+  const indexed = await sessions.get(session.session_id);
+  const sessionList = await sessions.list({
+    project_path: session.project_path,
+    limit: 10,
+  });
+  const sessionSearch = await sessions.search({
+    query: "inspect",
+    project_path: session.project_path,
+    limit: 10,
+  });
+  if (
+    upserted.session.session_id !== session.session_id ||
+    indexed.session?.title !== session.title ||
+    !sessionList.sessions.some(
+      (entry) => entry.session_id === session.session_id,
+    ) ||
+    !sessionSearch.sessions.some(
+      (entry) => entry.session_id === session.session_id,
+    )
+  ) {
+    throw new Error(
+      `unexpected session index response: ${JSON.stringify({
+        upserted,
+        indexed,
+        sessionList,
+        sessionSearch,
+      })}`,
+    );
+  }
+  const removedSession = await sessions.remove(session.session_id);
+  if (
+    !removedSession.removed ||
+    (await sessions.get(session.session_id)).session !== null
+  ) {
+    throw new Error(
+      `session index remove failed: ${JSON.stringify(removedSession)}`,
+    );
+  }
   await assertInvalidParams(client, "task_graph.recover", { now: 123 });
-  await assertInvalidParams(client, "task_graph.snapshot", { unexpected: true });
+  await assertInvalidParams(client, "task_graph.snapshot", {
+    unexpected: true,
+  });
 
   await testMutationReplay(socketPath);
   await client.shutdown();
@@ -116,7 +174,7 @@ try {
   if (exitCode !== 0)
     throw new Error(`mindcoded exited ${exitCode}: ${stderr}`);
   process.stdout.write(
-    "Rust/TypeScript daemon + TaskGraph interoperability: PASS\n",
+    "Rust/TypeScript daemon + TaskGraph + SessionIndex interoperability: PASS\n",
   );
 } finally {
   if (child.exitCode === null) child.kill("SIGKILL");
@@ -156,7 +214,9 @@ async function testMutationReplay(socketPath: string): Promise<void> {
     params,
   );
   if (!first.ok || (first.result as { created?: unknown })?.created !== true)
-    throw new Error(`unexpected first replay response: ${JSON.stringify(first)}`);
+    throw new Error(
+      `unexpected first replay response: ${JSON.stringify(first)}`,
+    );
   firstConnection.close();
 
   const secondConnection = await RawConnection.open(socketPath, "raw-second");
@@ -166,21 +226,27 @@ async function testMutationReplay(socketPath: string): Promise<void> {
     params,
   );
   if (JSON.stringify(replay) !== JSON.stringify(first))
-    throw new Error(`mutation replay mismatch: ${JSON.stringify({ first, replay })}`);
+    throw new Error(
+      `mutation replay mismatch: ${JSON.stringify({ first, replay })}`,
+    );
   const reuse = await secondConnection.request(
     "replay-request",
     "task_graph.route",
     { task: { id: "different-replay-task", files_touched: [] }, mode: "block" },
   );
   if (reuse.ok || reuse.error?.code !== "request_id_reuse")
-    throw new Error(`request id reuse was not rejected: ${JSON.stringify(reuse)}`);
+    throw new Error(
+      `request id reuse was not rejected: ${JSON.stringify(reuse)}`,
+    );
   const invalidRecover = await secondConnection.request(
     "raw-invalid-recover",
     "task_graph.recover",
     { now: 123 },
   );
   if (invalidRecover.ok || invalidRecover.error?.code !== "INVALID_PARAMS")
-    throw new Error(`invalid recover params were accepted: ${JSON.stringify(invalidRecover)}`);
+    throw new Error(
+      `invalid recover params were accepted: ${JSON.stringify(invalidRecover)}`,
+    );
   const snapshot = await secondConnection.request(
     "raw-empty-snapshot",
     "task_graph.snapshot",

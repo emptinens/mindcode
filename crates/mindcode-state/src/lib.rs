@@ -18,6 +18,11 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use uuid::Uuid;
 
+pub mod session_index;
+pub use session_index::{
+    SessionIndex, SessionIndexConfig, SessionListOptions, SessionRecord, SessionSearchOptions,
+};
+
 pub const TASK_GRAPH_SCHEMA_VERSION: u64 = 2;
 pub const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 pub const DEFAULT_LEASE_TTL_MS: u64 = 30_000;
@@ -438,6 +443,7 @@ impl Default for TaskGraphConfig {
 #[derive(Debug, Clone)]
 pub enum StateError {
     InvalidTask(String),
+    InvalidSession(String),
     TaskNotFound(String),
     DuplicateTask(String),
     DependencyNotFound {
@@ -461,6 +467,7 @@ impl StateError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::InvalidTask(_) => "INVALID_TASK",
+            Self::InvalidSession(_) => "INVALID_SESSION",
             Self::TaskNotFound(_) => "TASK_NOT_FOUND",
             Self::DuplicateTask(_) => "DUPLICATE_TASK",
             Self::DependencyNotFound { .. } => "DEPENDENCY_NOT_FOUND",
@@ -478,7 +485,7 @@ impl StateError {
 impl fmt::Display for StateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidTask(message) => write!(f, "{message}"),
+            Self::InvalidTask(message) | Self::InvalidSession(message) => write!(f, "{message}"),
             Self::TaskNotFound(id) => write!(f, "Task does not exist: {id}"),
             Self::DuplicateTask(id) => write!(f, "Task already exists: {id}"),
             Self::DependencyNotFound {
@@ -1420,7 +1427,7 @@ impl SqlValue {
     }
 }
 
-fn configure_connection(connection: &Connection) -> StateResult<()> {
+pub(crate) fn configure_connection(connection: &Connection) -> StateResult<()> {
     connection.busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))?;
     connection.execute_batch(
         "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;",
@@ -1569,7 +1576,7 @@ fn validate_stored_json_columns(
     Ok(())
 }
 
-fn ensure_secure_state_dir(path: &Path) -> StateResult<()> {
+pub(crate) fn ensure_secure_state_dir(path: &Path) -> StateResult<()> {
     fs::create_dir_all(path)?;
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
@@ -1603,7 +1610,7 @@ fn ensure_secure_state_dir(path: &Path) -> StateResult<()> {
     Ok(())
 }
 
-fn reject_database_symlink(path: &Path) -> StateResult<()> {
+pub(crate) fn reject_database_symlink(path: &Path) -> StateResult<()> {
     if let Ok(metadata) = fs::symlink_metadata(path) {
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(StateError::Io(format!(
@@ -1615,7 +1622,7 @@ fn reject_database_symlink(path: &Path) -> StateResult<()> {
     Ok(())
 }
 
-fn secure_database_files(path: &Path) -> StateResult<()> {
+pub(crate) fn secure_database_files(path: &Path) -> StateResult<()> {
     for candidate in [
         path.to_path_buf(),
         PathBuf::from(format!("{}-wal", path.display())),

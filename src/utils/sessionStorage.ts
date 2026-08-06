@@ -78,6 +78,10 @@ import { logError } from './log.js'
 import { extractTag, isCompactBoundaryMessage } from './messages.js'
 import { sanitizePath } from './path.js'
 import {
+  getSessionIndexBridge,
+  type SessionFileSnapshot,
+} from './sessionIndexBridge.js'
+import {
   extractJsonStringField,
   extractLastJsonStringField,
   LITE_READ_BUF_SIZE,
@@ -1348,7 +1352,16 @@ export async function recordContextCollapseSnapshot(snapshot: {
 }
 
 export async function flushSessionStorage(): Promise<void> {
-  await getProject().flush()
+  const currentProject = getProject()
+  await currentProject.flush()
+  const transcriptPath = currentProject.sessionFile
+  const sessionId = getSessionId()
+  if (!transcriptPath || !sessionId) return
+  await getSessionIndexBridge().refresh({
+    sessionId,
+    projectDir: dirname(transcriptPath),
+    transcriptPath,
+  })
 }
 
 function extractFirstPrompt(transcript: TranscriptMessage[]): string {
@@ -4606,33 +4619,41 @@ export async function getSessionFilesLite(
   limit?: number,
   projectPath?: string,
 ): Promise<LogOption[]> {
-  const sessionFilesMap = await getSessionFilesWithMtime(projectDir)
-
-  // Sort by mtime descending and apply limit
-  let entries = [...sessionFilesMap.entries()].sort(
-    (a, b) => b[1].mtime - a[1].mtime,
+  const listing = await getSessionIndexBridge().listOrScan(
+    projectDir,
+    limit,
+    async () => {
+      const files = await getSessionFilesWithMtime(projectDir)
+      return [...files.entries()].map(
+        ([sessionId, file]): SessionFileSnapshot => ({
+          sessionId,
+          path: file.path,
+          mtime: file.mtime,
+          ctime: file.ctime,
+          size: file.size,
+        }),
+      )
+    },
   )
-  if (limit && entries.length > limit) {
-    entries = entries.slice(0, limit)
-  }
 
   const logs: LogOption[] = []
 
-  for (const [sessionId, fileInfo] of entries) {
+  for (const file of listing.files) {
     logs.push({
-      date: new Date(fileInfo.mtime).toISOString(),
+      date: new Date(file.mtime).toISOString(),
       messages: [],
       isLite: true,
-      fullPath: fileInfo.path,
+      fullPath: file.path,
       value: 0,
-      created: new Date(fileInfo.ctime),
-      modified: new Date(fileInfo.mtime),
-      firstPrompt: '',
+      created: new Date(file.ctime),
+      modified: new Date(file.mtime),
+      firstPrompt: file.firstPrompt ?? '',
       messageCount: 0,
-      fileSize: fileInfo.size,
+      fileSize: file.size,
       isSidechain: false,
-      sessionId,
+      sessionId: file.sessionId,
       projectPath,
+      customTitle: file.title,
     })
   }
 
@@ -4655,7 +4676,16 @@ async function enrichLog(
 ): Promise<LogOption | null> {
   if (!log.isLite || !log.fullPath) return log
 
-  const meta = await readLiteMetadata(log.fullPath, log.fileSize ?? 0, readBuf)
+  let meta: LiteMetadata
+  try {
+    meta = await readLiteMetadata(log.fullPath, log.fileSize ?? 0, readBuf)
+  } catch {
+    if (log.sessionId) {
+      await getSessionIndexBridge().remove(log.sessionId)
+    }
+    logForDebugging(`Failed to enrich indexed session ${log.sessionId ?? 'unknown'}`)
+    return null
+  }
 
   const enriched: LogOption = {
     ...log,
@@ -4680,6 +4710,18 @@ async function enrichLog(
   // via /resume after crashes or large-context sessions.
   if (!enriched.firstPrompt && !enriched.customTitle) {
     enriched.firstPrompt = '(session)'
+  }
+
+  if (log.sessionId) {
+    await getSessionIndexBridge().upsert(dirname(log.fullPath), {
+      sessionId: log.sessionId,
+      path: log.fullPath,
+      mtime: log.modified.getTime(),
+      ctime: log.created.getTime(),
+      size: log.fileSize ?? 0,
+      ...(meta.customTitle === undefined ? {} : { title: meta.customTitle }),
+      ...(meta.firstPrompt ? { firstPrompt: meta.firstPrompt } : {}),
+    })
   }
   // Filter: skip sidechains and agent sessions
   if (enriched.isSidechain) {

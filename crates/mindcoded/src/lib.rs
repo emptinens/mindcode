@@ -6,7 +6,8 @@ pub mod protocol;
 use anyhow::{bail, Context, Result};
 use instance::InstanceLock;
 use mindcode_state::{
-    ClaimOptions, ConflictMode, ListOptions, StateError, TaskGraph, TaskGraphConfig, TaskInput,
+    ClaimOptions, ConflictMode, ListOptions, SessionIndex, SessionIndexConfig, SessionListOptions,
+    SessionRecord, SessionSearchOptions, StateError, TaskGraph, TaskGraphConfig, TaskInput,
     TaskStatus, DEFAULT_LEASE_TTL_MS,
 };
 use protocol::{
@@ -62,6 +63,12 @@ const SERVER_CAPABILITIES: &[&str] = &[
     "task_graph.release_lease",
     "task_graph.recover",
     "task_graph.snapshot",
+    "session_index",
+    "session_index.upsert",
+    "session_index.get",
+    "session_index.list",
+    "session_index.search",
+    "session_index.remove",
 ];
 
 type SharedWriter = Arc<AsyncMutex<OwnedWriteHalf>>;
@@ -136,6 +143,7 @@ struct Metrics {
 struct DaemonState {
     config: DaemonConfig,
     task_graph: Arc<TaskGraph>,
+    session_index: Arc<SessionIndex>,
     request_ledger: Arc<Mutex<RequestLedger>>,
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
@@ -186,6 +194,11 @@ pub struct Daemon {
 
 impl Daemon {
     pub fn new(config: DaemonConfig) -> Self {
+        let session_index_config = config
+            .state_dir
+            .clone()
+            .map(SessionIndexConfig::with_state_dir)
+            .unwrap_or_else(SessionIndexConfig::from_env);
         let mut task_graph_config = TaskGraphConfig::from_env();
         task_graph_config.lease_ttl_ms = DEFAULT_LEASE_TTL_MS;
         if let Some(state_dir) = &config.state_dir {
@@ -194,6 +207,7 @@ impl Daemon {
         Self {
             state: Arc::new(DaemonState {
                 task_graph: Arc::new(TaskGraph::new(task_graph_config)),
+                session_index: Arc::new(SessionIndex::new(session_index_config)),
                 request_ledger: Arc::new(Mutex::new(RequestLedger::default())),
                 config,
                 metrics: Arc::new(Metrics::default()),
@@ -235,6 +249,11 @@ impl Daemon {
         tokio::task::spawn_blocking(move || task_graph.initialize())
             .await
             .context("join task graph initialization")??;
+
+        let session_index = Arc::clone(&self.state.session_index);
+        tokio::task::spawn_blocking(move || session_index.initialize())
+            .await
+            .context("join session index initialization")??;
 
         ensure_runtime_directory_unchanged(parent, runtime_identity)?;
         remove_stale_socket(socket_path)?;
@@ -983,6 +1002,12 @@ struct RecoverParams {
     now: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionIdParams {
+    session_id: String,
+}
+
 fn deserialize_optional_string<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<String>, D::Error>
@@ -1096,6 +1121,73 @@ async fn execute_request(
             }
         }
         "shutdown" => Ok(RequestResult::shutdown(json!({ "accepted": true }))),
+        "session_index.upsert" => {
+            let record = match parse_params::<SessionRecord>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let index = Arc::clone(&state.session_index);
+            let result = run_state_call(&cancellation, move || index.upsert(record)).await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(value)) => RequestResult::serialized(json!({ "session": value })),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
+        "session_index.get" => {
+            let request = match parse_params::<SessionIdParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let index = Arc::clone(&state.session_index);
+            let result =
+                run_state_call(&cancellation, move || index.get(&request.session_id)).await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(value)) => RequestResult::serialized(json!({ "session": value })),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
+        "session_index.list" => {
+            let options = match parse_params::<SessionListOptions>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let index = Arc::clone(&state.session_index);
+            let result = run_state_call(&cancellation, move || index.list(options)).await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(value)) => RequestResult::serialized(json!({ "sessions": value })),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
+        "session_index.search" => {
+            let options = match parse_params::<SessionSearchOptions>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let index = Arc::clone(&state.session_index);
+            let result = run_state_call(&cancellation, move || index.search(options)).await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(value)) => RequestResult::serialized(json!({ "sessions": value })),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
+        "session_index.remove" => {
+            let request = match parse_params::<SessionIdParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let index = Arc::clone(&state.session_index);
+            let result =
+                run_state_call(&cancellation, move || index.remove(&request.session_id)).await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(value)) => RequestResult::serialized(json!({ "removed": value })),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
         "task_graph.route" => {
             let request = match parse_params::<RouteParams>(params) {
                 Ok(value) => value,
@@ -1332,6 +1424,8 @@ fn is_mutation_method(method: &str) -> bool {
             | "task_graph.renew_lease"
             | "task_graph.release_lease"
             | "task_graph.recover"
+            | "session_index.upsert"
+            | "session_index.remove"
     )
 }
 

@@ -3,26 +3,14 @@ import type {
   Message,
   UserMessage,
 } from "../../types/message.js";
+import { redactSecrets } from "../../utils/secretRedaction.js";
+
+export { redactSecrets } from "../../utils/secretRedaction.js";
 
 export const COPYCON_MAX_SOURCE_CHARS = 18_000;
 export const COPYCON_MAX_MESSAGE_CHARS = 1_800;
 export const COPYCON_MAX_OUTPUT_CHARS = 24_000;
 const MAX_MESSAGES = 12;
-
-const SECRET_PATTERNS: readonly RegExp[] = [
-  /\bforge-[A-Za-z0-9._~-]+/gi,
-  /\b(?:sk|pk|rk)-[A-Za-z0-9_-]{12,}\b/gi,
-  /\b(?:api[_-]?key|token|password|secret)\s*[:=]\s*[^\s,;]+/gi,
-  /\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi,
-  /\bx-api-key\s*:\s*[^\s,;]+/gi,
-];
-
-export function redactSecrets(value: string): string {
-  return SECRET_PATTERNS.reduce(
-    (result, pattern) => result.replace(pattern, "[REDACTED]"),
-    value,
-  );
-}
 
 export function limitText(value: string, maxChars: number): string {
   const text = value.trim();
@@ -73,8 +61,7 @@ export function buildContinuationSource(
       role: message.type === "user" ? "Пользователь" : "MindCode",
       text: limitText(messageText(message), COPYCON_MAX_MESSAGE_CHARS),
       isOriginalUser:
-        message.type === "user" &&
-        message.isCompactSummary !== true,
+        message.type === "user" && message.isCompactSummary !== true,
       isCompactSummary:
         message.type === "user" && message.isCompactSummary === true,
     }))

@@ -64,13 +64,13 @@
 
 | Проверка | Результат |
 |---|---|
-| Rust gates | PASS: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --all-targets` |
+| Rust gates | PASS: `48` tests; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --all-targets` |
 | Focused TS tests | PASS для TaskGraph/RPC, lifecycle, policy/report, compact и VEXZY limits |
-| Полный Bun test-run | `653 pass`, `0 fail`, `125 files` |
+| Полный Bun test-run | `670 pass`, `0 fail`, `128 files` |
 | Architectural coverage | `93.41%` (`8069/8638`), required `>=85%` |
 | `bun run typecheck` | PASS; baseline `4062` diagnostics |
 | `bun run lint` | PASS; baseline `7949` diagnostics |
-| `bun run sources:check` | `1948 files`, `0 trailers` |
+| `bun run sources:check` | `1957 files`, `0 trailers` |
 | Production build/smoke | PASS для `dist/mindcode.js`, native CLI и `mindcoded` sidecar |
 | Bundle legacy scan | PASS; targeted provider endpoints/credentials отсутствуют |
 | `git remote -v` | remote отсутствует |
@@ -306,9 +306,18 @@ Focused command/cleanup tests и полный Bun test/build прогон про
 - TS client и `taskGraphAdapter`: daemon-backed state path с fallback boundary без смешивания authority в одной операции;
 - structural patch выполняется до claim/run;
 - `workerLifecycle.ts` и `resumeAgent.ts` мигрированы на daemon-backed `workerGraph` с сохранением report/policy semantics.
+- `mindcode-state`: отдельный SQLite/WAL `sessions.db` с metadata-only
+  session index, monotonic concurrent upsert и private permissions;
+- daemon RPC: `session_index.upsert|get|list|search|remove`;
+- `src/runtime/sessionIndex/`: strict TypeScript wire/client boundary с
+  availability-only read fallback;
+- `src/utils/sessionIndexBridge.ts` и `sessionStorage.ts`: index-first list,
+  filesystem bootstrap, stat refresh после flush, metadata refresh после
+  enrich, stale-path removal, secret redaction и filesystem fallback;
+- Rust↔TypeScript interop проверяет полный SessionIndex lifecycle.
 
-Проверено: `mindcode-state` — 18 pass, TaskGraph RPC — 3 pass,
-adapter/client — 27 pass, lifecycle/worker focused suites — pass.
+Проверено: Rust — `48 pass`, Bun — `670 pass`, focused SessionIndex/bridge —
+`17 pass`, полный build/smoke и native interop — pass.
 
 ## 4. Оставшийся план реализации
 
@@ -396,6 +405,9 @@ src/tools/AgentTool/workerReport.ts
 src/utils/swarm/workerTeamReport.ts
 src/tasks/graph/
 src/tasks/validation/
+src/runtime/sessionIndex/
+src/utils/sessionIndexBridge.ts
+src/utils/sessionStorage.ts
 src/constants/prompts.ts
 src/utils/jailbreak.ts
 src/services/compact/
@@ -440,8 +452,8 @@ src/commands.ts
    daemon/manager/path tests, `10` packaging tests и native handshake smoke.
 4. `DONE`: Rust TaskGraph/session SQLite RPC, `mindcode-state`, daemon RPC,
    TS client/authority pinning и worker lifecycle migration.
-5. `TODO`: Rust session index и core tools (Git/process/MCP), с отдельными
-   SQLite-backed session APIs и focused gates.
+5. `PARTIAL`: Rust session index, TS client, sessionStorage bridge и interop —
+   `DONE`; core tools (Git/process/MCP) — `TODO`.
 6. `TODO`: model-native VEXZY proxy/cache и immutable prompt snapshots.
 7. `TODO`: streaming DAG, credits-first tuning и тёплый worker pool.
 8. `TODO`: Ratatui input/status/tasks migration и release performance gates.
