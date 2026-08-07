@@ -11,7 +11,7 @@ import type {
   SDKMessage,
   SDKRateLimitInfo,
 } from 'src/entrypoints/agentSdkTypes.js'
-import type { ClaudeAILimits } from 'src/services/claudeAiLimits.js'
+import type { VexzyLimits } from 'src/services/vexzyLimits.js'
 import { EXIT_PLAN_MODE_V2_TOOL_NAME } from 'src/tools/ExitPlanModeTool/constants.js'
 import type {
   AssistantMessage,
@@ -189,7 +189,7 @@ export function toSDKMessages(messages: Message[]): SDKMessage[] {
  * because the system/local_command_output subtype is unknown to:
  *   - mobile-apps Android SdkMessageTypes.kt (no local_command_output handler)
  *   - api-go session-ingress convertSystemEvent (only init/compact_boundary)
- * See: https://anthropic.sentry.io/issues/7266299248/ (Android)
+ * See downstream SDK deserializers (including Android).
  *
  * Strips ANSI (e.g. chalk.dim() in /cost) then unwraps the XML wrapper tags.
  */
@@ -215,11 +215,10 @@ export function localCommandOutputToSDKAssistantMessage(
 }
 
 /**
- * Maps internal ClaudeAILimits to the SDK-facing SDKRateLimitInfo type,
- * stripping internal-only fields like unifiedRateLimitFallbackAvailable.
+ * Maps internal VexzyLimits to the SDK-facing SDKRateLimitInfo type.
  */
 export function toSDKRateLimitInfo(
-  limits: ClaudeAILimits | undefined,
+  limits: VexzyLimits | undefined,
 ): SDKRateLimitInfo | undefined {
   if (!limits) {
     return undefined
@@ -232,21 +231,6 @@ export function toSDKRateLimitInfo(
     }),
     ...(limits.utilization !== undefined && {
       utilization: limits.utilization,
-    }),
-    ...(limits.overageStatus !== undefined && {
-      overageStatus: limits.overageStatus,
-    }),
-    ...(limits.overageResetsAt !== undefined && {
-      overageResetsAt: limits.overageResetsAt,
-    }),
-    ...(limits.overageDisabledReason !== undefined && {
-      overageDisabledReason: limits.overageDisabledReason,
-    }),
-    ...(limits.isUsingOverage !== undefined && {
-      isUsingOverage: limits.isUsingOverage,
-    }),
-    ...(limits.surpassedThreshold !== undefined && {
-      surpassedThreshold: limits.surpassedThreshold,
     }),
   }
 }

@@ -77,7 +77,7 @@ export const ThinkingAdaptiveSchema = lazySchema(() =>
     .object({
       type: z.literal('adaptive'),
     })
-    .describe('Claude decides when and how much to think (Opus 4.6+).'),
+    .describe('The model decides when and how much to think.'),
 )
 
 export const ThinkingEnabledSchema = lazySchema(() =>
@@ -105,7 +105,7 @@ export const ThinkingConfigSchema = lazySchema(() =>
       ThinkingDisabledSchema(),
     ])
     .describe(
-      "Controls Claude's thinking/reasoning behavior. When set, takes precedence over the deprecated maxThinkingTokens.",
+      'Controls model thinking/reasoning behavior. When set, takes precedence over the deprecated maxThinkingTokens.',
     ),
 )
 
@@ -182,7 +182,7 @@ export const McpServerStatusSchema = lazySchema(() =>
         .string()
         .optional()
         .describe(
-          'Configuration scope (e.g., project, user, local, claudeai, managed)',
+          'Configuration scope (e.g., project, user, local, managed)',
         ),
       tools: z
         .array(
@@ -1057,7 +1057,7 @@ export const ModelInfoSchema = lazySchema(() =>
         .boolean()
         .optional()
         .describe(
-          'Whether this model supports adaptive thinking (Claude decides when and how much to think)',
+          'Whether this model supports adaptive thinking',
         ),
       supportsFastMode: z
         .boolean()
@@ -1076,7 +1076,6 @@ export const AccountInfoSchema = lazySchema(() =>
     .object({
       email: z.string().optional(),
       organization: z.string().optional(),
-      subscriptionType: z.string().optional(),
       tokenSource: z.string().optional(),
       apiKeySource: z.string().optional(),
       apiProvider: z
@@ -1315,33 +1314,9 @@ export const SDKRateLimitInfoSchema = lazySchema(() =>
           'seven_day',
           'seven_day_opus',
           'seven_day_sonnet',
-          'overage',
         ])
         .optional(),
       utilization: z.number().optional(),
-      overageStatus: z
-        .enum(['allowed', 'allowed_warning', 'rejected'])
-        .optional(),
-      overageResetsAt: z.number().optional(),
-      overageDisabledReason: z
-        .enum([
-          'overage_not_provisioned',
-          'org_level_disabled',
-          'org_level_disabled_until',
-          'out_of_credits',
-          'seat_tier_level_disabled',
-          'member_level_disabled',
-          'seat_tier_zero_credit_limit',
-          'group_zero_credit_limit',
-          'member_zero_credit_limit',
-          'org_service_level_disabled',
-          'org_service_zero_credit_limit',
-          'no_limits_configured',
-          'unknown',
-        ])
-        .optional(),
-      isUsingOverage: z.boolean().optional(),
-      surpassedThreshold: z.number().optional(),
     })
     .describe('Rate limit information for the active MindCode API account.'),
 )

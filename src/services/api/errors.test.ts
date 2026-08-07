@@ -42,12 +42,12 @@ mock.module(
 const limitsMock = () => ({
   getRateLimitErrorMessage: () => undefined,
 })
-mock.module('../claudeAiLimits.js', limitsMock)
+mock.module('../vexzyLimits.js', limitsMock)
 mock.module(
-  new URL('../claudeAiLimits.ts', import.meta.url).pathname,
+  new URL('../vexzyLimits.ts', import.meta.url).pathname,
   limitsMock,
 )
-mock.module('src/services/claudeAiLimits.js', limitsMock)
+mock.module('src/services/vexzyLimits.js', limitsMock)
 
 const modelMock = () => ({
   getDefaultMainLoopModelSetting: () => 'sonnet',

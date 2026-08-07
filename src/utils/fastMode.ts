@@ -49,9 +49,8 @@ function getDisabledReasonMessage(
         : 'Fast mode unavailable during evaluation. Please purchase credits.'
     case 'preference':
       return 'Fast mode has been disabled by your organization'
-    case 'extra_usage_disabled':
-      // Only OAuth users can have extra_usage_disabled; console users don't have this concept
-      return 'Fast mode requires extra usage billing · /extra-usage to enable'
+    case 'credits_unavailable':
+      return 'Fast mode requires VEXZY credits to be available'
     case 'network_error':
       return 'Fast mode unavailable due to network connectivity issues'
     case 'unknown':
@@ -226,64 +225,6 @@ export function handleFastModeRejectedByAPI(): void {
   orgFastModeChange.emit(false)
 }
 
-// --- Overage rejection listeners ---
-// Fired when a 429 indicates fast mode was rejected because extra usage
-// (overage billing) is not available. Distinct from org-level disabling.
-const overageRejection = createSignal<[message: string]>()
-export const onFastModeOverageRejection = overageRejection.subscribe
-
-function getOverageDisabledMessage(reason: string | null): string {
-  switch (reason) {
-    case 'out_of_credits':
-      return 'Fast mode disabled · extra usage credits exhausted'
-    case 'org_level_disabled':
-    case 'org_service_level_disabled':
-      return 'Fast mode disabled · extra usage disabled by your organization'
-    case 'org_level_disabled_until':
-      return 'Fast mode disabled · extra usage spending cap reached'
-    case 'member_level_disabled':
-      return 'Fast mode disabled · extra usage disabled for your account'
-    case 'seat_tier_level_disabled':
-    case 'seat_tier_zero_credit_limit':
-    case 'member_zero_credit_limit':
-      return 'Fast mode disabled · extra usage not available for your plan'
-    case 'overage_not_provisioned':
-    case 'no_limits_configured':
-      return 'Fast mode requires extra usage billing · /extra-usage to enable'
-    default:
-      return 'Fast mode disabled · extra usage not available'
-  }
-}
-
-function isOutOfCreditsReason(reason: string | null): boolean {
-  return reason === 'org_level_disabled_until' || reason === 'out_of_credits'
-}
-
-/**
- * Called when a 429 indicates fast mode was rejected because extra usage
- * is not available. Permanently disables fast mode (unless the user has
- * ran out of credits) and notifies with a reason-specific message.
- */
-export function handleFastModeOverageRejection(reason: string | null): void {
-  const message = getOverageDisabledMessage(reason)
-  logForDebugging(
-    `Fast mode overage rejection: ${reason ?? 'unknown'} — ${message}`,
-  )
-  logEvent('tengu_fast_mode_overage_rejected', {
-    overage_disabled_reason: (reason ??
-      'unknown') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-  })
-  // Disable fast mode permanently unless the user has ran out of credits
-  if (!isOutOfCreditsReason(reason)) {
-    updateSettingsForSource('userSettings', { fastMode: undefined })
-    saveGlobalConfig(current => ({
-      ...current,
-      penguinModeOrgEnabled: false,
-    }))
-  }
-  overageRejection.emit(message)
-}
-
 export function isFastModeCooldown(): boolean {
   return getFastModeRuntimeState().status === 'cooldown'
 }
@@ -307,11 +248,11 @@ export function getFastModeState(
 }
 
 // Disabled reason returned by the API. The API is the canonical source for why
-// fast mode is disabled (free account, admin preference, extra usage not enabled).
+// fast mode is disabled (free account, preference, or credits unavailable).
 export type FastModeDisabledReason =
   | 'free'
   | 'preference'
-  | 'extra_usage_disabled'
+  | 'credits_unavailable'
   | 'network_error'
   | 'unknown'
 

@@ -13,14 +13,11 @@ import { createSystemAPIErrorMessage } from "src/utils/messages.js";
 import { getAPIProviderForStatsig } from "src/utils/model/providers.js";
 import {
   clearApiKeyHelperCache,
-  isClaudeAISubscriber,
-  isEnterpriseSubscriber,
 } from "../../utils/auth.js";
 import { isEnvTruthy } from "../../utils/envUtils.js";
 import { errorMessage } from "../../utils/errors.js";
 import {
   type CooldownReason,
-  handleFastModeOverageRejection,
   handleFastModeRejectedByAPI,
   isFastModeCooldown,
   isFastModeEnabled,
@@ -35,10 +32,6 @@ import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
 } from "../analytics/index.js";
-import {
-  checkMockRateLimitError,
-  isMockRateLimitError,
-} from "../rateLimitMocking.js";
 import { REPEATED_529_ERROR_MESSAGE } from "./errors.js";
 import { extractConnectionErrorDetails } from "./errorUtils.js";
 
@@ -193,20 +186,8 @@ export async function* withRetry<T>(
       : false;
 
     try {
-      // Check for mock rate limits (used by /mock-limits command for Ant employees)
-      if (process.env.USER_TYPE === "ant") {
-        const mockError = checkMockRateLimitError(
-          retryContext.model,
-          wasFastModeActive,
-        );
-        if (mockError) {
-          throw mockError;
-        }
-      }
-
       // Get a fresh client instance on first attempt or after authentication errors
       // - 401 for first-party API authentication failures
-      // - 403 "OAuth token has been revoked" (another process refreshed the token)
       // - Bedrock-specific auth errors (403 or CredentialsProviderError)
       // - Vertex-specific auth errors (credential refresh failures, 401)
       // - ECONNRESET/EPIPE: stale keep-alive socket; disable pooling and reconnect
@@ -227,21 +208,10 @@ export async function* withRetry<T>(
       if (
         client === null ||
         (lastError instanceof APIError && lastError.status === 401) ||
-        isOAuthTokenRevokedError(lastError) ||
         isBedrockAuthError(lastError) ||
         isVertexAuthError(lastError) ||
         isStaleConnection
       ) {
-        // On 401 "token expired" or 403 "token revoked", force a token refresh
-        if (
-          (lastError instanceof APIError && lastError.status === 401) ||
-          isOAuthTokenRevokedError(lastError)
-        ) {
-          const failedAccessToken = getClaudeAIOAuthTokens()?.accessToken;
-          if (failedAccessToken) {
-            await handleOAuth401Error(failedAccessToken);
-          }
-        }
         client = await getClient();
       }
 
@@ -265,17 +235,6 @@ export async function* withRetry<T>(
         error instanceof APIError &&
         (error.status === 429 || is529Error(error))
       ) {
-        // If the 429 is specifically because extra usage (overage) is not
-        // available, permanently disable fast mode with a specific message.
-        const overageReason = error.headers?.get?.(
-          "anthropic-ratelimit-unified-overage-disabled-reason",
-        );
-        if (overageReason !== null && overageReason !== undefined) {
-          handleFastModeOverageRejection(overageReason);
-          retryContext.fastMode = false;
-          continue;
-        }
-
         const retryAfterMs = getRetryAfterMs(error);
         if (retryAfterMs !== null && retryAfterMs < SHORT_RETRY_THRESHOLD_MS) {
           // Short retry-after: wait and retry with fast mode still active
@@ -324,7 +283,7 @@ export async function* withRetry<T>(
         // If FALLBACK_FOR_ALL_PRIMARY_MODELS is not set, fall through only if the primary model is a non-custom Opus model.
         // TODO: Revisit if the isNonCustomOpusModel check should still exist, or if isNonCustomOpusModel is a stale artifact of when MindCode was hardcoded on Opus.
         (process.env.FALLBACK_FOR_ALL_PRIMARY_MODELS ||
-          (!isClaudeAISubscriber() && isNonCustomOpusModel(options.model)))
+          isNonCustomOpusModel(options.model))
       ) {
         consecutive529Errors++;
         if (consecutive529Errors >= MAX_529_RETRIES) {
@@ -427,19 +386,14 @@ export async function* withRetry<T>(
       let delayMs: number;
       if (persistent && error instanceof APIError && error.status === 429) {
         persistentAttempt++;
-        // Window-based limits (e.g. 5hr Max/Pro) include a reset timestamp.
-        // Wait until reset rather than polling every 5 min uselessly.
-        const resetDelay = getRateLimitResetDelayMs(error);
-        delayMs =
-          resetDelay ??
-          Math.min(
-            getRetryDelay(
-              persistentAttempt,
-              retryAfter,
-              PERSISTENT_MAX_BACKOFF_MS,
-            ),
-            PERSISTENT_RESET_CAP_MS,
-          );
+        delayMs = Math.min(
+          getRetryDelay(
+            persistentAttempt,
+            retryAfter,
+            PERSISTENT_MAX_BACKOFF_MS,
+          ),
+          PERSISTENT_RESET_CAP_MS,
+        );
       } else if (persistent) {
         persistentAttempt++;
         // Retry-After is a server directive and bypasses maxDelayMs inside
@@ -620,14 +574,6 @@ export function is529Error(error: unknown): boolean {
   );
 }
 
-function isOAuthTokenRevokedError(error: unknown): boolean {
-  return (
-    error instanceof APIError &&
-    error.status === 403 &&
-    (error.message?.includes("OAuth token has been revoked") ?? false)
-  );
-}
-
 function isBedrockAuthError(error: unknown): boolean {
   if (isEnvTruthy(process.env.MINDCODE_USE_BEDROCK)) {
     // AWS libs reject without an API call if .aws holds a past Expiration value
@@ -694,11 +640,6 @@ function handleGcpCredentialError(error: unknown): boolean {
 }
 
 function shouldRetry(error: APIError): boolean {
-  // Never retry mock errors - they're from /mock-limits command for testing
-  if (isMockRateLimitError(error)) {
-    return false;
-  }
-
   // Persistent mode: 429/529 always retryable, bypass subscriber gates and
   // x-should-retry header.
   if (isPersistentRetryEnabled() && isTransientCapacityError(error)) {
@@ -732,22 +673,13 @@ function shouldRetry(error: APIError): boolean {
   const shouldRetryHeader = error.headers?.get?.("x-should-retry");
 
   // If the server explicitly says whether or not to retry, obey.
-  // For Max and Pro users, should-retry is true, but in several hours, so we shouldn't.
-  // Enterprise users can retry because they typically use PAYG instead of rate limits.
-  if (
-    shouldRetryHeader === "true" &&
-    (!isClaudeAISubscriber() || isEnterpriseSubscriber())
-  ) {
+  if (shouldRetryHeader === "true") {
     return true;
   }
 
-  // Ants can ignore x-should-retry: false for 5xx server errors only.
-  // For other status codes (401, 403, 400, 429, etc.), respect the header.
+  // Respect an explicit no-retry directive.
   if (shouldRetryHeader === "false") {
-    const is5xxError = error.status !== undefined && error.status >= 500;
-    if (!(process.env.USER_TYPE === "ant" && is5xxError)) {
-      return false;
-    }
+    return false;
   }
 
   if (error instanceof APIConnectionError) {
@@ -762,21 +694,14 @@ function shouldRetry(error: APIError): boolean {
   // Retry on lock timeouts.
   if (error.status === 409) return true;
 
-  // Retry on rate limits, but not for ClaudeAI Subscription users
-  // Enterprise users can retry because they typically use PAYG instead of rate limits
+  // Retry VEXZY rate limits.
   if (error.status === 429) {
-    return !isClaudeAISubscriber() || isEnterpriseSubscriber();
-  }
-
-  // Clear API key cache on 401 and allow retry.
-  // OAuth token handling is done in the main retry loop via handleOAuth401Error.
-  if (error.status === 401) {
-    clearApiKeyHelperCache();
     return true;
   }
 
-  // Retry on 403 "token revoked" (same refresh logic as 401, see above)
-  if (isOAuthTokenRevokedError(error)) {
+  // Clear API key cache on 401 and allow retry.
+  if (error.status === 401) {
+    clearApiKeyHelperCache();
     return true;
   }
 
@@ -809,14 +734,4 @@ function getRetryAfterMs(error: APIError): number | null {
     }
   }
   return null;
-}
-
-function getRateLimitResetDelayMs(error: APIError): number | null {
-  const resetHeader = error.headers?.get?.("anthropic-ratelimit-unified-reset");
-  if (!resetHeader) return null;
-  const resetUnixSec = Number(resetHeader);
-  if (!Number.isFinite(resetUnixSec)) return null;
-  const delayMs = resetUnixSec * 1000 - Date.now();
-  if (delayMs <= 0) return null;
-  return Math.min(delayMs, PERSISTENT_RESET_CAP_MS);
 }

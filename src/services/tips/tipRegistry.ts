@@ -312,12 +312,6 @@ const externalTips: Tip[] = [
     },
   },
   {
-    id: 'install-slack-app',
-    content: async () => 'Run /install-slack-app to use MindCode in Slack',
-    cooldownSessions: 10,
-    isRelevant: async () => !getGlobalConfig().slackAppInstallCount,
-  },
-  {
     id: 'permissions',
     content: async () =>
       'Use /permissions to pre-approve and pre-deny bash, edit, and MCP tools',

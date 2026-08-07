@@ -1,24 +1,23 @@
-import { formatTotalCost } from '../../cost-tracker.js'
-import { currentLimits } from '../../services/claudeAiLimits.js'
-import type { LocalCommandCall } from '../../types/command.js'
-import { isClaudeAISubscriber } from '../../utils/auth.js'
+import {
+  formatVexzyCredits,
+  getSessionCreditTotals,
+} from "../../services/credits/accounting.js";
+import type { LocalCommandCall } from "../../types/command.js";
 
 export const call: LocalCommandCall = async () => {
-  if (isClaudeAISubscriber()) {
-    let value: string
+  const totals = getSessionCreditTotals();
+  const unavailable =
+    totals.modelsWithoutPrice > 0 ? " · catalog price unavailable" : "";
 
-    if (currentLimits.isUsingOverage) {
-      value =
-        'You are currently using your overages to power your MindCode usage. We will automatically switch you back to your subscription rate limits when they reset'
-    } else {
-      value =
-        'You are currently using your subscription to power your MindCode usage'
-    }
-
-    if (process.env.USER_TYPE === 'ant') {
-      value += `\n\n[ANT-ONLY] Showing cost anyway:\n ${formatTotalCost()}`
-    }
-    return { type: 'text', value }
-  }
-  return { type: 'text', value: formatTotalCost() }
-}
+  return {
+    type: "text",
+    value: [
+      `VEXZY session credits: ${formatVexzyCredits(totals.totalCredits)}${unavailable}`,
+      `Requests: ${totals.requests}`,
+      `Input: ${totals.inputTokens} tokens · ${formatVexzyCredits(totals.inputCredits)} credits`,
+      `Cache: ${totals.cacheReadTokens + totals.cacheWriteTokens} tokens · ${formatVexzyCredits(totals.cacheCredits)} credits`,
+      `Reasoning: ${totals.reasoningTokens} tokens · ${formatVexzyCredits(totals.reasoningCredits)} credits`,
+      `Output: ${totals.outputTokens} tokens · ${formatVexzyCredits(totals.outputCredits)} credits`,
+    ].join("\n"),
+  };
+};

@@ -8,7 +8,7 @@ import {
   formatVexzyCredits,
   getSessionCreditTotals,
 } from '../../services/credits/accounting.js'
-import { getRawUtilization } from '../../services/claudeAiLimits.js'
+import { getRawUtilization } from '../../services/vexzyLimits.js'
 import { useAppState } from '../../state/AppState.js'
 import type { Message } from '../../types/message.js'
 import {

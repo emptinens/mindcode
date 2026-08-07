@@ -2,13 +2,12 @@ import { c as _c } from "react/compiler-runtime";
 import { useEffect } from 'react';
 import { useNotifications } from 'src/context/notifications.js';
 import { useAppState, useSetAppState } from 'src/state/AppState.js';
-import { type CooldownReason, isFastModeEnabled, onCooldownExpired, onCooldownTriggered, onFastModeOverageRejection, onOrgFastModeChanged } from 'src/utils/fastMode.js';
+import { type CooldownReason, isFastModeEnabled, onCooldownExpired, onCooldownTriggered, onOrgFastModeChanged } from 'src/utils/fastMode.js';
 import { formatDuration } from 'src/utils/format.js';
 import { getIsRemoteMode } from '../../bootstrap/state.js';
 const COOLDOWN_STARTED_KEY = 'fast-mode-cooldown-started';
 const COOLDOWN_EXPIRED_KEY = 'fast-mode-cooldown-expired';
 const ORG_CHANGED_KEY = 'fast-mode-org-changed';
-const OVERAGE_REJECTED_KEY = 'fast-mode-overage-rejected';
 export function useFastModeNotification() {
   const $ = _c(13);
   const {
@@ -58,39 +57,9 @@ export function useFastModeNotification() {
     t1 = $[4];
   }
   useEffect(t0, t1);
-  let t2;
-  let t3;
-  if ($[5] !== addNotification || $[6] !== setAppState) {
-    t2 = () => {
-      if (getIsRemoteMode()) {
-        return;
-      }
-      if (!isFastModeEnabled()) {
-        return;
-      }
-      return onFastModeOverageRejection(message => {
-        setAppState(_temp3);
-        addNotification({
-          key: OVERAGE_REJECTED_KEY,
-          color: "warning",
-          priority: "immediate",
-          text: message
-        });
-      });
-    };
-    t3 = [addNotification, setAppState];
-    $[5] = addNotification;
-    $[6] = setAppState;
-    $[7] = t2;
-    $[8] = t3;
-  } else {
-    t2 = $[7];
-    t3 = $[8];
-  }
-  useEffect(t2, t3);
   let t4;
   let t5;
-  if ($[9] !== addNotification || $[10] !== isFastMode) {
+  if ($[5] !== addNotification || $[6] !== isFastMode) {
     t4 = () => {
       if (getIsRemoteMode()) {
         return;
@@ -126,21 +95,15 @@ export function useFastModeNotification() {
       };
     };
     t5 = [addNotification, isFastMode];
-    $[9] = addNotification;
-    $[10] = isFastMode;
-    $[11] = t4;
-    $[12] = t5;
+    $[5] = addNotification;
+    $[6] = isFastMode;
+    $[7] = t4;
+    $[8] = t5;
   } else {
-    t4 = $[11];
-    t5 = $[12];
+    t4 = $[7];
+    t5 = $[8];
   }
   useEffect(t4, t5);
-}
-function _temp3(prev_0) {
-  return {
-    ...prev_0,
-    fastMode: false
-  };
 }
 function _temp2(prev) {
   return {

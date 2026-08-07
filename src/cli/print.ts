@@ -244,8 +244,8 @@ import { collectContextData } from 'src/commands/context/context-noninteractive.
 import { LOCAL_COMMAND_STDOUT_TAG } from 'src/constants/xml.js'
 import {
   statusListeners,
-  type ClaudeAILimits,
-} from 'src/services/claudeAiLimits.js'
+  type VexzyLimits,
+} from 'src/services/vexzyLimits.js'
 import {
   getDefaultMainLoopModel,
   getMainLoopModel,
@@ -1093,7 +1093,7 @@ function runHeadlessStreaming(
   // Set up rate limit status listener to emit SDKRateLimitEvent for all status changes.
   // Emitting for all statuses (including 'allowed') ensures consumers can clear warnings
   // when rate limits reset. The upstream emitStatusChange already deduplicates via isEqual.
-  const rateLimitListener = (limits: ClaudeAILimits) => {
+  const rateLimitListener = (limits: VexzyLimits) => {
     const rateLimitInfo = toSDKRateLimitInfo(limits)
     if (rateLimitInfo) {
       output.enqueue({

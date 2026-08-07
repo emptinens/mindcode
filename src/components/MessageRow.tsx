@@ -29,7 +29,6 @@ export type Props = {
   streamingToolUseIDs: Set<string>;
   screen: Screen;
   canAnimate: boolean;
-  onOpenRateLimitOptions?: () => void;
   lastThinkingBlockId: string | null;
   latestBashOutputUUID: string | null;
   columns: number;
@@ -103,7 +102,6 @@ function MessageRowImpl(t0) {
     streamingToolUseIDs,
     screen,
     canAnimate,
-    onOpenRateLimitOptions,
     lastThinkingBlockId,
     latestBashOutputUUID,
     columns,
@@ -229,8 +227,8 @@ function MessageRowImpl(t0) {
   const t6 = !hasMetadata;
   const t7 = hasMetadata ? undefined : columns;
   let t8;
-  if ($[37] !== commands || $[38] !== inProgressToolUseIDs || $[39] !== isActiveCollapsedGroup || $[40] !== isStatic || $[41] !== isTranscriptMode || $[42] !== isUserContinuation || $[43] !== lastThinkingBlockId || $[44] !== latestBashOutputUUID || $[45] !== lookups || $[46] !== msg || $[47] !== onOpenRateLimitOptions || $[48] !== progressMessagesForMessage || $[49] !== shouldAnimate || $[50] !== t6 || $[51] !== t7 || $[52] !== tools || $[53] !== verbose) {
-    t8 = <Message message={msg} lookups={lookups} addMargin={t6} containerWidth={t7} tools={tools} commands={commands} verbose={verbose} inProgressToolUseIDs={inProgressToolUseIDs} progressMessagesForMessage={progressMessagesForMessage} shouldAnimate={shouldAnimate} shouldShowDot={true} isTranscriptMode={isTranscriptMode} isStatic={isStatic} onOpenRateLimitOptions={onOpenRateLimitOptions} isActiveCollapsedGroup={isActiveCollapsedGroup} isUserContinuation={isUserContinuation} lastThinkingBlockId={lastThinkingBlockId} latestBashOutputUUID={latestBashOutputUUID} />;
+  if ($[37] !== commands || $[38] !== inProgressToolUseIDs || $[39] !== isActiveCollapsedGroup || $[40] !== isStatic || $[41] !== isTranscriptMode || $[42] !== isUserContinuation || $[43] !== lastThinkingBlockId || $[44] !== latestBashOutputUUID || $[45] !== lookups || $[46] !== msg || $[48] !== progressMessagesForMessage || $[49] !== shouldAnimate || $[50] !== t6 || $[51] !== t7 || $[52] !== tools || $[53] !== verbose) {
+    t8 = <Message message={msg} lookups={lookups} addMargin={t6} containerWidth={t7} tools={tools} commands={commands} verbose={verbose} inProgressToolUseIDs={inProgressToolUseIDs} progressMessagesForMessage={progressMessagesForMessage} shouldAnimate={shouldAnimate} shouldShowDot={true} isTranscriptMode={isTranscriptMode} isStatic={isStatic} isActiveCollapsedGroup={isActiveCollapsedGroup} isUserContinuation={isUserContinuation} lastThinkingBlockId={lastThinkingBlockId} latestBashOutputUUID={latestBashOutputUUID} />;
     $[37] = commands;
     $[38] = inProgressToolUseIDs;
     $[39] = isActiveCollapsedGroup;
@@ -241,7 +239,6 @@ function MessageRowImpl(t0) {
     $[44] = latestBashOutputUUID;
     $[45] = lookups;
     $[46] = msg;
-    $[47] = onOpenRateLimitOptions;
     $[48] = progressMessagesForMessage;
     $[49] = shouldAnimate;
     $[50] = t6;

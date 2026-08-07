@@ -12,8 +12,7 @@
 // that sandbox network restrictions require explicit user permission rules.
 
 export const PREAPPROVED_HOSTS = new Set([
-  // Anthropic
-  'platform.claude.com',
+  // VEXZY and generic model/tool documentation
   'code.claude.com',
   'modelcontextprotocol.io',
   'github.com/anthropics',

@@ -328,21 +328,6 @@ export type GlobalConfig = {
   // Overage credit grant upsell tracking (keyed by org UUID — multi-org users).
   // Inlined shape (not import()) because config.ts is in the SDK build surface
   // and the SDK bundler can't resolve CLI service modules.
-  overageCreditGrantCache?: Record<
-    string,
-    {
-      info: {
-        available: boolean
-        eligible: boolean
-        granted: boolean
-        amount_minor_units: number | null
-        currency: string | null
-      }
-      timestamp: number
-    }
-  >
-  overageCreditUpsellSeenCount?: number // Number of times the overage credit upsell has been shown
-  hasVisitedExtraUsage?: boolean // Whether the user has visited /extra-usage — hides credit upsells
 
   // Voice mode notice tracking
   voiceNoticeSeenCount?: number // Number of times the voice-mode-available notice has been shown
@@ -384,8 +369,6 @@ export type GlobalConfig = {
   firstStartTime?: string // ISO timestamp when MindCode was first started on this machine
 
   messageIdleNotifThresholdMs: number // How long the user has to have been idle to get a notification that Claude is done generating
-
-  slackAppInstallCount?: number // Number of times the user has clicked to install the Slack app
 
   // File checkpointing configuration
   fileCheckpointingEnabled: boolean
@@ -518,9 +501,6 @@ export type GlobalConfig = {
   // Used with tengu_cicada_nap_ms to throttle API calls
   startupPrefetchedAt?: number
 
-  // Cached extra usage disabled reason from the last API response
-  // undefined = no cache, null = extra usage enabled, string = disabled reason.
-  cachedExtraUsageDisabledReason?: string | null
 
   // Auto permissions notification tracking (ant-only)
   autoPermissionsNotificationCount?: number // Number of times the auto permissions notification has been shown

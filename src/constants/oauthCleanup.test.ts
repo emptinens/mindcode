@@ -15,9 +15,18 @@ describe('VEXZY provider OAuth cleanup', () => {
     ).toEqual([])
   })
 
-  test('retains only a provider-neutral endpoint compatibility shape', () => {
+  test('retains only VEXZY endpoint configuration', () => {
     const source = read('src/constants/oauth.ts')
     expect(source).toContain('VEXZY_MESSAGES_BASE_URL')
+    expect(source).toContain('OAuthConfig')
+    for (const forbidden of [
+      'OAuthCompatibilityConfig',
+      'CLAUDE_AI_',
+      'CLAUDEAI_',
+      'ANTHROPIC_',
+    ]) {
+      expect(source).not.toContain(forbidden)
+    }
     expect(source).not.toContain('MCP_CLIENT_METADATA_URL')
     expect(source).not.toContain('api.anthropic.com')
     expect(source).not.toContain('claude.ai/oauth')
