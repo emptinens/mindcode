@@ -178,8 +178,17 @@ impl LayoutRects {
 
 /// Calculate the full shell geometry for a workspace.
 pub fn calculate_layout(area: Rect, ratios: PaneRatios) -> LayoutRects {
+    calculate_layout_with_composer(area, ratios, 3)
+}
+
+/// Calculate shell geometry with a dynamic composer height clamped to 2..=8 rows.
+pub fn calculate_layout_with_composer(
+    area: Rect,
+    ratios: PaneRatios,
+    composer_rows: u16,
+) -> LayoutRects {
     let breakpoint = Breakpoint::for_width(area.width);
-    let (header, content, composer, footer) = split_vertical(area);
+    let (header, content, composer, footer) = split_vertical(area, composer_rows);
     let (sidebar, chat, inspector) = split_content(content, breakpoint, ratios.normalized());
 
     LayoutRects {
@@ -203,7 +212,7 @@ pub fn calculate_workspace_layout(
     calculate_layout(area, workspace.ratios_for(workspace_id))
 }
 
-fn split_vertical(area: Rect) -> (Rect, Rect, Rect, Rect) {
+fn split_vertical(area: Rect, composer_rows: u16) -> (Rect, Rect, Rect, Rect) {
     let mut y = area.y;
     let mut remaining = area.height;
 
@@ -216,7 +225,7 @@ fn split_vertical(area: Rect) -> (Rect, Rect, Rect, Rect) {
     remaining = remaining.saturating_sub(footer_height);
 
     let composer_height = if remaining >= 4 {
-        3
+        composer_rows.clamp(2, 8).min(remaining.saturating_sub(1))
     } else if remaining >= 2 {
         2
     } else {

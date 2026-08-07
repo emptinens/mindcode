@@ -1,4 +1,4 @@
-import React from "react";
+import type React from "react";
 import type { StatsStore } from "./context/stats.js";
 import type { Root } from "./ink.js";
 import type { Props as REPLProps } from "./screens/REPL.js";
@@ -68,6 +68,10 @@ export async function launchRepl(
       createControlServer: (options) => {
         const control = new NativeTuiControlServer(options);
         bridge = new NativeTuiInkBridge(control);
+        bridge.setConnectionState({
+          state: "connecting",
+          reconnect_attempts: 0,
+        });
         bridge.publishState(appProps.initialState);
         return control;
       },
@@ -84,6 +88,7 @@ export async function launchRepl(
       onInput: (message) => bridge?.handleInput(message),
       onTerminalSize: (message) =>
         bridge?.resize(message.columns, message.rows),
+      onConnectionStateChange: (event) => bridge?.setConnectionState(event),
       onExit: () => {
         native.exited = true;
         unmountNativeRoot();

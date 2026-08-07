@@ -54,6 +54,10 @@ class ControlFixture implements NativeTuiControlServerLike {
     this.connected = true;
     await this.options.onConnect?.();
   }
+  async disconnect(): Promise<void> {
+    this.connected = false;
+    await this.options.onDisconnect?.();
+  }
 }
 
 class PtyFixture implements NativeTuiPtyHostLike {
@@ -295,5 +299,36 @@ describe("native TUI foreground session", () => {
     expect(ptyCreations).toBe(0);
     expect(fixture.control?.closed).toBe(1);
     expect(session.state).toBe("closed");
+  });
+
+  test("propagates disconnect and reconnect attempts to the connection observer", async () => {
+    const fixture: Fixture = {
+      input: new InputFixture(),
+      output: new OutputFixture(),
+    };
+    const events: Array<{ state: string; reconnect_attempts: number }> = [];
+    const session = new NativeTuiSession(
+      options(fixture, {
+        onConnectionStateChange: ({ state, reconnect_attempts }) => {
+          events.push({ state, reconnect_attempts });
+        },
+      }),
+    );
+    const launch = session.launch();
+    await connectAfterStart(fixture);
+    await launch;
+    await fixture.control?.disconnect();
+    await fixture.control?.connect();
+
+    expect(events).toEqual(
+      expect.arrayContaining([
+        { state: "connecting", reconnect_attempts: 0 },
+        { state: "connected", reconnect_attempts: 0 },
+        { state: "disconnected", reconnect_attempts: 0 },
+        { state: "reconnecting", reconnect_attempts: 1 },
+        { state: "connected", reconnect_attempts: 1 },
+      ]),
+    );
+    await session.close();
   });
 });

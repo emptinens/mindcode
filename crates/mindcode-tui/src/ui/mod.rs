@@ -14,7 +14,7 @@ pub use animation::{
     SakuraPetalField,
 };
 pub use layout::{
-    calculate_layout, calculate_workspace_layout, Breakpoint, LayoutRects, PaneRatios,
-    WorkspaceLayoutModel,
+    calculate_layout, calculate_layout_with_composer, calculate_workspace_layout, Breakpoint,
+    LayoutRects, PaneRatios, WorkspaceLayoutModel,
 };
 pub use theme::{ColorMode, ColorToken, Palette, Theme, ThemeKind};

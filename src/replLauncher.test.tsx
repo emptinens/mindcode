@@ -28,12 +28,16 @@ class FakeControlServer {}
 class FakeBridge {
   readonly renderOptions = {};
   closeCount = 0;
+  connectionStates: unknown[] = [];
 
   constructor(_control: FakeControlServer) {
     bridges.push(this);
   }
 
   publishState(_state: AppState): void {}
+  setConnectionState(state: unknown): void {
+    this.connectionStates.push(state);
+  }
   handleInput(_message: unknown): void {}
   resize(_columns: number, _rows: number): void {}
 

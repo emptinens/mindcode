@@ -243,6 +243,351 @@ describe("native TUI control server", () => {
     expect(messages.values).toHaveLength(2);
   });
 
+  test("preserves every protocol v2 field when publishing a validated snapshot", async () => {
+    const server = new NativeTuiControlServer({
+      socketPath: resolveNativeTuiSocketPath(
+        `test-${randomUUID()}`,
+        "/tmp/mindcode-native-tui",
+      ),
+      sessionId: "session-1",
+    });
+    servers.push(server);
+    const first = server.publish({ status: { state: "ready" } });
+    const candidate = {
+      ...first,
+      sequence: first.sequence + 1,
+      sessions: [
+        {
+          id: "session-1",
+          name: "MindCode",
+          workspace: "/workspace",
+          status: "active",
+          model: "gpt-5.6-luna",
+          effort: "max",
+          active: true,
+          pinned: true,
+          unread: 2,
+          created_at_ms: 1,
+          updated_at_ms: 2,
+        },
+      ],
+      workspaces: [
+        {
+          id: "workspace-1",
+          name: "workspace",
+          path: "/workspace",
+          active: true,
+        },
+      ],
+      active_session_id: "session-1",
+      telemetry: {
+        ...first.telemetry,
+        model: "gpt-5.6-luna",
+        effort: "max",
+        credits: 1.25,
+        active_agents: 1,
+      },
+      agents: [
+        {
+          id: "agent-1",
+          name: "Luna",
+          role: "worker",
+          status: "running",
+          task_id: "task-1",
+          model: "gpt-5.6-luna",
+          effort: "max",
+          progress: 50,
+        },
+      ],
+      tasks: [
+        {
+          id: "task-1",
+          title: "Integrate",
+          status: "running",
+          progress: 50,
+          metadata: {
+            agent_id: "agent-1",
+            dependencies: [],
+            blocked_by: [],
+            files_touched: ["src/runtime/nativeTui/controlServer.ts"],
+          },
+        },
+      ],
+      transcript_window: {
+        start_sequence: 1,
+        end_sequence: 1,
+        has_older: true,
+        has_newer: false,
+        blocks: [],
+      },
+      changes: [
+        {
+          path: "src/runtime/nativeTui/controlServer.ts",
+          kind: "modified",
+          additions: 1,
+          deletions: 0,
+          staged: false,
+        },
+      ],
+      activity: [
+        {
+          id: "activity-1",
+          timestamp_ms: 1,
+          kind: "task",
+          message: "running",
+          task_id: "task-1",
+          agent_id: "agent-1",
+          severity: "info",
+        },
+      ],
+      permissions: [
+        {
+          id: "permission-1",
+          tool: "Bash",
+          action: "run",
+          resource: "bun test",
+          reason: "verify",
+          status: "pending",
+          requested_at_ms: 1,
+        },
+      ],
+      writer: {
+        mode: "writer",
+        writer_id: "client-1",
+        observers: ["client-2"],
+      },
+    };
+
+    expect(server.publishSnapshot(candidate)).toEqual(candidate);
+  });
+
+  test("accepts a client capability superset", async () => {
+    const socketPath = resolveNativeTuiSocketPath(
+      `test-${randomUUID()}`,
+      "/tmp/mindcode-native-tui",
+    );
+    const server = new NativeTuiControlServer({
+      socketPath,
+      sessionId: "session-1",
+    });
+    servers.push(server);
+    await server.start();
+    const client = await connect(socketPath);
+    const messages = collectMessages(client);
+    client.write(
+      encodeNativeTuiFrame(
+        handshake("session-1", "mindcode-tui", [
+          "render_snapshot",
+          "input",
+          "resize",
+          "shutdown",
+          "mouse",
+          "action",
+        ]),
+      ),
+    );
+    await messages.waitFor(1);
+    expect(messages.values[0]).toEqual({
+      type: "capabilities",
+      version: NATIVE_TUI_PROTOCOL_VERSION,
+      id: "session-1",
+      capabilities: [
+        "render_snapshot",
+        "input",
+        "resize",
+        "shutdown",
+        "mouse",
+        "action",
+      ],
+    });
+    expect(server.connected).toBe(true);
+  });
+
+  test("negotiates only the server/client capability intersection", async () => {
+    const socketPath = resolveNativeTuiSocketPath(
+      `test-${randomUUID()}`,
+      "/tmp/mindcode-native-tui",
+    );
+    const server = new NativeTuiControlServer({
+      socketPath,
+      sessionId: "session-1",
+      capabilities: [
+        "render_snapshot",
+        "input",
+        "resize",
+        "shutdown",
+        "mouse",
+        "server-only",
+      ],
+    });
+    servers.push(server);
+    await server.start();
+    const client = await connect(socketPath);
+    const messages = collectMessages(client);
+    client.write(
+      encodeNativeTuiFrame(
+        handshake("session-1", "mindcode-tui", [
+          "render_snapshot",
+          "input",
+          "resize",
+          "shutdown",
+          "mouse",
+          "action",
+          "client-only",
+        ]),
+      ),
+    );
+    await messages.waitFor(1);
+    expect(messages.values[0]).toMatchObject({
+      type: "capabilities",
+      id: "session-1",
+      capabilities: ["render_snapshot", "input", "resize", "shutdown", "mouse"],
+    });
+  });
+
+  test("rejects mouse and action input when capabilities are not negotiated", async () => {
+    const socketPath = resolveNativeTuiSocketPath(
+      `test-${randomUUID()}`,
+      "/tmp/mindcode-native-tui",
+    );
+    const server = new NativeTuiControlServer({
+      socketPath,
+      sessionId: "session-1",
+      capabilities: ["render_snapshot", "input", "resize", "shutdown"],
+    });
+    servers.push(server);
+    await server.start();
+    const client = await connect(socketPath);
+    const messages = collectMessages(client);
+    client.write(
+      encodeNativeTuiFrame(
+        handshake("session-1", "mindcode-tui", [
+          "render_snapshot",
+          "input",
+          "resize",
+          "shutdown",
+          "mouse",
+          "action",
+        ]),
+      ),
+    );
+    await messages.waitFor(1);
+    client.write(
+      Buffer.concat([
+        encodeNativeTuiFrame({
+          type: "input_event",
+          version: NATIVE_TUI_PROTOCOL_VERSION,
+          id: "mouse-1",
+          sequence: 1,
+          event: {
+            type: "mouse",
+            x: 1,
+            y: 2,
+            button: "left",
+            kind: "down",
+            modifiers: [],
+          },
+        }),
+        encodeNativeTuiFrame({
+          type: "input_event",
+          version: NATIVE_TUI_PROTOCOL_VERSION,
+          id: "action-1",
+          sequence: 2,
+          event: { type: "action", action: "open" },
+        }),
+      ]),
+    );
+    await messages.waitFor(3);
+    expect(messages.values.slice(1)).toEqual([
+      expect.objectContaining({
+        type: "error",
+        id: "mouse-1",
+        code: "capability_required",
+        message: "Capability mouse was not negotiated",
+      }),
+      expect.objectContaining({
+        type: "error",
+        id: "action-1",
+        code: "capability_required",
+        message: "Capability action was not negotiated",
+      }),
+    ]);
+    expect(server.connected).toBe(true);
+  });
+
+  test("replaces an idle pre-handshake socket for reconnect", async () => {
+    const socketPath = resolveNativeTuiSocketPath(
+      `test-${randomUUID()}`,
+      "/tmp/mindcode-native-tui",
+    );
+    const server = new NativeTuiControlServer({
+      socketPath,
+      sessionId: "session-1",
+    });
+    servers.push(server);
+    await server.start();
+    const idle = await connect(socketPath);
+    const reconnect = await connect(socketPath);
+    const messages = collectMessages(reconnect);
+    reconnect.write(encodeNativeTuiFrame(handshake("session-1")));
+    await messages.waitFor(1);
+    expect(messages.values[0]?.type).toBe("capabilities");
+    expect(server.connected).toBe(true);
+    await waitForClose(idle);
+  });
+
+  test("expires an idle handshake through a bounded timer", async () => {
+    const socketPath = resolveNativeTuiSocketPath(
+      `test-${randomUUID()}`,
+      "/tmp/mindcode-native-tui",
+    );
+    const server = new NativeTuiControlServer({
+      socketPath,
+      sessionId: "session-1",
+      handshakeTimeoutMs: 1,
+    });
+    servers.push(server);
+    await server.start();
+    const idle = await connect(socketPath);
+    const state = Reflect.get(server, "outbound") as {
+      handshakeTimer?: ReturnType<typeof setTimeout>;
+    };
+    expect(state.handshakeTimer).toBeDefined();
+    const expireHandshake = Reflect.get(server, "expireHandshake") as (
+      socket: Socket,
+    ) => void;
+    expireHandshake.call(server, idle);
+    await waitForClose(idle);
+    expect(server.connected).toBe(false);
+  });
+
+  test("keeps the Rust handshake server ID equal to the session ID", () => {
+    expect(
+      () =>
+        new NativeTuiControlServer({
+          socketPath: resolveNativeTuiSocketPath(
+            `test-${randomUUID()}`,
+            "/tmp/mindcode-native-tui",
+          ),
+          sessionId: "session-1",
+          serverId: "server-1",
+        }),
+    ).toThrow("serverId must match sessionId");
+  });
+
+  test("bounds the handshake timeout configuration", () => {
+    expect(
+      () =>
+        new NativeTuiControlServer({
+          socketPath: resolveNativeTuiSocketPath(
+            `test-${randomUUID()}`,
+            "/tmp/mindcode-native-tui",
+          ),
+          handshakeTimeoutMs: 60_001,
+        }),
+    ).toThrow("handshakeTimeoutMs");
+  });
+
   test("rejects a second connected client while retaining the first", async () => {
     const socketPath = resolveNativeTuiSocketPath(
       `test-${randomUUID()}`,
@@ -273,7 +618,14 @@ describe("native TUI control server", () => {
 function handshake(
   id: string,
   client = "mindcode-tui",
-  capabilities = ["render_snapshot", "input", "resize", "shutdown"],
+  capabilities = [
+    "render_snapshot",
+    "input",
+    "resize",
+    "shutdown",
+    "mouse",
+    "action",
+  ],
 ): NativeTuiWireMessage {
   return {
     type: "handshake",

@@ -11,10 +11,18 @@ description = "Native terminal renderer for the MindCode UI protocol"
 [workspace]
 
 [dependencies]
-crossterm = "0.29"
+crossterm = { version = "0.29", features = ["osc52"] }
 mindcode-protocol = { path = "../mindcode-protocol" }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 
 [[bin]]
 name = "mindcode-tui"
 path = "src/main.rs"
+
+[[test]]
+name = "interaction_foundation"
+path = "src/interaction.rs"
+
+[[test]]
+name = "clipboard_foundation"
+path = "src/clipboard.rs"

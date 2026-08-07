@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { encode } from "@msgpack/msgpack";
 import {
   NATIVE_TUI_MAX_FRAME_BYTES,
-  NATIVE_TUI_MAX_TASKS,
+  NATIVE_TUI_MAX_SESSIONS,
+  NATIVE_TUI_MAX_TRANSCRIPT_BLOCKS,
   NATIVE_TUI_PROTOCOL_VERSION,
   NativeTuiFrameDecoder,
   NativeTuiProtocolError,
@@ -15,8 +16,25 @@ const handshake = {
   type: "handshake" as const,
   version: NATIVE_TUI_PROTOCOL_VERSION,
   id: "client-1",
-  client: "ratatui",
-  capabilities: ["input", "render_snapshot"],
+  client: "mindcode-tui",
+  capabilities: ["render_snapshot_v2", "input", "mouse"],
+};
+
+const telemetry = {
+  connection: { state: "connected", reconnect_attempts: 0 },
+  model: "gpt-5.6-luna",
+  effort: "high",
+  context_used_tokens: 1,
+  context_limit_tokens: 1_100_000,
+  input_tokens: 1,
+  output_tokens: 2,
+  cached_tokens: 0,
+  reasoning_tokens: 1,
+  credits: 4.419,
+  active_agents: 1,
+  queued_tasks: 0,
+  api_requests: 1,
+  latency_ms: 2,
 };
 
 const snapshot = {
@@ -24,24 +42,165 @@ const snapshot = {
   version: NATIVE_TUI_PROTOCOL_VERSION,
   id: "session-1",
   sequence: 4,
+  sessions: [
+    {
+      id: "session-1",
+      name: "MindCode",
+      workspace: "/workspace",
+      status: "active",
+      model: "gpt-5.6-luna",
+      effort: "high",
+      active: true,
+      pinned: true,
+      unread: 0,
+      created_at_ms: 1,
+      updated_at_ms: 2,
+    },
+  ],
+  workspaces: [
+    { id: "workspace-1", name: "MindCode", path: "/workspace", active: true },
+  ],
+  active_session_id: "session-1",
   status: { state: "running", message: "working" },
-  tasks: [{ id: "task-1", title: "Build", status: "running", progress: 50 }],
-  transcript: [{ sequence: 3, role: "assistant", text: "done" }],
+  telemetry,
+  tasks: [
+    {
+      id: "task-1",
+      title: "Build",
+      status: "running",
+      progress: 50,
+      metadata: {
+        owner: "leader",
+        agent_id: "agent-1",
+        model: "gpt-5.6-luna",
+        effort: "high",
+        dependencies: [],
+        blocked_by: [],
+        files_touched: ["src/runtime/nativeTui/protocol.ts"],
+        isolation: "shared",
+      },
+    },
+  ],
+  agents: [
+    {
+      id: "agent-1",
+      name: "Luna",
+      role: "worker",
+      status: "running",
+      task_id: "task-1",
+      model: "gpt-5.6-luna",
+      effort: "high",
+      progress: 50,
+    },
+  ],
+  transcript: [
+    {
+      type: "markdown" as const,
+      id: "message-1",
+      sequence: 1,
+      role: "assistant",
+      text: "done",
+    },
+    {
+      type: "code" as const,
+      id: "code-1",
+      sequence: 2,
+      role: "assistant",
+      language: "typescript",
+      code: "export const ok = true;",
+    },
+    {
+      type: "tool" as const,
+      id: "tool-1",
+      sequence: 3,
+      name: "bun",
+      status: "done",
+      input: "test",
+      output: "ok",
+      duration_ms: 10,
+    },
+    {
+      type: "thinking" as const,
+      id: "thinking-1",
+      sequence: 4,
+      summary: "plan",
+      effort: "high",
+      elapsed_ms: 1,
+      tokens_used: 1,
+    },
+    {
+      type: "report" as const,
+      id: "report-1",
+      sequence: 5,
+      task_id: "task-1",
+      status: "completed",
+      summary: "done",
+      changed_files: ["src/runtime/nativeTui/protocol.ts"],
+      evidence: ["bun test"],
+      tokens_used: 1,
+      effort_used: "high",
+    },
+    {
+      type: "error" as const,
+      id: "error-1",
+      sequence: 6,
+      code: "warning",
+      message: "retrying",
+      recoverable: true,
+    },
+  ],
+  transcript_window: {
+    start_sequence: 1,
+    end_sequence: 6,
+    has_older: false,
+    has_newer: false,
+    blocks: [],
+  },
+  changes: [
+    {
+      path: "src/runtime/nativeTui/protocol.ts",
+      kind: "modified",
+      additions: 1,
+      deletions: 0,
+      staged: false,
+      language: "typescript",
+      diff: "+export const version = 2;",
+    },
+  ],
+  activity: [
+    {
+      id: "activity-1",
+      timestamp_ms: 1,
+      kind: "task_completed",
+      message: "done",
+      task_id: "task-1",
+      agent_id: "agent-1",
+      severity: "info",
+    },
+  ],
+  permissions: [
+    {
+      id: "permission-1",
+      tool: "Bash",
+      action: "run",
+      resource: "bun test",
+      reason: "verification",
+      status: "pending",
+      requested_at_ms: 1,
+      task_id: "task-1",
+      agent_id: "agent-1",
+    },
+  ],
+  writer: { mode: "writer", writer_id: "client-1", observers: ["client-2"] },
 };
 
-describe("native TUI protocol", () => {
-  test("matches the Rust golden frames", () => {
-    const goldenFrames = [
-      "0000005d85a474797065a968616e647368616b65a776657273696f6e01a26964a8636c69656e742d31a6636c69656e74ac6d696e64636f64652d747569ac6361706162696c697469657392af72656e6465725f736e617073686f74a5696e707574",
-      "0000005685a474797065ab696e7075745f6576656e74a776657273696f6e01a26964a7696e7075742d31a873657175656e636501a56576656e7483a474797065a36b6579a36b6579a163a96d6f6469666965727391a46374726c",
-      "0000006887a474797065af72656e6465725f736e617073686f74a776657273696f6e01a26964a973657373696f6e2d31a873657175656e636501a673746174757382a57374617465a57265616479a76d657373616765a26f6ba57461736b7390aa7472616e73637269707490",
-    ];
-    for (const hex of goldenFrames) {
-      const frame = Buffer.from(hex, "hex");
-      const message = decodeNativeTuiFrame(frame);
-      expect(encodeNativeTuiFrame(message).toString("hex")).toBe(hex);
-    }
+describe("native TUI protocol v2", () => {
+  test("round-trips the complete rich v2 snapshot", () => {
+    const frame = encodeNativeTuiFrame(snapshot);
+    expect(frame.readUInt32BE(0)).toBe(frame.byteLength - 4);
+    expect(decodeNativeTuiFrame(frame)).toEqual(snapshot);
   });
+
   test("encodes four-byte big-endian MessagePack frames", () => {
     const frame = encodeNativeTuiFrame(handshake);
     expect(frame.readUInt32BE(0)).toBe(frame.byteLength - 4);
@@ -59,34 +218,100 @@ describe("native TUI protocol", () => {
     ]);
   });
 
-  test("rejects unknown fields, wrong versions, malformed values, and oversized frames", () => {
-    expect(() =>
-      validateNativeTuiMessage({ ...handshake, extra: true }),
-    ).toThrow(NativeTuiProtocolError);
-    expect(() =>
-      validateNativeTuiMessage({ ...handshake, version: 2 }),
-    ).toThrow(NativeTuiProtocolError);
-    expect(() =>
-      validateNativeTuiMessage({
-        ...handshake,
-        capabilities: Array.from({ length: 65 }, () => "cap"),
-      }),
-    ).toThrow(NativeTuiProtocolError);
-    expect(() =>
-      validateNativeTuiMessage({
-        ...snapshot,
-        tasks: Array.from({ length: NATIVE_TUI_MAX_TASKS + 1 }, (_, index) => ({
-          id: `task-${index}`,
-          title: "task",
-          status: "pending",
-        })),
-      }),
-    ).toThrow(NativeTuiProtocolError);
-    const tooLarge = Buffer.alloc(4);
-    tooLarge.writeUInt32BE(NATIVE_TUI_MAX_FRAME_BYTES + 1, 0);
-    expect(() => decodeNativeTuiFrame(tooLarge)).toThrow(
+  test("rejects an oversized aggregate chunk before Buffer.concat", () => {
+    const decoder = new NativeTuiFrameDecoder(32);
+    expect(decoder.push(Uint8Array.of(0, 0, 0, 32, 0))).toEqual([]);
+    const state = decoder as unknown as { buffered: Buffer };
+    const bufferedBeforeReject = state.buffered;
+
+    expect(() => decoder.push(new Uint8Array(32))).toThrow(
+      "Buffered frame exceeds the maximum size",
+    );
+    expect(state.buffered).toBe(bufferedBeforeReject);
+  });
+
+  test("rejects inverted code line ranges like Rust protocol v2", () => {
+    const malformed = {
+      ...snapshot,
+      transcript: snapshot.transcript.map((block, index) =>
+        index === 1 ? { ...block, start_line: 8, end_line: 3 } : block,
+      ),
+    };
+    expect(() => validateNativeTuiMessage(malformed)).toThrow(
+      "start line must not exceed end line",
+    );
+  });
+
+  test("validates mouse and action input variants", () => {
+    const mouse = {
+      type: "input_event" as const,
+      version: NATIVE_TUI_PROTOCOL_VERSION,
+      id: "mouse-1",
+      sequence: 1,
+      event: {
+        type: "mouse" as const,
+        x: 12,
+        y: 4,
+        button: "left" as const,
+        kind: "down" as const,
+        modifiers: ["shift"],
+      },
+    };
+    const action = {
+      type: "input_event" as const,
+      version: NATIVE_TUI_PROTOCOL_VERSION,
+      id: "action-1",
+      sequence: 2,
+      event: { type: "action" as const, action: "open_inspector", target: "task-1" },
+    };
+    expect(decodeNativeTuiFrame(encodeNativeTuiFrame(mouse))).toEqual(mouse);
+    expect(decodeNativeTuiFrame(encodeNativeTuiFrame(action))).toEqual(action);
+  });
+
+  test("round-trips acknowledgement, error, and shutdown control messages", () => {
+    const messages = [
+      {
+        type: "ack" as const,
+        version: NATIVE_TUI_PROTOCOL_VERSION,
+        id: "input-1",
+        sequence: 7,
+      },
+      {
+        type: "error" as const,
+        version: NATIVE_TUI_PROTOCOL_VERSION,
+        id: "input-2",
+        code: "handshake_rejected",
+        message: "Handshake rejected",
+        details: "capability mismatch",
+      },
+      {
+        type: "shutdown" as const,
+        version: NATIVE_TUI_PROTOCOL_VERSION,
+        id: "session-1",
+        reason: "complete",
+      },
+    ];
+    for (const message of messages) {
+      expect(decodeNativeTuiFrame(encodeNativeTuiFrame(message))).toEqual(
+        message,
+      );
+    }
+  });
+
+  test("rejects unknown fields, wrong versions, malformed values, and limits", () => {
+    expect(() => validateNativeTuiMessage({ ...handshake, extra: true })).toThrow(
       NativeTuiProtocolError,
     );
+    expect(() => validateNativeTuiMessage({ ...handshake, version: 1 })).toThrow(
+      NativeTuiProtocolError,
+    );
+    expect(() => validateNativeTuiMessage({ ...snapshot, sessions: Array.from({ length: NATIVE_TUI_MAX_SESSIONS + 1 }, () => snapshot.sessions[0]) })).toThrow(NativeTuiProtocolError);
+    expect(() => validateNativeTuiMessage({ ...snapshot, transcript: Array.from({ length: NATIVE_TUI_MAX_TRANSCRIPT_BLOCKS + 1 }, () => snapshot.transcript[0]) })).toThrow(NativeTuiProtocolError);
+    expect(() => validateNativeTuiMessage({ ...snapshot, telemetry: { ...snapshot.telemetry, context_used_tokens: 2_000_000 } })).toThrow(NativeTuiProtocolError);
+    expect(() => validateNativeTuiMessage({ ...snapshot, transcript: [{ ...snapshot.transcript[0], unexpected: true }] })).toThrow(NativeTuiProtocolError);
+    const tooLarge = Buffer.alloc(4);
+    tooLarge.writeUInt32BE(NATIVE_TUI_MAX_FRAME_BYTES + 1, 0);
+    expect(() => decodeNativeTuiFrame(tooLarge)).toThrow(NativeTuiProtocolError);
   });
 
   test("rejects trailing bytes and zero-length frames", () => {
@@ -98,25 +323,8 @@ describe("native TUI protocol", () => {
     expect(() => decodeNativeTuiFrame(zero)).toThrow(NativeTuiProtocolError);
   });
 
-  test("validates the Rust serde-tagged input event shapes", () => {
-    const input = {
-      type: "input_event" as const,
-      version: NATIVE_TUI_PROTOCOL_VERSION,
-      id: "input-1",
-      sequence: 1,
-      event: { type: "key" as const, key: "c", modifiers: ["ctrl"] },
-    };
-    expect(decodeNativeTuiFrame(encodeNativeTuiFrame(input))).toEqual(input);
-    expect(() =>
-      validateNativeTuiMessage({
-        ...input,
-        event: { type: "submit", extra: 1 },
-      }),
-    ).toThrow(NativeTuiProtocolError);
-  });
-
   test("does not accept arbitrary MessagePack values", () => {
-    const payload = Buffer.from(encode({ type: "handshake", version: 1 }));
+    const payload = Buffer.from(encode({ type: "handshake", version: 2 }));
     const frame = Buffer.alloc(payload.byteLength + 4);
     frame.writeUInt32BE(payload.byteLength, 0);
     payload.copy(frame, 4);

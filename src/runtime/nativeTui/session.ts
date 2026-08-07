@@ -59,6 +59,19 @@ export type NativeTuiSessionState =
   | "failed"
   | "closed";
 
+export type NativeTuiConnectionState =
+  | "connecting"
+  | "reconnecting"
+  | "connected"
+  | "disconnected"
+  | "closed";
+
+export type NativeTuiConnectionStateEvent = {
+  state: NativeTuiConnectionState;
+  reconnect_attempts: number;
+  last_error?: string;
+};
+
 export type NativeTuiControlServerLike = Pick<
   NativeTuiControlServer,
   "socketPath" | "start" | "close"
@@ -103,6 +116,11 @@ export type NativeTuiSessionOptions = {
   onTerminalSize?: NativeTuiControlServerOptions["onTerminalSize"];
   onCapabilities?: NativeTuiControlServerOptions["onCapabilities"];
   onBeforeConnect?: NativeTuiControlServerOptions["onBeforeConnect"];
+  onConnect?: NativeTuiControlServerOptions["onConnect"];
+  onDisconnect?: NativeTuiControlServerOptions["onDisconnect"];
+  onConnectionStateChange?: (
+    event: NativeTuiConnectionStateEvent,
+  ) => void | Promise<void>;
   onExit?: (event: NativeTuiPtyExit) => void;
 };
 
@@ -143,6 +161,8 @@ export class NativeTuiSession {
   private terminalRawChanged = false;
   private terminalTakeoverReady = false;
   private closeRequested = false;
+  private hasConnected = false;
+  private reconnectAttempts = 0;
 
   constructor(options: NativeTuiSessionOptions = {}) {
     this.options = options;
@@ -262,6 +282,10 @@ export class NativeTuiSession {
 
   private async startInternal(): Promise<NativeTuiSession> {
     this.assertOpen();
+    this.notifyConnectionState({
+      state: "connecting",
+      reconnect_attempts: this.reconnectAttempts,
+    });
     if ((this.options.platform ?? process.platform) === "win32") {
       throw new NativeTuiLaunchError(
         "unsupported_platform",
@@ -281,11 +305,35 @@ export class NativeTuiSession {
         socketPath: this.socketPathValue,
         runtimeDirectory: this.options.runtimeDirectory,
         onBeforeConnect: async () => {
+          if (this.hasConnected) {
+            this.notifyConnectionState({
+              state: "reconnecting",
+              reconnect_attempts: this.reconnectAttempts + 1,
+            });
+          }
           await this.options.onBeforeConnect?.();
           this.assertOpen();
           this.terminalTakeoverReady = true;
         },
-        onConnect: () => this.resolveHandshake(),
+        onConnect: async () => {
+          if (this.hasConnected) this.reconnectAttempts += 1;
+          this.hasConnected = true;
+          this.resolveHandshake();
+          await this.options.onConnect?.();
+          this.notifyConnectionState({
+            state: "connected",
+            reconnect_attempts: this.reconnectAttempts,
+          });
+        },
+        onDisconnect: async () => {
+          await this.options.onDisconnect?.();
+          if (!this.closeRequested) {
+            this.notifyConnectionState({
+              state: "disconnected",
+              reconnect_attempts: this.reconnectAttempts,
+            });
+          }
+        },
         onInput: this.options.onInput,
         onTerminalSize: async (event) => {
           this.resize(event.columns, event.rows);
@@ -464,8 +512,23 @@ export class NativeTuiSession {
       firstError ??= error;
     }
     if (firstError) throw firstError;
+    this.notifyConnectionState({
+      state: "closed",
+      reconnect_attempts: this.reconnectAttempts,
+    });
     if (this.stateValue !== "exited" && this.stateValue !== "failed") {
       this.stateValue = "closed";
+    }
+  }
+
+  private notifyConnectionState(event: NativeTuiConnectionStateEvent): void {
+    try {
+      const result = this.options.onConnectionStateChange?.(event);
+      if (result && typeof (result as Promise<void>).catch === "function") {
+        void (result as Promise<void>).catch(() => undefined);
+      }
+    } catch {
+      // Connection telemetry is observational and must not break session I/O.
     }
   }
 }

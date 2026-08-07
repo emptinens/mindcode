@@ -40,7 +40,11 @@ const DEFAULT_NATIVE_TUI_CLIENT_CAPABILITIES = [
   "input",
   "resize",
   "shutdown",
+  "mouse",
+  "action",
 ] as const;
+export const DEFAULT_NATIVE_TUI_HANDSHAKE_TIMEOUT_MS = 3_000;
+export const MAX_NATIVE_TUI_HANDSHAKE_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_OUTBOUND_MESSAGES = 256;
 const DEFAULT_MAX_OUTBOUND_BYTES = NATIVE_TUI_MAX_FRAME_BYTES * 2;
 
@@ -61,6 +65,9 @@ type OutboundState = {
   running: boolean;
   closed: boolean;
   incoming: Promise<void>;
+  handshakeTimer?: ReturnType<typeof setTimeout>;
+  handshakeComplete: boolean;
+  negotiatedCapabilities: Set<string>;
 };
 
 export type NativeTuiControlServerOptions = {
@@ -71,6 +78,7 @@ export type NativeTuiControlServerOptions = {
   capabilities?: readonly string[];
   expectedClient?: string;
   expectedClientCapabilities?: readonly string[];
+  handshakeTimeoutMs?: number;
   maxOutboundQueueMessages?: number;
   maxOutboundQueueBytes?: number;
   projectionStore?: NativeTuiProjectionStore;
@@ -114,6 +122,7 @@ export class NativeTuiControlServer {
   private readonly capabilities: string[];
   private readonly expectedClient: string;
   private readonly expectedClientCapabilities: string[];
+  private readonly handshakeTimeoutMs: number;
   private readonly maxOutboundQueueMessages: number;
   private readonly maxOutboundQueueBytes: number;
   private readonly projectionStore: NativeTuiProjectionStore;
@@ -140,7 +149,13 @@ export class NativeTuiControlServer {
     this.socketPathValue =
       options.socketPath ??
       resolveNativeTuiSocketPath(sessionId, options.runtimeDirectory);
-    this.serverId = options.serverId ?? sessionId;
+    const serverId = options.serverId ?? sessionId;
+    if (serverId !== sessionId) {
+      throw new NativeTuiControlServerError(
+        "serverId must match sessionId for native TUI handshake compatibility",
+      );
+    }
+    this.serverId = sessionId;
     this.expectedClient = boundedConfigurationText(
       options.expectedClient ?? DEFAULT_NATIVE_TUI_CLIENT,
       "expectedClient",
@@ -151,6 +166,11 @@ export class NativeTuiControlServer {
         DEFAULT_NATIVE_TUI_CLIENT_CAPABILITIES,
       "expectedClientCapabilities",
     );
+    this.handshakeTimeoutMs = boundedConfigurationInteger(
+      options.handshakeTimeoutMs ?? DEFAULT_NATIVE_TUI_HANDSHAKE_TIMEOUT_MS,
+      "handshakeTimeoutMs",
+      MAX_NATIVE_TUI_HANDSHAKE_TIMEOUT_MS,
+    );
     this.maxOutboundQueueMessages = positiveConfigurationInteger(
       options.maxOutboundQueueMessages ?? DEFAULT_MAX_OUTBOUND_MESSAGES,
       "maxOutboundQueueMessages",
@@ -159,13 +179,16 @@ export class NativeTuiControlServer {
       options.maxOutboundQueueBytes ?? DEFAULT_MAX_OUTBOUND_BYTES,
       "maxOutboundQueueBytes",
     );
+    const configuredCapabilities = normalizeCapabilities(
+      options.capabilities ?? DEFAULT_NATIVE_TUI_CLIENT_CAPABILITIES,
+      "capabilities",
+      true,
+    );
     const capabilityMessage = validateNativeTuiServerMessage({
       type: "capabilities",
       version: NATIVE_TUI_PROTOCOL_VERSION,
       id: this.serverId,
-      capabilities: [
-        ...(options.capabilities ?? DEFAULT_NATIVE_TUI_CLIENT_CAPABILITIES),
-      ].slice(0, NATIVE_TUI_MAX_CAPABILITIES),
+      capabilities: configuredCapabilities,
     });
     if (capabilityMessage.type !== "capabilities") {
       throw new NativeTuiControlServerError("Invalid native TUI capabilities");
@@ -253,15 +276,30 @@ export class NativeTuiControlServer {
         "Snapshot has an unsupported version",
       );
     }
+    if (validated.id !== this.sessionId) {
+      throw new NativeTuiControlServerError(
+        "Snapshot session ID does not match this control server",
+      );
+    }
     if (validated.sequence !== this.projectionStore.revision + 1) {
       throw new NativeTuiControlServerError(
         "Snapshot revision is not monotonic",
       );
     }
     const projected = this.projectionStore.update({
+      sessions: validated.sessions,
+      workspaces: validated.workspaces,
+      active_session_id: validated.active_session_id ?? null,
       status: validated.status,
+      telemetry: validated.telemetry,
       tasks: validated.tasks,
+      agents: validated.agents,
       transcript: validated.transcript,
+      transcript_window: validated.transcript_window ?? null,
+      changes: validated.changes,
+      activity: validated.activity,
+      permissions: validated.permissions,
+      writer: validated.writer,
     });
     this.snapshotValue = projected;
     this.sendIfReady(projected);
@@ -316,12 +354,14 @@ export class NativeTuiControlServer {
     const state = this.outbound;
     this.client = undefined;
     this.outbound = undefined;
-    if (state)
+    if (state) {
+      this.clearHandshakeTimeout(state);
       this.failOutbound(
         state,
         new NativeTuiControlServerError("Control server closed"),
         false,
       );
+    }
     client?.destroy();
     const server = this.server;
     this.server = undefined;
@@ -340,8 +380,13 @@ export class NativeTuiControlServer {
 
   private acceptSocket(socket: Socket): void {
     if (this.client) {
-      socket.destroy();
-      return;
+      if (this.clientReady) {
+        socket.destroy();
+        return;
+      }
+      const previous = this.client;
+      this.disconnectSocket(previous);
+      previous.destroy();
     }
     const state: OutboundState = {
       socket,
@@ -350,11 +395,17 @@ export class NativeTuiControlServer {
       running: false,
       closed: false,
       incoming: Promise.resolve(),
+      handshakeComplete: false,
+      negotiatedCapabilities: new Set(),
     };
     this.client = socket;
     this.outbound = state;
     this.clientReady = false;
     this.lastSentSnapshotSequence = undefined;
+    state.handshakeTimer = setTimeout(
+      () => this.expireHandshake(socket),
+      this.handshakeTimeoutMs,
+    );
     const decoder = new NativeTuiFrameDecoder();
     socket.setNoDelay?.(true);
     socket.on("data", (chunk: Buffer) => {
@@ -380,8 +431,11 @@ export class NativeTuiControlServer {
     socket: Socket,
     value: NativeTuiClientMessage | NativeTuiServerMessage,
   ): Promise<void> {
+    if (this.client !== socket) return;
+    const state = this.outbound;
+    if (!state || state.socket !== socket || state.closed) return;
     const message = validateNativeTuiClientMessage(value);
-    if (!this.clientReady && message.type !== "handshake") {
+    if (!state.handshakeComplete && message.type !== "handshake") {
       await this.sendError(
         socket,
         message.id,
@@ -392,8 +446,8 @@ export class NativeTuiControlServer {
       return;
     }
     switch (message.type) {
-      case "handshake":
-        if (this.clientReady) {
+      case "handshake": {
+        if (state.handshakeComplete) {
           await this.sendError(
             socket,
             message.id,
@@ -403,7 +457,8 @@ export class NativeTuiControlServer {
           socket.destroy();
           return;
         }
-        if (!this.isExpectedHandshake(message)) {
+        const negotiatedCapabilities = this.negotiateCapabilities(message);
+        if (!negotiatedCapabilities) {
           await this.sendError(
             socket,
             message.id,
@@ -414,25 +469,59 @@ export class NativeTuiControlServer {
           return;
         }
         await this.onBeforeConnect?.();
+        if (
+          this.client !== socket ||
+          this.outbound !== state ||
+          state.closed ||
+          socket.destroyed
+        ) {
+          return;
+        }
+        this.clearHandshakeTimeout(state);
+        state.handshakeComplete = true;
+        state.negotiatedCapabilities = new Set(negotiatedCapabilities);
         this.clientReady = true;
         await this.send(socket, {
           type: "capabilities",
           version: NATIVE_TUI_PROTOCOL_VERSION,
           id: this.serverId,
-          capabilities: this.capabilities,
+          capabilities: negotiatedCapabilities,
         });
         if (this.snapshotValue) {
           await this.sendSnapshotIfNewer(socket, this.snapshotValue);
         }
         await this.onConnect?.();
         return;
+      }
       case "capabilities":
         await this.onCapabilities?.(message);
         return;
       case "terminal_size":
+        if (
+          !(await this.requireCapability(socket, state, message.id, "resize"))
+        ) {
+          return;
+        }
         await this.onTerminalSize?.(message);
         return;
       case "input_event":
+        if (
+          !(await this.requireCapability(socket, state, message.id, "input"))
+        ) {
+          return;
+        }
+        if (
+          message.event.type === "mouse" &&
+          !(await this.requireCapability(socket, state, message.id, "mouse"))
+        ) {
+          return;
+        }
+        if (
+          message.event.type === "action" &&
+          !(await this.requireCapability(socket, state, message.id, "action"))
+        ) {
+          return;
+        }
         await this.inputController.accept(message);
         if (!this.ownsInputController) await this.onInput?.(message);
         await this.send(socket, {
@@ -443,6 +532,11 @@ export class NativeTuiControlServer {
         });
         return;
       case "shutdown":
+        if (
+          !(await this.requireCapability(socket, state, message.id, "shutdown"))
+        ) {
+          return;
+        }
         await this.send(socket, message);
         await this.close();
         return;
@@ -453,26 +547,55 @@ export class NativeTuiControlServer {
     }
   }
 
-  private isExpectedHandshake(
+  private negotiateCapabilities(
     message: Extract<NativeTuiClientMessage, { type: "handshake" }>,
-  ): boolean {
+  ): string[] | undefined {
     if (
       message.id !== this.sessionId ||
       message.client !== this.expectedClient
     ) {
-      return false;
+      return undefined;
     }
-    if (
-      message.capabilities.length !== this.expectedClientCapabilities.length
-    ) {
-      return false;
-    }
-    const expected = new Set(this.expectedClientCapabilities);
     const actual = new Set(message.capabilities);
-    return (
-      actual.size === expected.size &&
-      message.capabilities.every((capability) => expected.has(capability))
+    if (
+      actual.size !== message.capabilities.length ||
+      !this.expectedClientCapabilities.every((capability) =>
+        actual.has(capability),
+      )
+    ) {
+      return undefined;
+    }
+    return this.capabilities.filter((capability) => actual.has(capability));
+  }
+
+  private async requireCapability(
+    socket: Socket,
+    state: OutboundState,
+    id: string,
+    capability: string,
+  ): Promise<boolean> {
+    if (state.negotiatedCapabilities.has(capability)) return true;
+    await this.sendError(
+      socket,
+      id,
+      "capability_required",
+      `Capability ${capability} was not negotiated`,
     );
+    return false;
+  }
+
+  private expireHandshake(socket: Socket): void {
+    if (this.client !== socket || this.clientReady) return;
+    const state = this.outbound;
+    if (!state || state.socket !== socket || state.handshakeComplete) return;
+    this.clearHandshakeTimeout(state);
+    socket.destroy();
+  }
+
+  private clearHandshakeTimeout(state: OutboundState): void {
+    if (state.handshakeTimer === undefined) return;
+    clearTimeout(state.handshakeTimer);
+    state.handshakeTimer = undefined;
   }
 
   private sendIfReady(message: NativeTuiServerMessage): void {
@@ -493,7 +616,15 @@ export class NativeTuiControlServer {
     socket: Socket,
     message: NativeTuiRenderSnapshot,
   ): Promise<void> {
-    if (this.client !== socket || socket.destroyed) return;
+    const state = this.outbound;
+    if (
+      this.client !== socket ||
+      !state ||
+      !state.negotiatedCapabilities.has("render_snapshot") ||
+      socket.destroyed
+    ) {
+      return;
+    }
     if (
       this.lastSentSnapshotSequence !== undefined &&
       message.sequence <= this.lastSentSnapshotSequence
@@ -643,6 +774,7 @@ export class NativeTuiControlServer {
     const wasReady = this.clientReady;
     this.clientReady = false;
     if (state) {
+      this.clearHandshakeTimeout(state);
       this.failOutbound(
         state,
         new NativeTuiControlServerError("Native TUI socket disconnected"),
@@ -713,14 +845,15 @@ async function writeFrameWithBackpressure(
 function normalizeCapabilities(
   values: readonly string[],
   context: string,
+  allowEmpty = false,
 ): string[] {
   if (
     !Array.isArray(values) ||
-    values.length === 0 ||
+    (!allowEmpty && values.length === 0) ||
     values.length > NATIVE_TUI_MAX_CAPABILITIES
   ) {
     throw new NativeTuiControlServerError(
-      `${context} must contain 1-${NATIVE_TUI_MAX_CAPABILITIES} values`,
+      `${context} must contain ${allowEmpty ? "0" : "1"}-${NATIVE_TUI_MAX_CAPABILITIES} values`,
     );
   }
   const result = values.map((value, index) =>
@@ -760,6 +893,19 @@ function positiveConfigurationInteger(value: number, context: string): number {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new NativeTuiControlServerError(
       `${context} must be a positive safe integer`,
+    );
+  }
+  return value;
+}
+
+function boundedConfigurationInteger(
+  value: number,
+  context: string,
+  maximum: number,
+): number {
+  if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) {
+    throw new NativeTuiControlServerError(
+      `${context} must be a positive safe integer no greater than ${maximum}`,
     );
   }
   return value;
