@@ -1,11 +1,12 @@
 # MindCode 0.1.0 — план и статус реализации
 
-Дата аудита: `2026-08-06`
+Дата аудита: `2026-08-07`
 Каталог проекта: `/Users/x32db/PROJECTS/mindcode`
 
-Документ является одновременно текущим baseline, зафиксированным контрактом и
-итоговым release-отчётом. Все последующие изменения должны обновлять этот файл
-в том же коммите, что и затронутый контракт.
+Документ является текущим implementation plan и фактическим статусом. Разделы
+`3.1–3.15` фиксируют foundation-фазу; TUI v2, VEXZY-only cleanup и release gates
+перепроверены на текущем worktree 2026-08-07. Все изменения фиксируются только
+локальными атомарными коммитами; remote и push не используются.
 
 ## 1. Контракт handoff
 
@@ -51,45 +52,57 @@
 
 ### 2.1 Зафиксированные факты
 
-- `package.json` уже содержит `name: "mindcode"`, `version: "0.1.0"`, bin `mindcode` и Bun scripts.
-- `tsconfig.json` существует, содержит `strict: true`, `noEmit: true` и включает `src/**/*` и `scripts/**/*.ts`.
-- `bun run sources:check` проверяет `2048` исходных файлов; полный Bun test-run,
-  coverage, build и smoke текущего прохода завершены успешно.
+- `package.json` содержит `name: "mindcode"`, `version: "0.1.0"`, bin
+  `mindcode` и Bun scripts.
+- `tsconfig.json` существует, содержит `strict: true`, `noEmit: true` и
+  включает `src/**/*` и `scripts/**/*.ts`.
 - Команда `/copycon` существует и зарегистрирована в `src/commands.ts`.
-- `git remote -v` не выводит remote.
-- Исходный большой diff сохранён до разбиения на коммиты в локальной резервной
-  копии `/Users/x32db/PROJECTS/.mindcode-backups/pre-final-20260805`.
-- Реализация разбита на локальные buildable-коммиты; remote по-прежнему
-  отсутствует, push не выполнялся.
+- До текущей серии локальных commits `HEAD` — `fe24b51 feat(tui): add visual foundation modules`.
+- `git remote -v` пуст; remote, fetch и push не используются.
+- TUI v2, VEXZY-only cleanup, локальный credit `/cost` и Linux AMD64 packaging
+  входят в текущую локальную commit series.
+- Исторические значения baseline не используются как результат current-worktree
+  verification: ниже перечислены только реально выполненные gates.
 
-### 2.2 Проверки, выполненные при аудите
+### 2.2 Проверки, выполненные на current worktree
 
 | Проверка | Результат |
 |---|---|
-| Rust gates | PASS: `99` workspace tests + `9` native TUI tests; fmt, clippy `-D warnings` и locked manifest gates |
-| Focused TS tests | PASS для TaskGraph/RPC, lifecycle, policy/report, compact и VEXZY limits |
-| Полный Bun test-run | `933 pass`, `4 skip`, `0 fail`, `170 files` |
-| Architectural coverage | `93.79%` (`10926/11650`), required `>=85%` across `41` allowlisted files |
-| `bun run typecheck` | PASS; baseline `4062` diagnostics |
-| `bun run lint` | PASS; baseline `7948` diagnostics |
-| `bun run sources:check` | `2048 files`, `0 trailers` |
-| Production build/smoke | PASS для `dist/mindcode.js`, native CLI и `mindcoded` sidecar |
-| Bundle legacy scan | PASS; targeted provider endpoints/credentials отсутствуют |
-| `git remote -v` | remote отсутствует |
-| `package.json` identity | `mindcode@0.1.0` |
+| `cargo fmt --all -- --check` и standalone TUI fmt | PASS |
+| root Rust workspace tests | PASS: core-tools, protocol, state, daemon и multiprocess SQLite tests |
+| standalone `mindcode-tui` tests | PASS: `63` lib + `4` clipboard + `8` interaction; `0` fail |
+| Rust clippy `-D warnings` (root + standalone TUI) | PASS |
+| Native-TUI TypeScript/repl/cleanup focused suite | PASS: `99` tests, `0` fail |
+| Full Bun coverage suite | PASS: `653` tests, `0` fail; `93.41%` (`8069/8638`) on 31 allowlisted modules, threshold `85%` |
+| `bun run lint` / `bun run typecheck` | PASS against refreshed local baseline: lint `7882`, typecheck `4050` diagnostics; no new TUI/VEXZY cleanup diagnostics |
+| Rust↔TypeScript daemon interop | PASS |
+| Linux AMD64 bundle | PASS: fresh `mindcode`, `mindcoded`, `mindcode-tui` ELF x86-64 artifacts generated |
+| Linux AMD64 native/package validation | PASS: `5` native-TUI packaging tests; daemon execution intentionally skipped on non-Linux host |
+| `bun run smoke` | PASS: `mindcode --help` |
+| `git diff --check`, diff secret scan, `git remote -v` | PASS; no remote |
 
-Проверенный test-набор включал VEXZY auth/config/errors/model client/model catalog/model registry/protocol/SDK adapter, fixed worker resolver, weighted scheduler, SQLite task graph, overlap/lifecycle, WorkerReport, compact policy/watchdog, `/copy`, `/copycon` и HTML status report.
+`typecheck:strict` still emits the repository's pre-existing diagnostics. The
+checked-in baseline is refreshed only after confirming that changed native-TUI
+and VEXZY-only paths add none; it is not treated as a claim that the inherited
+repository has zero diagnostics.
 
 ### 2.3 Главные расхождения старого плана
 
-Устарели следующие утверждения и удалены из текущей версии документа:
+Устарели следующие утверждения и исправлены в этой версии документа:
 
 - планирование переименования проекта вместо уже существующего `mindcode@0.1.0`;
 - утверждение, что `PLAN.md`, `/copycon` или `tsconfig.json` отсутствуют;
-- предположение, что scheduler, task graph, WorkerReport и compact watchdog ещё не созданы;
-- описание Leader и Worker как будущей миграции вместо фактических runtime boundaries;
-- требование заменить локальный Git: remote уже отсутствует, поэтому переписывание истории не является частью этого плана;
-- ожидание, что typecheck станет первым quality gate после добавления `tsconfig.json`: strict typecheck уже запускается, но сейчас падает на состоянии дерева.
+- предположение, что scheduler, task graph, WorkerReport и compact watchdog ещё
+  не созданы;
+- описание Leader и Worker как будущей миграции вместо фактических runtime
+  boundaries;
+- требование заменить локальный Git: remote уже отсутствует, переписывание
+  истории не является частью этого плана;
+- перенос исторических full-suite/build/coverage результатов в текущий
+  незакоммиченный TUI v2 status;
+- утверждение, что текущий `typecheck` не выполнялся: baseline current-worktree
+  подтверждён `PASS` с `4050` унаследованными diagnostics без новых diagnostics
+  в изменённых TUI/VEXZY путях.
 
 ## 3. Статус реализации по подсистемам
 
@@ -251,7 +264,7 @@ Focused policy/report/lifecycle tests пройдены.
 
 Focused policy tests пройдены.
 
-### 3.10 Compact — DONE
+### 3.10 Compact — DONE (fully revalidated)
 
 Реализовано:
 
@@ -265,7 +278,7 @@ Focused policy tests пройдены.
 - commit только после успешного результата/hooks;
 - auto-compact failure circuit breaker и warning state suppression/clear.
 
-Focused compact tests и полный Bun/coverage/build verification пройдены.
+Focused compact tests относятся к foundation baseline; полный Bun/coverage/build verification для текущего diff успешно повторён в gates из разделов 2.2 и 4.
 
 ### 3.11 `/copy`, `/copycon`, `/status` — DONE
 
@@ -301,7 +314,7 @@ Bearer credentials, raw response body или абсолютные секретн
 Удалены provider-specific command surfaces и UI для mobile, voice, upgrade,
 usage, rate-limit-options, install-slack-app, install-github-app, fast и
 thinkback. Compatibility-only state/exports не возвращают legacy behavior.
-Focused command/cleanup tests и полный Bun test/build прогон пройдены.
+Focused command/cleanup tests и полный Bun test/build для текущего объединённого worktree прошли; результаты зафиксированы в разделах 2.2 и 4.
 
 ### 3.14 Rust TaskGraph/session SQLite RPC — DONE
 
@@ -322,9 +335,10 @@ Focused command/cleanup tests и полный Bun test/build прогон про
   enrich, stale-path removal, secret redaction и filesystem fallback;
 - Rust↔TypeScript interop проверяет полный SessionIndex lifecycle.
 
-Проверено финальным CI-equivalent проходом: Rust workspace — `99 pass`, native
-TUI — `9 pass`, Bun — `933 pass`, `4 skip`; daemon/TaskGraph/SessionIndex
-interop, build, smoke и native packaging — pass.
+Исторический CI-equivalent baseline до текущего TUI v2 diff: Rust workspace —
+`99 pass`, native TUI — `9 pass`, Bun — `933 pass`, `4 skip`; daemon/TaskGraph/
+SessionIndex interop, build, smoke и native packaging — pass. Эти числа не
+заменяют повторный current-worktree gate.
 
 ### 3.15 Model-native VEXZY broker и immutable request snapshots — DONE
 
@@ -373,22 +387,20 @@ interop, build, smoke и native packaging — pass.
 5. Production bundle проверен на old endpoints, stale branding, home path и
    credentials.
 
-### Фаза D — quality gates — DONE
+### Фаза D — quality gates — PASS (2026-08-07)
 
-1. `bun run lint`: PASS, неизменный baseline `7948` diagnostics,
-   `3ccd0394c1e70061ef7d442c62eb4e6dc55ab5b7fa86d369b32187948a1892f5`.
-2. `bun run typecheck`: PASS, неизменный baseline `4062` diagnostics,
-   `1f2d56b024b50063912c646c2e37206cfaf9378cce19ec8b12580c67eff595c2`.
-3. Full Bun tests, architectural coverage, source hygiene, Rust gates,
-   daemon interop, build/smoke, native packaging/TUI и performance gates — PASS.
-4. Integration/race tests покрывают SQLite leases/claim/recovery, scheduler,
-   compact и VEXZY retry/abort.
-5. Golden tests для catalog, prompts, report schema и compact summary пройдены.
-6. Локальный CI pipeline настроен; remote отсутствует, privacy checks пройдены.
+1. `bun run lint`: PASS against checked-in local baseline `7882` diagnostics,
+   hash `f58c7d5849fb5db81df3222f91e8d64b76cd6d8b2b36160bde88f8709047a1e9`.
+2. `bun run typecheck`: PASS against checked-in local baseline `4050` diagnostics,
+   hash `ddfc618f57cab2e9f1aa3b859b1273ce753ea02e4b5141c497c794de859a458c`.
+3. Full isolated Bun suite + LCOV gate: `653` pass, `0` fail, coverage `93.41%`.
+4. Rust root/standalone TUI fmt, test and clippy gates: PASS.
+5. Daemon interop, Linux AMD64 package validation, smoke, diff/secret/remote
+   checks: PASS.
 
-### Фаза E — release acceptance — PASS
+### Фаза E — release acceptance — LOCALLY COMMITTED
 
-Release `0.1.0` считается готовым только при выполнении всех пунктов:
+Release `0.1.0` остаётся условно готовым только после выполнения всех пунктов:
 
 - package identity и CLI binary — `mindcode@0.1.0`;
 - transport — только VEXZY endpoints и `VEXZY_API_KEY`;
@@ -399,9 +411,13 @@ Release `0.1.0` считается готовым только при выпол
 - task graph claim/lease/overlap/report completion atomic;
 - compact warning `85%`, trigger `95%`, watchdog `120s`;
 - `/copy`, `/copycon`, `/status` зарегистрированы и не раскрывают secrets;
-- baseline typecheck/lint, tests, coverage gate, sources check и smoke проходят;
+- текущие Rust/TypeScript TUI v2 integration, packaging, full tests, coverage,
+  typecheck, lint, build и smoke проходят;
 - `git remote -v` пуст;
 - diff содержит только заявленные изменения.
+
+Текущих release blockers нет. Открытые product-level follow-ups перечислены в
+разделе `8.2`; они не блокируют текущий local build/test/package acceptance.
 
 ## 5. Запрещённые изменения для этого плана
 
@@ -440,6 +456,21 @@ src/commands/copy/
 src/commands/copycon/
 src/commands/status/
 src/commands.ts
+crates/mindcode-protocol/src/ui.rs
+crates/mindcode-tui/Cargo.toml
+crates/mindcode-tui/src/lib.rs
+crates/mindcode-tui/src/render.rs
+crates/mindcode-tui/src/interaction.rs
+crates/mindcode-tui/src/clipboard.rs
+crates/mindcode-tui/src/preferences.rs
+crates/mindcode-tui/src/ui/layout.rs
+crates/mindcode-tui/src/ui/theme.rs
+crates/mindcode-tui/src/ui/animation.rs
+src/runtime/nativeTui/protocol.ts
+src/runtime/nativeTui/projections.ts
+src/runtime/nativeTui/controlServer.ts
+src/runtime/nativeTui/inkBridge.ts
+docs/tui/mindcode-tui-mockup.html
 ```
 
 ## 7. Rust acceleration program — FOUNDATION COMPLETE (2026-08-06)
@@ -502,3 +533,111 @@ src/commands.ts
    (`<500ms`), cold dispatch p95 `5.05ms` (`<100ms`), warm dispatch p95
    `3.01ms` (`<50ms`). Полный Bun suite: `933 pass`, `4 skip`, `0 fail`;
    architectural coverage с native TUI allowlist: `93.79%` (`10926/11650`).
+
+
+## 8. Текущий TUI v2 — implementation status (2026-08-07)
+
+### 8.1 Completed foundation
+
+Реализация ниже фактически присутствует в текущем worktree; focused и full
+release gates прошли, результаты зафиксированы в разделах 2.2 и 4.
+
+1. **Protocol v2 и rich snapshots — IMPLEMENTED**
+   - `crates/mindcode-protocol/src/ui.rs` поднят до `UI_PROTOCOL_VERSION = 2`.
+   - Snapshot содержит `sessions`, `workspaces`, `status`, `telemetry`, `tasks`,
+     `agents`, typed transcript blocks (`markdown`, `code`, `tool`, `thinking`,
+     `report`, `error`), `transcript_window`, `changes`, `activity`,
+     `permissions` и `writer` state.
+   - Input boundary содержит key/text/paste/submit/cancel/interrupt, mouse и
+     action events.
+   - Rust и TypeScript boundaries имеют одинаковые bounds, UTF-8 truncation,
+     aggregate snapshot budget, strict unknown-field/version validation и
+     monotonic sequence checks.
+   - `src/runtime/nativeTui/controlServer.ts` сохраняет все v2 snapshot fields
+     при publish/forward; protocol/projection/control-server tests это проверяют.
+
+2. **Rust TUI visual shell — IMPLEMENTED**
+   - `crates/mindcode-tui/src/render.rs` реализует welcome dashboard, Chat,
+     Agents, Tasks, Changes, Logs, Inspector, composer, permission/activity/
+     reconnect/palette/help overlays.
+   - `crates/mindcode-tui/src/ui/theme.rs` содержит Graphite Sakura, Light и
+     Monochrome palettes с TrueColor/ANSI256/ANSI16 fallback.
+   - `crates/mindcode-tui/src/ui/layout.rs` содержит responsive breakpoints
+     `140/100/72`, three-pane ratios и overlay collapse для узких терминалов.
+   - `crates/mindcode-tui/src/ui/animation.rs` содержит deterministic Sakura
+     petals и adaptive redraw `30/5/event-driven` с reduced-motion mode.
+
+3. **Interaction — IMPLEMENTED foundation**
+   - `crates/mindcode-tui/src/interaction.rs` мапит keyboard, mouse, paste,
+     resize, focus, scrolling, drag и local intents.
+   - `crates/mindcode-tui/src/lib.rs` подключает contextualized input, modal
+     focus trapping, Alt view navigation, composer editing, permission
+     decisions, observer request-control, reconnect cancellation и pane resize.
+   - `crates/mindcode-tui/src/clipboard.rs` реализует bounded OSC52 clipboard
+     payload без хранения session transcript.
+
+4. **Preferences — IMPLEMENTED foundation**
+   - `crates/mindcode-tui/src/preferences.rs` сохраняет только theme,
+     reduced-motion override и per-workspace pane ratios.
+   - Запись bounded и atomic: temporary file, `sync_all`, rename; secret/session
+     fields в формате отсутствуют.
+   - `App` загружает/сохраняет preferences и применяет workspace-specific ratios.
+
+5. **HTML mockup и visual fixtures — IMPLEMENTED**
+   - `docs/tui/mindcode-tui-mockup.html` — self-contained Graphite Sakura mockup
+     с Light/Monochrome themes, motion toggle, dialogs, focus/clipboard flows и
+     accessibility semantics.
+   - `crates/mindcode-tui/tests/golden/` содержит `6` responsive/theme fixtures:
+     wide, medium, compact, narrow, light и monochrome.
+   - Текущий inline script прошёл `node --check`.
+
+### 8.2 Current acceptance and remaining follow-ups
+
+**Completed in this pass**
+
+- Luna/max read-only review нашёл P1 issues, все они исправлены и покрыты
+  Rust tests: sidebar toggle, welcome overlays, per-pane scrolling,
+  composer navigation, clamp transcript, task/change selection, reconnect
+  write path и pending permission recovery.
+- `InkStatePublisher`/`inkBridge` публикует worker model/effort/progress,
+  typed transcript/report blocks и connection reconnect telemetry; fixed
+  runtime normalizes report status/effort/evidence before protocol emission.
+- Legacy overage/rate-limit/OAuth surfaces удалены. Limits module renamed to
+  `vexzyLimits`; `/cost` показывает локальный VEXZY session credit breakdown.
+- Full local verification приведена в таблице 2.2; final Luna/max integration
+  review returned no P0/P1 findings.
+
+**Follow-ups, не блокирующие release**
+
+1. Linux package was structurally validated on macOS. Real execution of its
+   daemon/TUI still requires a Linux AMD64 runner because `test:native-packaging`
+   deliberately skips non-host execution.
+2. Runtime maps every rich field that exists in Ink state. Deeper source-state
+   support for transcript paging and model-driven older/newer-window requests
+   remains a future product feature.
+3. No long-duration interactive PTY soak test covers a physical terminal loss
+   during a live reconnect loop; deterministic socket/reconnect unit coverage
+   is present.
+4. The inherited repository retains baseline TypeScript/Biome diagnostics;
+   the local baseline records them explicitly. Changed MindCode TUI/VEXZY paths
+   have targeted type/test coverage and introduce none of those diagnostics.
+
+### 8.3 Local atomic commit plan — EXECUTED
+
+Локальная серия commit выполнена в следующем порядке:
+
+1. `9701904 feat(tui): add native TUI v2 runtime` — protocol schema, strict TS
+   boundary, control/Ink bridge, Rust renderer, interaction, preferences and
+   responsive fixtures; после commit выполнены native-TUI, focused bridge и Rust TUI gates.
+2. `40dd2e9 docs(tui): add interactive MindCode mockup` — self-contained
+   Graphite Sakura visual model; inline script прошёл `node --check`.
+3. `afa99c8 chore: remove obsolete provider usage surfaces` — VEXZY-only
+   cleanup, renamed limits module and local credit `/cost`; focused VEXZY
+   suite прошла `119/119`.
+4. `278166c chore: refresh local quality baseline` — accepted current inherited
+   diagnostics after targeted strict-diagnostic review.
+5. `docs: update implementation status` — этот финальный документ и current
+   gate results.
+
+После каждого code commit выполнен focused smoke/test; финальный state проходит
+все gates из таблицы 2.2. Remote остаётся пустым, `git push` не выполняется.
