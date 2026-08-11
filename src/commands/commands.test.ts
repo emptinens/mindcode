@@ -30,6 +30,7 @@ test('VEXZY builtin registry exposes the active MindCode command surface', () =>
     'permissions',
     'plan',
     'exit',
+    'config',
     'plugin',
     'reloadPlugins',
   ]) {
@@ -94,4 +95,19 @@ test('provider gating is fail-closed and does not depend on legacy auth/provider
   expect(registry).not.toContain("from './utils/auth.js'")
   expect(registry).not.toContain("from './utils/model/providers.js'")
   expect(registry).toContain('return !cmd.availability || cmd.availability.length === 0')
+})
+
+
+test('exit and future settings entrypoints remain explicit and locally handled', () => {
+  const exitCommand = readFileSync(new URL('./exit/index.ts', import.meta.url), 'utf8')
+  const settingsCommand = readFileSync(new URL('./config/index.ts', import.meta.url), 'utf8')
+  const exitHandler = readFileSync(new URL('./exit/exit.tsx', import.meta.url), 'utf8')
+
+  expect(exitCommand).toContain("name: 'exit'")
+  expect(exitCommand).toContain("aliases: ['quit']")
+  expect(exitCommand).toContain('immediate: true')
+  expect(exitHandler).toContain("gracefulShutdown(0, 'prompt_input_exit')")
+  expect(settingsCommand).toContain("name: 'config'")
+  expect(settingsCommand).toContain("aliases: ['settings']")
+  expect(settingsCommand).toContain("description: 'Open config panel'")
 })
