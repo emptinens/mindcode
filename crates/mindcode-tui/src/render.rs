@@ -205,8 +205,8 @@ fn render_welcome(frame: &mut Frame<'_>, state: &RenderState<'_>) {
     let area = frame.area();
     let theme = state.theme;
     let card = centered_rect(
-        78.min(area.width.saturating_sub(2)),
-        28.min(area.height),
+        72.min(area.width.saturating_sub(2)),
+        25.min(area.height),
         area,
     );
     let panel = Block::bordered()
@@ -223,14 +223,12 @@ fn render_welcome(frame: &mut Frame<'_>, state: &RenderState<'_>) {
     frame.render_widget(panel, card);
 
     let art = [
-        "                         ·       ❀",
-        "                    ❀  ╲  ╱  ✿       ·",
-        "              ·  ✿────╲╱────❀  ·",
-        "                 ╲  ❀ ╱╲ ✿  ╱",
-        "              ❀──╲──╱  ╲──╱──✿",
-        "                    ╲╱││╲╱",
-        "                       ││",
-        "                      ╱┴╲",
+        "              ❀   ✿   ❀",
+        "           ╭─────❀─────╮",
+        "        ✿──┤  ❀  ✿  ❀  ├──✿",
+        "           ╰─────┬─────╯",
+        "                 │",
+        "                ╱ ╲",
     ];
     let recent = state
         .snapshot
@@ -301,7 +299,7 @@ fn render_welcome(frame: &mut Frame<'_>, state: &RenderState<'_>) {
 
     if matches!(state.motion, MotionMode::Full) && area.width > 40 && area.height > 12 {
         static WELCOME_PETALS: OnceLock<SakuraPetalField> = OnceLock::new();
-        let field = WELCOME_PETALS.get_or_init(|| SakuraPetalField::new(0x4d49_4e44_434f_4445, 14));
+        let field = WELCOME_PETALS.get_or_init(|| SakuraPetalField::new(0x4d49_4e44_434f_4445, 8));
         for (petal, cell) in field.sample_in(state.elapsed, state.motion, area) {
             if let Some((x, y)) = cell {
                 if !card.contains((x, y).into()) {

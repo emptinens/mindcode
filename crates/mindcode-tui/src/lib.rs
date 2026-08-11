@@ -2330,6 +2330,27 @@ mod tests {
     }
 
     #[test]
+    fn welcome_sakura_is_compact_and_symmetric() {
+        let app = App {
+            motion: MotionMode::Reduced,
+            ..App::default()
+        };
+        let backend = TestBackend::new(80, 25);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().to_owned())
+            .collect();
+        assert!(content.contains("❀   ✿   ❀"));
+        assert!(content.contains("╭─────❀─────╮"));
+        assert!(!content.contains("────╲╱────"));
+    }
+
+    #[test]
     fn scroll_targets_are_independent_and_composer_vertical_keys_do_not_scroll() {
         let mut app = App {
             show_welcome: false,
