@@ -4,7 +4,6 @@ import type { Root } from "./ink.js";
 import type { Props as REPLProps } from "./screens/REPL.js";
 import type { AppState } from "./state/AppStateStore.js";
 import type { FpsMetrics } from "./utils/fpsTracker.js";
-import { getBaseRenderOptions } from "./utils/renderOptions.js";
 
 type AppWrapperProps = {
   getFpsMetrics: () => FpsMetrics | undefined;
@@ -24,30 +23,34 @@ export async function launchRepl(
   replProps: REPLProps,
   renderAndRun: RenderAndRun,
 ): Promise<void> {
-  const { App } = await import("./components/App.js");
-  const { REPL } = await import("./screens/REPL.js");
   const gate = (
     await import("./runtime/nativeTui/featureGate.js")
   ).resolveNativeTuiFeatureGate();
-  if (!gate.enabled) {
+  const renderInk = async (targetRoot: Root): Promise<void> => {
+    const [{ App }, { REPL }] = await Promise.all([
+      import("./components/App.js"),
+      import("./screens/REPL.js"),
+    ]);
     await renderAndRun(
-      root,
+      targetRoot,
       <App {...appProps}>
         <REPL {...replProps} />
       </App>,
     );
+  };
+
+  if (!gate.enabled) {
+    await renderInk(root);
     return;
   }
 
   const [
     { NativeTuiControlServer },
     { NativeTuiInkBridge },
-    { NativeTuiInkStatePublisher },
     { NativeTuiLaunchCoordinator },
   ] = await Promise.all([
     import("./runtime/nativeTui/controlServer.js"),
     import("./runtime/nativeTui/inkBridge.js"),
-    import("./runtime/nativeTui/InkStatePublisher.js"),
     import("./runtime/nativeTui/launcher.js"),
   ]);
   let bridge: InstanceType<typeof NativeTuiInkBridge> | undefined;
@@ -96,15 +99,18 @@ export async function launchRepl(
     },
   });
   const renderFallback = async (): Promise<void> => {
-    const fallbackRoot = inkUnmounted
-      ? await (await import("./ink.js")).createRoot(getBaseRenderOptions(false))
-      : root;
-    await renderAndRun(
-      fallbackRoot,
-      <App {...appProps}>
-        <REPL {...replProps} />
-      </App>,
-    );
+    if (inkUnmounted) {
+      const { createRoot } = await import("./ink.js");
+      await renderInk(
+        await createRoot(
+          (await import("./utils/renderOptions.js")).getBaseRenderOptions(
+            false,
+          ),
+        ),
+      );
+      return;
+    }
+    await renderInk(root);
   };
 
   const launch = await coordinator.launch();
@@ -126,6 +132,13 @@ export async function launchRepl(
     return;
   }
 
+  const [{ App }, { REPL }, { NativeTuiInkStatePublisher }] = await Promise.all(
+    [
+      import("./components/App.js"),
+      import("./screens/REPL.js"),
+      import("./runtime/nativeTui/InkStatePublisher.js"),
+    ],
+  );
   await renderAndRun(
     activeRoot,
     <App {...appProps}>
