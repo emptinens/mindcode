@@ -1,6 +1,6 @@
 # MindCode VEXZY Roadmap
 
-Версия: `0.1.0`
+Версия: `0.1.1`
 API: VEXZY-only
 Локальное состояние: `~/.mindcode`
 Переменные конфигурации: префикс `MINDCODE_`
@@ -56,7 +56,7 @@ API: VEXZY-only
 
 ### Build и repository
 
-- Версия проекта `0.1.0`, CLI `mindcode`.
+- Версия проекта `0.1.1`, CLI `mindcode`.
 - Bun-based build/test workflow.
 - Локальный Git без remote и push.
 - Локальные атомарные коммиты по функциональным блокам.

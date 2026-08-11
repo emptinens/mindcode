@@ -225,7 +225,7 @@ export async function build({ minify = false, watch = false } = {}) {
 // Ensure dist is treated as ESM by bun/node
 await writeFile(
   path.join(outdir, 'package.json'),
-  JSON.stringify({ name: 'mindcode', version: '0.1.0', type: 'module' }, null, 2) + '\n',
+  JSON.stringify({ name: 'mindcode', version: '0.1.1', type: 'module' }, null, 2) + '\n',
 )
 
 const options = {
@@ -243,14 +243,14 @@ const options = {
 import { createRequire as __createRequire } from "node:module";
 const require = __createRequire(import.meta.url);
 const MACRO = {
-  VERSION: "0.1.0",
+  VERSION: "0.1.1",
   BUILD_TIME: ${JSON.stringify(new Date().toISOString())},
   ISSUES_EXPLAINER: "file an issue in the MindCode repository",
   VERSION_CHANGELOG: ""
 };`,
   },
   define: {
-    'MACRO.VERSION': JSON.stringify('0.1.0'),
+    'MACRO.VERSION': JSON.stringify('0.1.1'),
     'MACRO.BUILD_TIME': JSON.stringify(new Date().toISOString()),
   },
   external: [

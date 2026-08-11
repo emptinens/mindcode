@@ -1,4 +1,4 @@
-# MindCode 0.1.0 — план и статус реализации
+# MindCode 0.1.1 — план и статус реализации
 
 Дата аудита: `2026-08-07`
 Каталог проекта: `/Users/x32db/PROJECTS/mindcode`
@@ -13,7 +13,7 @@
 | Параметр | Обязательное значение |
 |---|---|
 | Проект | `MindCode` |
-| Версия | `0.1.0` |
+| Версия | `0.1.1` |
 | Провайдер | только `VEXZY` |
 | Leader | выбирается динамически из доступного каталога VEXZY |
 | Worker | только `gpt-5.6-luna` |
@@ -47,6 +47,14 @@
 - `model`/legacy aliases, переданные в worker input, не имеют права изменить worker model.
 - Недоступность Luna является ошибкой конфигурации/ожиданием, а не поводом выбрать Sonnet, Haiku, Claude или другую модель.
 - Worker effort не наследуется от Leader effort; отсутствие worker effort разрешается в `medium`.
+
+## 1.3 Local release history
+
+- `0.1.1` добавляет native-TUI resize propagation, keyboard-arrow forwarding,
+  компактную Sakura welcome presentation, deferred Ink loading on native startup,
+  а также regression coverage для `/exit` и `/settings`.
+- Версия поддерживается только локально: после полного набора gates создаются
+  atomic release commit и local annotated tag `v0.1.1`; remote/push не используются.
 
 ## 2. Аудит текущего дерева
 

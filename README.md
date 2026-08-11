@@ -1,6 +1,6 @@
 # MindCode
 
-MindCode `0.1.0` — локальный CLI/TUI для разработки через VEXZY API.
+MindCode `0.1.1` — локальный CLI/TUI для разработки через VEXZY API.
 
 ## Архитектура
 
