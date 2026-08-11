@@ -564,12 +564,17 @@ export class TaskGraph {
   constructor(options: TaskGraphOptions = {}) {
     const configuredPath =
       options.databasePath ?? options.dbPath ?? options.path;
-    const paths = ensureTaskGraphPaths(
-      options.configDir
-        ? { MINDCODE_CONFIG_DIR: options.configDir }
-        : process.env,
-    );
-    const databasePath = configuredPath ?? paths.databasePath;
+    // A caller-supplied database path is already the task-graph authority.
+    // Do not create the default ~/.mindcode state tree in that case: doing so
+    // makes isolated graphs depend on an unrelated, writable home directory.
+    const databasePath = configuredPath ?? (() => {
+      const paths = ensureTaskGraphPaths(
+        options.configDir
+          ? { MINDCODE_CONFIG_DIR: options.configDir }
+          : process.env,
+      );
+      return paths.databasePath;
+    })();
 
     if (databasePath !== ":memory:") {
       mkdirSync(dirname(databasePath), { recursive: true });
