@@ -14,6 +14,10 @@ export type NativeTuiByteInput = {
 
 export type NativeTuiByteOutput = {
   write(chunk: Uint8Array): unknown;
+  readonly columns?: number;
+  readonly rows?: number;
+  on?(event: "resize", listener: () => void): unknown;
+  removeListener?(event: "resize", listener: () => void): unknown;
 };
 
 export type NativeTuiPtySpawn = (

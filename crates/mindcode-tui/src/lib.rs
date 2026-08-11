@@ -1707,6 +1707,7 @@ mod unix_runtime {
                 .interval()
                 .is_some_and(|interval| last_draw.elapsed() >= interval);
             if needs_redraw || animation_due {
+                terminal.autoresize()?;
                 terminal.draw(|frame| app.render(frame))?;
                 last_draw = Instant::now();
                 needs_redraw = false;
@@ -2783,6 +2784,20 @@ mod tests {
                 modifiers: vec![],
             }))
         );
+        for (key, expected) in [
+            (KeyCode::Left, "left"),
+            (KeyCode::Right, "right"),
+            (KeyCode::Up, "up"),
+            (KeyCode::Down, "down"),
+        ] {
+            assert_eq!(
+                key_event_to_input(KeyEvent::new(key, KeyModifiers::NONE)),
+                Some(UiInputEventKind::Key(UiKeyInput {
+                    key: expected.into(),
+                    modifiers: vec![],
+                }))
+            );
+        }
         assert!(key_event_to_input(KeyEvent {
             code: KeyCode::Char('a'),
             modifiers: KeyModifiers::NONE,

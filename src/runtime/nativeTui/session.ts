@@ -163,6 +163,7 @@ export class NativeTuiSession {
   private closeRequested = false;
   private hasConnected = false;
   private reconnectAttempts = 0;
+  private terminalResizeListener?: () => void;
 
   constructor(options: NativeTuiSessionOptions = {}) {
     this.options = options;
@@ -280,6 +281,42 @@ export class NativeTuiSession {
     this.ptyHost?.resize(columns, rows);
   }
 
+  private currentTerminalSize(): [number, number] {
+    return [
+      positiveInteger(
+        this.options.columns ?? this.stdout?.columns ?? DEFAULT_COLUMNS,
+        DEFAULT_COLUMNS,
+      ),
+      positiveInteger(
+        this.options.rows ?? this.stdout?.rows ?? DEFAULT_ROWS,
+        DEFAULT_ROWS,
+      ),
+    ];
+  }
+
+  private attachTerminalResize(): void {
+    if (this.terminalResizeListener || !this.stdout?.on) return;
+    const listener = (): void => {
+      const [columns, rows] = this.currentTerminalSize();
+      this.resize(columns, rows);
+      void this.options.onTerminalSize?.({
+        type: "terminal_size",
+        version: 1,
+        id: "host-resize",
+        columns,
+        rows,
+      });
+    };
+    this.terminalResizeListener = listener;
+    this.stdout.on("resize", listener);
+  }
+
+  private detachTerminalResize(): void {
+    const listener = this.terminalResizeListener;
+    this.terminalResizeListener = undefined;
+    if (listener) this.stdout?.removeListener?.("resize", listener);
+  }
+
   private async startInternal(): Promise<NativeTuiSession> {
     this.assertOpen();
     this.notifyConnectionState({
@@ -366,8 +403,8 @@ export class NativeTuiSession {
         ],
         cwd: this.options.cwd,
         env: this.options.env,
-        cols: this.options.columns ?? DEFAULT_COLUMNS,
-        rows: this.options.rows ?? DEFAULT_ROWS,
+        cols: this.currentTerminalSize()[0],
+        rows: this.currentTerminalSize()[1],
         stdin: this.stdin,
         stdout: undefined,
         onOutput: (chunk) => {
@@ -398,6 +435,7 @@ export class NativeTuiSession {
         );
       }
       this.enableTerminalRawMode();
+      this.attachTerminalResize();
       this.assertOpen();
       this.ptyHost.attachInput();
       this.stateValue = "ready";
@@ -488,6 +526,7 @@ export class NativeTuiSession {
       ),
     );
     this.terminalTakeoverReady = false;
+    this.detachTerminalResize();
     this.ptyHost?.detachInput();
     if (this.terminalRawChanged) {
       try {

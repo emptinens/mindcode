@@ -30,8 +30,24 @@ class InputFixture implements NativeTuiByteInput {
 
 class OutputFixture implements NativeTuiByteOutput {
   chunks: Uint8Array[] = [];
+  columns = 120;
+  rows = 40;
+  listeners = new Set<() => void>();
   write(chunk: Uint8Array): void {
     this.chunks.push(chunk);
+  }
+  on(_event: "resize", listener: () => void): this {
+    this.listeners.add(listener);
+    return this;
+  }
+  removeListener(_event: "resize", listener: () => void): this {
+    this.listeners.delete(listener);
+    return this;
+  }
+  resize(columns: number, rows: number): void {
+    this.columns = columns;
+    this.rows = rows;
+    for (const listener of this.listeners) listener();
   }
 }
 
@@ -69,9 +85,13 @@ class PtyFixture implements NativeTuiPtyHostLike {
   closed = 0;
   writes: string[] = [];
   resizes: Array<[number, number]> = [];
+  readonly columns: number | undefined;
+  readonly rows: number | undefined;
   private readonly options: NativeTuiPtyHostOptions;
   constructor(options: NativeTuiPtyHostOptions) {
     this.options = options;
+    this.columns = options.cols;
+    this.rows = options.rows;
   }
   async start(): Promise<void> {
     this.started += 1;
@@ -169,6 +189,32 @@ describe("native TUI foreground session", () => {
     expect(fixture.input.isRaw).toBe(true);
     await session.close();
     expect(fixture.input.isRaw).toBe(false);
+  });
+
+  test("uses the current host dimensions and propagates host resize to PTY and bridge", async () => {
+    const fixture: Fixture = {
+      input: new InputFixture(),
+      output: new OutputFixture(),
+    };
+    fixture.output.columns = 173;
+    fixture.output.rows = 51;
+    const sizes: Array<[number, number]> = [];
+    const session = new NativeTuiSession(
+      options(fixture, {
+        onTerminalSize: ({ columns, rows }) => sizes.push([columns, rows]),
+      }),
+    );
+    const launch = session.launch();
+    await connectAfterStart(fixture);
+    await launch;
+
+    expect([fixture.pty?.columns, fixture.pty?.rows]).toEqual([173, 51]);
+    expect(fixture.pty?.resizes).toEqual([]);
+    fixture.output.resize(91, 29);
+    expect(fixture.pty?.resizes).toEqual([[91, 29]]);
+    expect(sizes).toEqual([[91, 29]]);
+    await session.close();
+    expect(fixture.output.listeners.size).toBe(0);
   });
 
   test("returns missing-binary fallback without installing stdin listeners", async () => {

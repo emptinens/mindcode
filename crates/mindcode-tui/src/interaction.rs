@@ -739,6 +739,26 @@ mod tests {
     }
 
     #[test]
+    fn arrow_keys_emit_navigation_intents() {
+        assert_eq!(
+            map_key_event(key(KeyCode::Up, KeyModifiers::NONE)),
+            Some(LocalIntent::Scroll {
+                target: ScrollTarget::Transcript,
+                axis: ScrollAxis::Vertical,
+                delta: -1,
+            })
+        );
+        assert_eq!(
+            map_key_event(key(KeyCode::Down, KeyModifiers::NONE)),
+            Some(LocalIntent::Scroll {
+                target: ScrollTarget::Transcript,
+                axis: ScrollAxis::Vertical,
+                delta: 1,
+            })
+        );
+    }
+
+    #[test]
     fn key_release_is_ignored() {
         let mut event = key(KeyCode::Enter, KeyModifiers::NONE);
         event.kind = KeyEventKind::Release;

@@ -39,6 +39,10 @@ describe("native TUI Ink bridge", () => {
         },
       ],
       [9, { type: "action", action: "request_control" }],
+      [10, { type: "key", key: "up", modifiers: [] }],
+      [11, { type: "key", key: "down", modifiers: [] }],
+      [12, { type: "key", key: "left", modifiers: [] }],
+      [13, { type: "key", key: "right", modifiers: [] }],
     ] as const) {
       bridge.handleInput({
         type: "input_event",
@@ -49,7 +53,9 @@ describe("native TUI Ink bridge", () => {
       } as NativeTuiInputEvent);
     }
     await Bun.sleep(0);
-    expect(chunks.join("")).toBe("q\u0003\r/clear\r/resume\r/add-dir\ro");
+    expect(chunks.join("")).toBe(
+      "q\u0003\r/clear\r/resume\r/add-dir\ro\u001b[A\u001b[B\u001b[D\u001b[C",
+    );
     bridge.close();
     expect(published).toEqual([]);
   });
@@ -172,7 +178,9 @@ describe("native TUI Ink bridge", () => {
               status: "completed",
               summary: "Worker report",
               changed_files: ["src/a.ts"],
-              evidence: [{ id: "worker-test", type: "test", command: "bun test" }],
+              evidence: [
+                { id: "worker-test", type: "test", command: "bun test" },
+              ],
               tokens_used: 12,
               effort_used: "high",
               model: "gpt-5.6-luna",
