@@ -1,18 +1,28 @@
 # MindCode
 
-MindCode `0.1.3` — Rust-first Linux x64 CLI/TUI для работы через **VEXZY**.
-Версия `0.1.2` уже checkpointed в локальной истории, но ещё не tagged; этот
-документ описывает approved migration к `0.1.3`.
+MindCode `0.1.3` — approved Rust-first Linux x64 migration для работы через
+**VEXZY**. Версия `0.1.2` уже checkpointed в локальной истории, но ещё не
+tagged; этот документ описывает target contract, а не готовый релиз.
+
+### Текущий foundation
+
+В репозитории уже есть начальный Rust binary `mindcode`: `--help`, `--version`,
+`auth status`, `setup-token`, `doctor`, `update|upgrade` и in-process entrypoint
+`daemon`. Он валидирует только env-only `VEXZY_API_KEY` и намеренно сообщает
+`native chat runtime is not migrated yet` для обычного prompt. Полный VEXZY
+chat, Rust TUI, Worker settings и public CLI parity пока находятся в migration
+work packages из `PLAN.md`.
 
 ## Архитектура
 
-- **Один executable:** `mindcode` — единый Rust-first Linux x86_64 бинарник.
-  Daemon и Rust TUI работают in-process; отдельный `mindcoded` или обязательный
-  sidecar не нужен.
-- **Без обязательного JavaScript:** core CLI, daemon, TUI и обычный VEXZY
-  request не требуют Bun или Node.  JS plugins/hooks запускаются только при
-  явном выборе: сначала Bun, затем Node.  Ни один runtime не используется как
-  скрытый fallback для core.
+- **Цель — один executable:** финальный `mindcode` будет единым Rust-first
+  Linux x86_64 бинарником. Daemon и Rust TUI будут работать in-process;
+  отдельный `mindcoded` или обязательный sidecar не нужен. Текущий foundation
+  уже запускает daemon in-process, но Rust TUI ещё не перенесён.
+- **Без обязательного JavaScript (цель):** финальные core CLI, daemon, TUI и
+  обычный VEXZY request не будут требовать Bun или Node. JS plugins/hooks будут
+  запускаться только при явном выборе: сначала Bun, затем Node. Ни один runtime
+  не будет скрытым fallback для core.
 - **VEXZY-only:** model API — `https://api.echogate.one/v1` (`/models`,
   `/chat/completions`, `/responses`) и Messages endpoint
   `https://api.echogate.one/v1/messages`.
@@ -74,15 +84,16 @@ error и exit status.
 
 ## Установка и запуск
 
-Для Linux x64 собирается один Rust executable обычным Rust toolchain.  Bun и
-Node устанавливать не требуется для core запуска; они нужны только выбранным
-JS plugins/hooks.
+Текущий Rust foundation собирается обычным Rust toolchain; Bun и Node для него
+не требуются. Финальный `0.1.3` core также не будет требовать Bun/Node; они
+останутся нужны только выбранным JS plugins/hooks.
 
 Перед запуском:
 
 ```bash
 export VEXZY_API_KEY="forge-..."
-./mindcode --help
+cargo build -p mindcode-native --locked
+./target/debug/mindcode --help
 ```
 
 Не помещайте ключ в settings, README, tests, fixtures или диагностические

@@ -5,8 +5,11 @@
 - **Current checkpoint:** `0.1.2`, checkpointed locally but **untagged**.
 - **Approved target:** `0.1.3`, VEXZY-only migration.
 - **Target:** Linux x86_64.
-- **Core shape:** one Rust-first `mindcode` executable with an in-process daemon
-  and Rust TUI.
+- **Implemented foundation:** Rust `mindcode` binary with native help/version,
+  VEXZY env-key status/setup/doctor/update diagnostics, an in-process daemon
+  entrypoint and an explicit chat-not-migrated status.
+- **Core target:** one Rust-first `mindcode` executable with an in-process daemon
+  and Rust TUI; full chat/TUI/CLI parity is still pending.
 - **Git:** local-only; no remote, fetch or push.
 
 ## 0.1.3 contract
@@ -60,7 +63,7 @@
 
 | Milestone | Acceptance evidence |
 |---|---|
-| Rust-first packaging | Linux x64 single executable starts and renders TUI with Bun/Node absent |
+| Rust-first packaging | Linux x64 single executable starts and renders TUI with Bun/Node absent; current foundation has CLI only |
 | In-process daemon | daemon work and reconnect complete without external `mindcoded` |
 | VEXZY-only transport | endpoint/key audit finds no alternate provider or leaked credential |
 | Global Worker model | every Worker ingress uses the eligible catalog selection |

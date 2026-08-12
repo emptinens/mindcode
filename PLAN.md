@@ -16,7 +16,7 @@ checkpoint и не требует remote, fetch или push.
 |---|---|
 | Предыдущий checkpoint | `0.1.2`, checkpointed but untagged |
 | Целевая версия | `0.1.3`, approved migration |
-| Архитектура | Rust-first single executable with in-process daemon and Rust TUI |
+| Целевая архитектура | Rust-first single executable with in-process daemon and Rust TUI |
 | Поддерживаемая ОС/архитектура | Linux x86_64 |
 | Model API | VEXZY-only |
 | VEXZY base URL | `https://api.echogate.one` |
@@ -29,6 +29,22 @@ checkpoint и не требует remote, fetch или push.
 | Git | local-only; remote/fetch/push запрещены |
 
 ## 2. Runtime shape
+
+### 2.0 Реализованный foundation (не release acceptance)
+
+В commit `c3210d4` уже добавлен первый Rust-native vertical slice:
+
+- workspace binary `mindcode` версии `0.1.3`;
+- `--help`, `--version`, `auth status`, `setup-token`, `doctor`,
+  `update|upgrade` и in-process entrypoint для `daemon`;
+- VEXZY credential shape validation без вывода значения `VEXZY_API_KEY`;
+- явная диагностика `native chat runtime is not migrated yet` для обычного
+  prompt.
+
+Это **не** означает готовность `0.1.3`: Rust TUI, VEXZY chat transport,
+catalog/Worker settings, полный public CLI parity и release packaging ещё не
+перенесены. Разделы ниже фиксируют target contract и acceptance gates, а не
+заявляют, что эти пункты уже выполнены.
 
 ### 2.1 Один Rust executable
 

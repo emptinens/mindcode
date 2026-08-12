@@ -11,16 +11,16 @@ it from the checkpointed, but untagged, `0.1.2`.
 - Do not commit generated binaries, credentials, local settings, task
   databases, transcripts, coverage output, caches, or inline data source maps.
 - Keep source code organized by domain and avoid unrelated moves or formatting.
-- For the current contract-doc migration, the owned files are exactly
-  `AGENTS.md`, `PLAN.md`, `README.md`, `VEXZY_ROADMAP.md`, and `CHANGELOG.md`.
-  Do not inspect or modify files outside that set.
+- Give every Worker an explicit, disjoint file-ownership scope in its task.
+  Do not expand that scope without first coordinating the change.
 
-## Runtime contract for 0.1.3
+## Target runtime contract for 0.1.3
 
 - Target **Linux x86_64**.
-- Ship one Rust-first `mindcode` executable.  The daemon and TUI are in-process
-  components of that executable; an external daemon or a second core process is
-  not required.
+- Ship one Rust-first `mindcode` executable.  The daemon and TUI will be
+  in-process components of that executable; an external daemon or a second core
+  process will not be required.  See `PLAN.md` for the implemented migration
+  slices versus this release target.
 - The core must not depend on Bun or Node at startup, build time, or runtime.
   JavaScript plugins and hooks are optional extensions: resolve **Bun first,
   then Node**, and start either runtime only on demand for the selected plugin

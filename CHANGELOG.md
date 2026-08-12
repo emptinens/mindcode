@@ -2,10 +2,14 @@
 
 ## 0.1.3 — approved migration (unreleased)
 
-- Rebase the release contract on a Linux x86_64 Rust-first single `mindcode`
+- Approve the target contract for a Linux x86_64 Rust-first single `mindcode`
   executable with an in-process daemon and Rust TUI.
-- Remove Bun/Node from the core dependency graph.  JS plugins/hooks may invoke
-  Bun first and Node second, only on demand.
+- Add the initial Rust CLI foundation: native help/version, VEXZY env-key
+  diagnostics, `setup-token`, `doctor`, `update|upgrade`, and an in-process
+  daemon entrypoint. Regular chat deliberately reports that it is not migrated
+  yet; this is not full CLI/TUI parity.
+- Plan removal of Bun/Node from the final core dependency graph. JS
+  plugins/hooks may invoke Bun first and Node second, only on demand.
 - Keep the release VEXZY-only, using `VEXZY_API_KEY` and the fixed
   `https://api.echogate.one` endpoints with secret-free diagnostics and docs.
 - Make the eligible VEXZY Worker model selectable globally across every Worker
