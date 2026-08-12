@@ -1,114 +1,95 @@
-# MindCode VEXZY Roadmap
+# MindCode VEXZY roadmap
 
-Версия: `0.1.2`
-API: VEXZY-only
-Локальное состояние: `~/.mindcode`
-Переменные конфигурации: префикс `MINDCODE_`
+## Release position
 
-## Контракт VEXZY
+- **Current checkpoint:** `0.1.2`, checkpointed locally but **untagged**.
+- **Approved target:** `0.1.3`, VEXZY-only migration.
+- **Target:** Linux x86_64.
+- **Core shape:** one Rust-first `mindcode` executable with an in-process daemon
+  and Rust TUI.
+- **Git:** local-only; no remote, fetch or push.
 
-- OpenAI-compatible base URL: `https://api.echogate.one/v1`
-  - `POST /chat/completions`
-  - `POST /responses`
-  - `GET /models`
-- Messages-compatible base URL: `https://api.echogate.one`
-  - `POST /v1/messages`
-- Auth: `Authorization: Bearer $VEXZY_API_KEY`; ключ формата `forge-…` не сохраняется в settings, fixtures, логах и отчётах.
-- Streaming: `stream: true`.
-- GPT-5.6 effort: `none|low|medium|high|xhigh|max`.
-- Реестр моделей загружается динамически через `GET https://api.echogate.one/v1/models`; текущий подтверждённый каталог содержит 33 модели.
-- `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol`: контекст `1 050 000` токенов, максимальный ответ `128 000`, усилия `none|low|medium|high|xhigh|max`.
-- Worker `gpt-5.6-luna`: фиксированная модель во всех runtime-путях; Worker context `1 050 000`, max output `128 000`.
+## 0.1.3 contract
 
-## Реализовано
+### Core and runtime
 
-### Runtime и модели
+1. Package one Linux x64 Rust executable.  Daemon lifecycle and TUI are
+   in-process components; no external daemon or sidecar is required.
+2. Do not require Bun or Node for build, startup, daemon work, TUI rendering or
+   ordinary model requests.
+3. Keep JS plugins/hooks optional.  When explicitly requested, resolve Bun first
+   and Node second, and spawn only the selected runtime on demand.  Missing both
+   produces a bounded extension error, never a core fallback.
 
-- VEXZY transport, streaming, retry/error mapping и dynamic model registry.
-- User-selected Leader model, thinking mode и effort.
-- Fixed `gpt-5.6-luna` Workers.
-- Per-task Worker effort с fallback `medium`.
-- Effort weights: `none=1`, `low=1`, `medium=2`, `high=4`, `xhigh=6`, `max=8`.
-- Cost-budget lease с конфигурируемым `MINDCODE_AGENT_COST_BUDGET`, default `32`.
+### VEXZY boundary
 
-### Tasks и агенты
+1. Use only `https://api.echogate.one/v1` for `/models`, `/chat/completions` and
+   `/responses`, plus `/v1/messages` on the same VEXZY host.
+2. Read only `VEXZY_API_KEY` from the environment and redact it from every
+   settings file, log, report, snapshot and compatibility fixture.
+3. Keep exact model IDs and provider capability metadata from the dynamic
+   catalog; do not add aliases, OAuth, marketplace hosts or alternate
+   providers in `0.1.3`.
 
-- SQLite task graph с persistent metadata.
-- Atomic compare-and-swap claim.
-- Dependency blocking через `blocked_by`.
-- Validate overlap-check для `files_touched`.
-- Worktree isolation для конфликтующих активных задач.
-- Отдельный mailbox для сообщений.
-- JSON-only WorkerReport:
-  `{task_id,status,changed_files,evidence,tokens_used,effort_used}`.
-- Полный Worker transcript исключён из Leader payload.
+### Worker policy
 
-### Context и команды
+1. Expose one **global Worker model selection**.  The selected ID must be
+   `available` and Worker-capable according to the current VEXZY catalog.
+   Every Worker backend (foreground, resume, background, in-process and pane)
+   consumes that same selection and fails closed on stale/ineligible IDs.
+2. Expose an **optional global Worker-effort lock** with exactly
+   `none|low|medium|high|xhigh|max`.  A set lock applies to every Worker; an
+   unset lock leaves normal per-task effort resolution and `medium` default.
+3. Keep Leader policy separate from Worker policy.
 
-- Soft-warning context на `85%`.
-- Auto-compact trigger на `95%`.
-- Atomic compact с snapshot, validation и watchdog.
-- `/model`, `/effort`, `/agents`, `/tasks`.
-- `/copy`, `/copycon`, `/compact`, `/status`, `/status html`.
-- `/jailbreak` применяется к Leader и Worker prompt paths.
-- `/mcp`, `/skills` с plugin allowlist: `ida`, `superpowers`, `math-mcp`.
-- Sakura mascot вместо исходной брендированной графики.
+### Command cleanup and compatibility
 
-### Build и repository
+1. `/model` is the public model surface for catalog inspection and global Worker
+   selection.  `/effort` remains the Leader-effort surface; the Worker lock is a
+   documented CLI option, not a hidden setting.
+2. Remove `/config` and `/submodel` completely, including aliases, completion,
+   help text and hidden routes.  Both return the fixture's stable
+   `unknown_command` error and leave state unchanged.
+3. Maintain the public CLI/docs/tests compatibility fixture.  Canonical vectors
+   are embedded in `PLAN.md` and `README.md`; tests and CLI help must consume
+   the same versioned shape.  The fixture covers help, model selection,
+   eligibility, all effort values, lock set/unset, auth redaction, removed
+   commands, missing JS runtimes and exit statuses.
 
-- Версия проекта `0.1.2`, CLI `mindcode`.
-- Bun-based build/test workflow.
-- Локальный Git без remote и push.
-- Локальные атомарные коммиты по функциональным блокам.
+## Milestones and evidence
 
-## Реальные TODO и риски
+| Milestone | Acceptance evidence |
+|---|---|
+| Rust-first packaging | Linux x64 single executable starts and renders TUI with Bun/Node absent |
+| In-process daemon | daemon work and reconnect complete without external `mindcoded` |
+| VEXZY-only transport | endpoint/key audit finds no alternate provider or leaked credential |
+| Global Worker model | every Worker ingress uses the eligible catalog selection |
+| Global effort lock | set/unset behavior is consistent across all Worker backends |
+| Command cleanup | `/config` and `/submodel` deterministic `unknown_command` fixture tests |
+| Compatibility fixture | CLI help, docs and tests agree on version `0.1.3` vectors |
+| Release bookkeeping | `0.1.2` remains untagged checkpoint; local `0.1.3` commit is reviewable |
 
-### DONE — VEXZY-only cleanup
+## Explicitly out of scope for 0.1.3
 
-- Legacy OAuth/provider/remote runtime-пути удалены или локально изолированы.
-- Runtime SDK transport заменён локальными VEXZY protocol types.
-- Production bundle audit даёт `0` для запрещённых provider endpoints,
-  credentials, package names и marketplace hosts.
+- Named provider profiles, provider picker, OAuth or non-VEXZY transports.
+- Any required Bun/Node installation or external JavaScript core process.
+- Reintroducing `/config` or `/submodel` under another name or alias.
+- Persisted credentials, remote Git, fetch or push.
 
-### P1 — Lifecycle и надёжность
+## Future 0.1.5 — named provider profiles (planning only)
 
-- Lifecycle `Decompose → Validate → Route → Acquire → Execute → Report → Release`
-  покрыт integration tests, включая конфликты, зависимости и invalid reports.
-- Расширить multi-backend smoke на resume, tmux/iTerm и восстановление lease
-  после аварийного завершения отдельного процесса.
-- Проверить production wire details для tool calls, structured output и usage accounting через VEXZY fixtures.
-- Проверить восстановление in-process Workers после resume и reconcile зависших task statuses.
+A separate approval may add named provider profiles in `0.1.5`.  Profiles may
+store names and non-secret endpoint metadata, while credentials are resolved
+from environment variables only.  Profile HTTP is restricted to **localhost**
+(loopback plus explicit port); public or remote provider URLs are forbidden.
+This future design must preserve the VEXZY-only `0.1.3` behavior and the removed
+command surfaces.
 
-### P1 — Performance
+## Verification order
 
-- Профилировать пути `Decompose → Route → Acquire`.
-- Устранить лишние синхронные чтения task graph и повторную загрузку immutable model/plugin metadata.
-- Измерить latency, spawn cost, memory, bundle size и compact duration.
-- Проверить warm in-process execution для мелких задач и адаптивный worker budget под CPU, память и VEXZY rate limits.
-
-### DONE — Coverage и CI baseline
-
-- `431` tests, `0` failures.
-- Architectural coverage `91.44%` при gate `≥85%`.
-- Race-тесты atomic claim, dependency blocking и overlap isolation добавлены.
-- CI запускает source check, lint/typecheck baseline, tests, coverage, build и smoke.
-
-### P1 — Quality debt
-
-- Постепенно устранить существующий baseline: `8167` lint diagnostics и `4184`
-  typecheck diagnostics, не ослабляя strict-конфигурацию.
-- Добавить отдельный multi-platform release job для всех бинарных targets.
-
-### P2 — Observability
-
-- Довести `/status html` до полной статистики Leader/Worker: токены, запросы, effort, lease, latency, compact history, ошибки и стоимость только при наличии надёжных данных VEXZY.
-- Добавить экспорт sanitized diagnostic bundle с автоматической redaction секретов.
-- Добавить детальный timeline task graph и Worker lifecycle.
-
-## Порядок завершения
-
-1. Multi-backend lifecycle/resume smoke и policy-epoch hardening.
-2. Performance profiling и устранение лишних ожиданий/чтений.
-3. Снижение lint/typecheck baseline debt.
-4. Multi-platform release build.
-5. Расширение `/status html`, sanitized diagnostics и документации.
+1. Run the compatibility fixture against CLI help, command parsing and docs.
+2. Smoke the Linux x64 executable with Bun and Node unavailable.
+3. Verify VEXZY catalog/auth/redaction and Worker selection/lock behavior.
+4. Run focused tests, then the full test/lint/typecheck/coverage/build/smoke
+   pipeline for any code-bearing change.
+5. Run `git diff --check`, confirm only local Git state, and commit atomically.
