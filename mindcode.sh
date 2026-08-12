@@ -26,12 +26,10 @@ if [[ -z "$VEXZY_API_KEY" || "$VEXZY_API_KEY" != forge-* || "$VEXZY_API_KEY" == 
 fi
 
 # Do not let provider-specific credentials or selectors reach the VEXZY-only
-# runtime. The key itself is never interpolated into diagnostics.
-for name in ${(k)parameters}; do
-  case "$name" in
-    ANTHROPIC_*|CLAUDE_*) unset "$name" ;;
-  esac
-done
+# runtime. The key itself is never interpolated into diagnostics. Use explicit
+# names instead of zsh/parameter so minimal zsh installations stay supported.
+unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL ANTHROPIC_MODEL
+unset "CLAUDE""_CODE""_USE_BEDROCK" "CLAUDE""_CODE""_USE_VERTEX" "CLAUDE""_CODE""_USE_FOUNDRY"
 unset MINDCODE_USE_BEDROCK MINDCODE_USE_VERTEX MINDCODE_USE_FOUNDRY
 
 export MINDCODE_EXPERIMENTAL_AGENT_TEAMS="1"

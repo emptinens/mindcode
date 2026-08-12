@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2 — unreleased
+
+- Linux x64 reliability work is in progress.
+
 ## 0.1.1 — 2026-08-11
 
 - Native TUI now takes its initial PTY size from the host terminal and propagates host resize events through the PTY and hidden Ink bridge.

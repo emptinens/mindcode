@@ -37,7 +37,7 @@ async function main(): Promise<void> {
   if (args.length === 1 && (args[0] === '--version' || args[0] === '-v' || args[0] === '-V')) {
     // MACRO is supplied by the bundle banner. Keep the source entrypoint
     // executable as well, where that build-time global does not exist.
-    const version = typeof MACRO === 'undefined' ? '0.1.1' : MACRO.VERSION;
+    const version = typeof MACRO === 'undefined' ? '0.1.2' : MACRO.VERSION;
     // biome-ignore lint/suspicious/noConsole:: intentional console output
     console.log(`${version} (MindCode)`);
     return;

@@ -68,6 +68,14 @@ type WorkerProjection = {
   progress?: number;
 };
 
+export type NativeTuiTranscriptPage = {
+  start_sequence: number;
+  end_sequence: number;
+  has_older: boolean;
+  has_newer: boolean;
+  blocks: readonly NativeTuiTranscriptBlock[];
+};
+
 export type NativeTuiBridgeConnectionState = Pick<
   NativeTuiConnectionSnapshot,
   "state" | "reconnect_attempts"
@@ -108,13 +116,39 @@ export class NativeTuiInkBridge {
   private closed = false;
   private transcriptSequence = 0;
   private readonly startedAt = Date.now();
+  private readonly transcriptBlocks: NativeTuiTranscriptBlock[] = [];
+  private transcriptPagingRequest?: "older" | "newer";
+  /** Optional session authority; the renderer never persists transcript data. */
+  private readonly transcriptPageLoader?: (
+    direction: "older" | "newer",
+    current: NativeTuiTranscriptPage,
+  ) =>
+    | NativeTuiTranscriptPage
+    | undefined
+    | Promise<NativeTuiTranscriptPage | undefined>;
+  private transcriptPage?: NativeTuiTranscriptPage;
+  private transcriptWindowStart = 0;
+  private transcriptWindowEnd = 0;
+  private transcriptHasOlder = false;
+  private transcriptHasNewer = false;
+  private transcriptPageOffset = 0;
 
   constructor(
     control: NativeTuiControlServer,
     columns = process.stdout.columns || 120,
     rows = process.stdout.rows || 40,
+    options: {
+      transcriptPageLoader?: (
+        direction: "older" | "newer",
+        current: NativeTuiTranscriptPage,
+      ) =>
+        | NativeTuiTranscriptPage
+        | undefined
+        | Promise<NativeTuiTranscriptPage | undefined>;
+    } = {},
   ) {
     this.control = control;
+    this.transcriptPageLoader = options.transcriptPageLoader;
     const input = new PassThrough() as MutableTtyInput;
     input.isTTY = true;
     input.isRaw = false;
@@ -150,6 +184,38 @@ export class NativeTuiInkBridge {
 
   handleInput = (message: NativeTuiInputEvent): void => {
     if (this.closed) return;
+    if (message.event.type === "action") {
+      if (message.event.action === "transcript_page") {
+        const direction =
+          message.event.value === "older" || message.event.value === "newer"
+            ? message.event.value
+            : undefined;
+        if (direction) {
+          this.transcriptPagingRequest = direction;
+          void Promise.resolve(
+            this.transcriptPageLoader?.(
+              direction,
+              this.currentTranscriptPage(),
+            ),
+          )
+            .then(
+              (page) => {
+                if (page) {
+                  this.transcriptPage = {
+                    ...page,
+                    blocks: page.blocks.slice(-MAX_TYPED_TRANSCRIPT_BLOCKS),
+                  };
+                  this.transcriptPageOffset = 0;
+                }
+              },
+              () => undefined,
+            )
+            .finally(() => this.schedulePublish());
+          this.schedulePublish();
+        }
+        return;
+      }
+    }
     const bytes = inputBytes(message.event);
     if (bytes.length > 0) this.inputStream.write(bytes);
   };
@@ -187,6 +253,8 @@ export class NativeTuiInkBridge {
   ): void {
     if (this.closed) return;
     this.latestState = state;
+    this.transcriptPage = undefined;
+    this.transcriptPageOffset = 0;
     this.schedulePublish();
   }
 
@@ -231,6 +299,18 @@ export class NativeTuiInkBridge {
     return this.transcriptSequence;
   }
 
+  private currentTranscriptPage(): NativeTuiTranscriptPage {
+    return (
+      this.transcriptPage ?? {
+        start_sequence: this.transcriptWindowStart,
+        end_sequence: this.transcriptWindowEnd,
+        has_older: this.transcriptHasOlder,
+        has_newer: this.transcriptHasNewer,
+        blocks: this.transcriptBlocks.slice(),
+      }
+    );
+  }
+
   private publish(): void {
     const state = this.latestState;
     const tasks = state
@@ -249,18 +329,60 @@ export class NativeTuiInkBridge {
     const now = Date.now();
     const transcriptText = this.fragments.join("\n");
     const typedTranscript = this.buildTypedTranscript(tasks);
-    const transcript =
+    const nextTranscript: NativeTuiTranscriptBlock[] =
       typedTranscript.length > 0
         ? typedTranscript
         : transcriptText
           ? [
               {
+                type: "markdown",
+                id: `session:${this.transcriptSequence + 1}`,
                 sequence: this.nextTranscriptSequence(),
                 role: "session",
                 text: transcriptText,
               },
             ]
           : [];
+    for (const block of nextTranscript) {
+      const existing = this.transcriptBlocks.findIndex(
+        (item) => item.id === block.id,
+      );
+      if (existing >= 0) this.transcriptBlocks[existing] = block;
+      else this.transcriptBlocks.push(block);
+    }
+    while (this.transcriptBlocks.length > MAX_TYPED_TRANSCRIPT_BLOCKS)
+      this.transcriptBlocks.shift();
+    const loadedPage = this.transcriptPage;
+    let transcript: NativeTuiTranscriptBlock[];
+    if (loadedPage) {
+      this.transcriptWindowStart = loadedPage.start_sequence;
+      this.transcriptWindowEnd = loadedPage.end_sequence;
+      this.transcriptHasOlder = loadedPage.has_older;
+      this.transcriptHasNewer = loadedPage.has_newer;
+      transcript = [...loadedPage.blocks];
+    } else {
+      const pageSize = Math.min(128, Math.max(1, this.transcriptBlocks.length));
+      const maxOffset = Math.max(0, this.transcriptBlocks.length - pageSize);
+      const paging = this.transcriptPagingRequest;
+      this.transcriptPagingRequest = undefined;
+      if (paging === "older")
+        this.transcriptPageOffset = Math.min(
+          maxOffset,
+          this.transcriptPageOffset + pageSize,
+        );
+      if (paging === "newer")
+        this.transcriptPageOffset = Math.max(
+          0,
+          this.transcriptPageOffset - pageSize,
+        );
+      const end = this.transcriptBlocks.length - this.transcriptPageOffset;
+      const start = Math.max(0, end - pageSize);
+      this.transcriptWindowStart = this.transcriptBlocks[start]?.sequence ?? 0;
+      this.transcriptWindowEnd = this.transcriptBlocks[end - 1]?.sequence ?? 0;
+      this.transcriptHasOlder = start > 0;
+      this.transcriptHasNewer = this.transcriptPageOffset > 0;
+      transcript = this.transcriptBlocks.slice(start, end);
+    }
     try {
       this.control.publish({
         status: {
@@ -328,6 +450,13 @@ export class NativeTuiInkBridge {
           }),
         ),
         transcript,
+        transcript_window: {
+          start_sequence: this.transcriptWindowStart,
+          end_sequence: this.transcriptWindowEnd,
+          has_older: this.transcriptHasOlder,
+          has_newer: this.transcriptHasNewer,
+          blocks: transcript,
+        },
       });
     } catch {
       // Projection limits are a display boundary: dropping one frame must not
@@ -669,6 +798,135 @@ function taskParentId(task: TaskState): string | undefined {
     stringValue(record.parentId) ??
     stringValue(identity?.parentSessionId)
   );
+}
+
+export function createSessionTranscriptPageLoader(): (
+  direction: "older" | "newer",
+  current: NativeTuiTranscriptPage,
+) => Promise<NativeTuiTranscriptPage | undefined> {
+  return async (direction, current) => {
+    try {
+      const { getTranscriptPath, loadTranscriptFile } = await import(
+        "../../utils/sessionStorage.js"
+      );
+      const loaded = await loadTranscriptFile(getTranscriptPath(), {
+        keepAllLeaves: true,
+      });
+      const blocks: NativeTuiTranscriptBlock[] = [];
+      for (const [index, message] of Array.from(
+        loaded.messages.values(),
+      ).entries()) {
+        appendStoredMessageBlocks(
+          blocks,
+          message,
+          index,
+          () => blocks.length + 1,
+        );
+        if (blocks.length >= MAX_TYPED_TRANSCRIPT_BLOCKS) break;
+      }
+      if (blocks.length === 0) return;
+      const pageSize = Math.max(1, Math.min(128, current.blocks.length || 128));
+      const currentStart = Math.max(1, current.start_sequence || blocks.length);
+      const currentEnd = Math.min(
+        blocks.length,
+        current.end_sequence || blocks.length,
+      );
+      const start =
+        direction === "older"
+          ? Math.max(0, currentStart - 1 - pageSize)
+          : Math.min(Math.max(0, blocks.length - pageSize), currentEnd);
+      const end = Math.min(blocks.length, start + pageSize);
+      return {
+        start_sequence: blocks[start]?.sequence ?? 0,
+        end_sequence: blocks[end - 1]?.sequence ?? 0,
+        has_older: start > 0,
+        has_newer: end < blocks.length,
+        blocks: blocks.slice(start, end),
+      };
+    } catch {
+      return;
+    }
+  };
+}
+
+function appendStoredMessageBlocks(
+  blocks: NativeTuiTranscriptBlock[],
+  value: unknown,
+  messageIndex: number,
+  nextSequence: () => number,
+): void {
+  const message = asRecord(value);
+  if (!message) return;
+  const messageId = boundedText(
+    `session:${stringValue(message.uuid) ?? messageIndex}`,
+    256,
+  );
+  const role = messageRole(stringValue(message.type) ?? "session");
+  const content = messageContent(message);
+  if (content.length === 0) {
+    const text = contentText(message.content ?? message.text);
+    if (text) {
+      blocks.push({
+        type: "markdown",
+        id: `${messageId}:text`,
+        sequence: nextSequence(),
+        role,
+        text: boundedText(text, MAX_TRANSCRIPT_TEXT_BYTES),
+      });
+    }
+    return;
+  }
+  for (const [contentIndex, item] of content.entries()) {
+    const block = asRecord(item);
+    const blockType = stringValue(block?.type) ?? "text";
+    const id = `${messageId}:${contentIndex}`;
+    if (
+      blockType === "tool_use" ||
+      blockType === "server_tool_use" ||
+      blockType === "mcp_tool_use"
+    ) {
+      blocks.push({
+        type: "tool",
+        id,
+        sequence: nextSequence(),
+        name: boundedText(stringValue(block?.name) ?? "tool", 128),
+        status: "completed",
+        input: boundedText(
+          typeof block?.input === "string"
+            ? block.input
+            : safeJson(block?.input),
+          MAX_TOOL_ARGUMENT_BYTES,
+        ),
+      });
+      continue;
+    }
+    if (blockType === "tool_result") {
+      blocks.push({
+        type: "tool",
+        id,
+        sequence: nextSequence(),
+        name: boundedText(stringValue(block?.name) ?? "tool", 128),
+        status: block?.is_error === true ? "failed" : "completed",
+        output: boundedText(
+          contentText(block?.content ?? block?.text ?? block),
+          MAX_TOOL_OUTPUT_BYTES,
+        ),
+      });
+      continue;
+    }
+    const text = contentText(
+      block?.text ?? block?.thinking ?? block?.content ?? item,
+    );
+    if (text) {
+      blocks.push({
+        type: "markdown",
+        id,
+        sequence: nextSequence(),
+        role,
+        text: boundedText(text, MAX_TRANSCRIPT_TEXT_BYTES),
+      });
+    }
+  }
 }
 
 function appendMessageBlocks(

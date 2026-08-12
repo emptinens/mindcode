@@ -46,7 +46,7 @@ export async function launchRepl(
 
   const [
     { NativeTuiControlServer },
-    { NativeTuiInkBridge },
+    { NativeTuiInkBridge, createSessionTranscriptPageLoader },
     { NativeTuiLaunchCoordinator },
   ] = await Promise.all([
     import("./runtime/nativeTui/controlServer.js"),
@@ -70,7 +70,12 @@ export async function launchRepl(
     sessionOptions: {
       createControlServer: (options) => {
         const control = new NativeTuiControlServer(options);
-        bridge = new NativeTuiInkBridge(control);
+        bridge = new NativeTuiInkBridge(control, undefined, undefined, {
+          transcriptPageLoader:
+            typeof createSessionTranscriptPageLoader === "function"
+              ? createSessionTranscriptPageLoader()
+              : undefined,
+        });
         bridge.setConnectionState({
           state: "connecting",
           reconnect_attempts: 0,

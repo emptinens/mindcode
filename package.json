@@ -1,6 +1,6 @@
 {
   "name": "mindcode",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "MindCode CLI",
   "license": "UNLICENSED",
   "private": true,
@@ -36,6 +36,8 @@
     "test:build-bundle": "node --test scripts/native-daemon.test.mjs",
     "perf:baseline": "node scripts/perf/harness.mjs",
     "perf:native-tui": "bun scripts/perf/native-tui-harness.mjs --real",
+    "perf:release-gates": "node --test scripts/perf/release-gates.test.mjs",
+    "package:linux-x64": "MINDCODE_BUILD_TARGETS=bun-linux-x64 bun run build && node scripts/package-linux-x64.mjs",
     "coverage:changed": "node scripts/run-bun-test.mjs --isolate --coverage --coverage-reporter=lcov && node scripts/coverage-changed.mjs",
     "coverage:changed:gate": "node scripts/coverage-changed.mjs",
     "smoke": "bun dist/mindcode.js --help"

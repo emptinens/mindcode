@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { AppState } from "../../state/AppStateStore.js";
 import type { NativeTuiControlServer } from "./controlServer.js";
-import { NativeTuiInkBridge } from "./inkBridge.js";
+import {
+  NativeTuiInkBridge,
+  type NativeTuiTranscriptPage,
+} from "./inkBridge.js";
 import {
   NATIVE_TUI_PROTOCOL_VERSION,
   type NativeTuiInputEvent,
@@ -66,7 +69,7 @@ describe("native TUI Ink bridge", () => {
       publish: (value: unknown) => {
         published.push(value);
       },
-    } as NativeTuiControlServer);
+    } as unknown as NativeTuiControlServer);
     bridge.publishState({
       tasks: {
         task: {
@@ -220,6 +223,119 @@ describe("native TUI Ink bridge", () => {
         expect.objectContaining({ type: "report", task_id: "worker" }),
       ]),
     });
+    bridge.close();
+  });
+
+  test("accepts transcript paging actions and exposes bounded older/newer windows", async () => {
+    const published: unknown[] = [];
+    const bridge = new NativeTuiInkBridge(
+      {
+        publish: (value: unknown) => published.push(value),
+      } as unknown as NativeTuiControlServer,
+      undefined,
+      undefined,
+      {
+        transcriptPageLoader: async (
+          direction,
+          current,
+        ): Promise<NativeTuiTranscriptPage | undefined> => {
+          if (direction === "older") {
+            return {
+              start_sequence: 1,
+              end_sequence: 1,
+              has_older: false,
+              has_newer: true,
+              blocks: current.blocks.slice(0, 1),
+            };
+          }
+          return {
+            start_sequence: current.end_sequence + 1,
+            end_sequence: current.end_sequence + 1,
+            has_older: true,
+            has_newer: false,
+            blocks: [
+              {
+                type: "markdown",
+                id: "newest",
+                sequence: current.end_sequence + 1,
+                role: "assistant",
+                text: "message-139",
+              },
+            ],
+          };
+        },
+      },
+    );
+    bridge.publishState({
+      tasks: {
+        worker: {
+          id: "worker",
+          type: "local_agent",
+          status: "running",
+          description: "worker",
+          messages: Array.from({ length: 140 }, (_, index) => ({
+            type: "assistant",
+            message: { content: [{ type: "text", text: `message-${index}` }] },
+          })),
+        },
+      } as unknown as AppState["tasks"],
+      statusLineText: "working",
+      mainLoopModel: "gpt-5.6-sol",
+      effortValue: "medium",
+    });
+    await Bun.sleep(1);
+    const tail = published.at(-1) as {
+      transcript_window?: {
+        has_older: boolean;
+        has_newer: boolean;
+        blocks: unknown[];
+      };
+    };
+    expect(tail.transcript_window?.has_older).toBe(true);
+    expect(tail.transcript_window?.has_newer).toBe(false);
+
+    bridge.handleInput({
+      type: "input_event",
+      version: NATIVE_TUI_PROTOCOL_VERSION,
+      id: "page-older",
+      sequence: 1,
+      event: { type: "action", action: "transcript_page", value: "older" },
+    });
+    await Bun.sleep(1);
+    const older = published.at(-1) as {
+      transcript_window?: {
+        has_older: boolean;
+        has_newer: boolean;
+        blocks: Array<{ text?: string }>;
+      };
+    };
+    expect(older.transcript_window?.has_newer).toBe(true);
+    expect(
+      older.transcript_window?.blocks.some(
+        (block) => block.text === "message-0",
+      ),
+    ).toBe(true);
+
+    bridge.handleInput({
+      type: "input_event",
+      version: NATIVE_TUI_PROTOCOL_VERSION,
+      id: "page-newer",
+      sequence: 2,
+      event: { type: "action", action: "transcript_page", value: "newer" },
+    });
+    await Bun.sleep(1);
+    const newer = published.at(-1) as {
+      transcript_window?: {
+        has_newer: boolean;
+        blocks: Array<{ text?: string }>;
+      };
+    };
+    expect(newer.transcript_window?.has_newer).toBe(false);
+    expect(
+      newer.transcript_window?.blocks.some(
+        (block) => block.text === "message-139",
+      ),
+    ).toBe(true);
     bridge.close();
   });
 

@@ -712,11 +712,63 @@ impl App {
         }
     }
 
+    fn transcript_page_action(&self, older: bool) -> bool {
+        self.overlay == OverlayView::None
+            && self.focus == PanelFocus::Content
+            && matches!(
+                self.active_view,
+                NavigationView::Chat | NavigationView::Logs
+            )
+            && self.latest_snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.transcript_window.as_ref().is_some_and(|window| {
+                    if older {
+                        window.has_older
+                    } else {
+                        window.has_newer
+                    }
+                })
+            })
+    }
+
+    fn request_transcript_page(&mut self, older: bool, event: &mut UiInputEventKind) -> bool {
+        if !self.transcript_page_action(older) {
+            return false;
+        }
+        *event = UiInputEventKind::Action(mindcode_protocol::ui::UiActionInput {
+            action: "transcript_page".into(),
+            target: self
+                .latest_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.active_session_id.clone()),
+            value: Some(if older { "older" } else { "newer" }.into()),
+        });
+        self.suppress_input = true;
+        true
+    }
+
     fn contextualize_input(&mut self, message: &mut UiMessage) -> bool {
         self.suppress_input = false;
         let UiMessage::InputEvent { event, .. } = message else {
             return false;
         };
+        let page_direction = match event {
+            UiInputEventKind::Key(input)
+                if input.modifiers.is_empty() && matches!(input.key.as_str(), "up" | "down") =>
+            {
+                Some(input.key == "up")
+            }
+            UiInputEventKind::Mouse(mouse) => match mouse.kind {
+                mindcode_protocol::ui::UiMouseEventKind::ScrollUp => Some(true),
+                mindcode_protocol::ui::UiMouseEventKind::ScrollDown => Some(false),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(older) = page_direction {
+            if self.transcript_page_action(older) {
+                return self.request_transcript_page(older, event);
+            }
+        }
         match event {
             UiInputEventKind::Key(UiKeyInput { key, modifiers }) => {
                 if exact_modifiers(modifiers, &["alt"])
@@ -809,6 +861,7 @@ impl App {
                 }
                 false
             }
+            UiInputEventKind::Mouse(_) => false,
             _ if self.overlay != OverlayView::None => {
                 self.suppress_input = true;
                 true
@@ -1405,6 +1458,13 @@ fn transport_passthrough(app: &App, message: &UiMessage) -> bool {
                     ..
                 }
             ))
+        || matches!(
+            message,
+            UiMessage::InputEvent {
+                event: UiInputEventKind::Action(action),
+                ..
+            } if action.action == "transcript_page"
+        )
 }
 
 fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
@@ -2258,6 +2318,57 @@ mod tests {
         assert_eq!(saved.motion_override, Some(MotionMode::Reduced));
         assert_eq!(saved.ratios_for("default"), PaneRatios::DEFAULT);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transcript_boundary_keys_become_paging_actions() {
+        use mindcode_protocol::ui::UiTranscriptWindow;
+
+        let mut app = App {
+            show_welcome: false,
+            focus: PanelFocus::Content,
+            ..App::default()
+        };
+        let mut current = snapshot(1);
+        current.transcript_window = Some(UiTranscriptWindow {
+            start_sequence: 1,
+            end_sequence: 2,
+            has_older: true,
+            has_newer: false,
+            blocks: current.transcript.clone(),
+        });
+        app.apply_message(render_message(current, "paging"));
+        let mut older = key_message("up", &[]);
+        assert!(app.contextualize_input(&mut older));
+        assert!(
+            matches!(older, UiMessage::InputEvent { event: UiInputEventKind::Action(action), .. } if action.action == "transcript_page" && action.value.as_deref() == Some("older"))
+        );
+
+        let mut current = snapshot(2);
+        current.transcript_window = Some(UiTranscriptWindow {
+            start_sequence: 3,
+            end_sequence: 4,
+            has_older: false,
+            has_newer: true,
+            blocks: current.transcript.clone(),
+        });
+        app.apply_message(render_message(current, "paging"));
+        let mut newer = UiMessage::InputEvent {
+            version: UI_PROTOCOL_VERSION,
+            id: "mouse".into(),
+            sequence: 2,
+            event: UiInputEventKind::Mouse(mindcode_protocol::ui::UiMouseInput {
+                x: 2,
+                y: 2,
+                button: mindcode_protocol::ui::UiMouseButton::None,
+                kind: mindcode_protocol::ui::UiMouseEventKind::ScrollDown,
+                modifiers: Vec::new(),
+            }),
+        };
+        assert!(app.contextualize_input(&mut newer));
+        assert!(
+            matches!(newer, UiMessage::InputEvent { event: UiInputEventKind::Action(action), .. } if action.action == "transcript_page" && action.value.as_deref() == Some("newer"))
+        );
     }
 
     #[test]

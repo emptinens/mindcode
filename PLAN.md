@@ -1,4 +1,4 @@
-# MindCode 0.1.1 — план и статус реализации
+# MindCode 0.1.2 — план и статус реализации
 
 Дата аудита: `2026-08-07`
 Каталог проекта: `/Users/x32db/PROJECTS/mindcode`
@@ -13,7 +13,7 @@
 | Параметр | Обязательное значение |
 |---|---|
 | Проект | `MindCode` |
-| Версия | `0.1.1` |
+| Версия | `0.1.2` |
 | Провайдер | только `VEXZY` |
 | Leader | выбирается динамически из доступного каталога VEXZY |
 | Worker | только `gpt-5.6-luna` |
@@ -363,6 +363,25 @@ SessionIndex interop, build, smoke и native packaging — pass. Эти числ
   snapshots не персистятся, не отправляются daemon и не кэшируют completion,
   stream или tool responses;
 - cross-language digest и Rust↔TypeScript RPC покрыты реальным interop test.
+
+## 3.16 Release 0.1.2 — implementation status
+
+Текущий worktree реализует следующие additive boundaries для Linux x64 reliability
+release:
+
+- async Worker graph recovery через daemon/local authority с idempotent reconcile;
+- recovery при CLI startup, CLI resume, Worker resume и daemon startup;
+- bounded metadata-only recovery audit в `~/.mindcode/state/recovery.jsonl`;
+- status HTML recovery/lease telemetry and startup recovery notice;
+- native TUI transcript window paging actions на arrow/mouse boundary events;
+- session-backed paging loader seam with bounded typed transcript windows;
+- caller-provided metadata-only JSON/HTML diagnostic export service;
+- Linux x64 release performance/manifest/checksum helper scripts;
+- package/Cargo/runtime identity bumped to `0.1.2`.
+
+Оставшиеся release gates: полный current-worktree Bun suite/coverage/build,
+real Linux x64 package rebuild from source, Rust TUI dependency availability,
+performance baseline collection for all metrics, and final local atomic commits/tag.
 
 ## 4. Итоговый статус реализации
 
