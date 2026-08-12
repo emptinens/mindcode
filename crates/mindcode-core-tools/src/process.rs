@@ -213,9 +213,10 @@ pub async fn process_run(
     tokio::pin!(timeout);
     let mut timed_out = false;
     let mut terminated = false;
+    let mut exit_status = None;
     let cancelled = tokio::select! {
-        status = child.wait() => {
-            status.map_err(|_| CoreToolError::new(CoreToolErrorCode::ProcessIo, "process wait failed"))?;
+        wait_result = child.wait() => {
+            exit_status = Some(wait_result.map_err(|_| CoreToolError::new(CoreToolErrorCode::ProcessIo, "process wait failed"))?);
             false
         }
         _ = &mut timeout => {
@@ -232,14 +233,18 @@ pub async fn process_run(
     };
 
     let child_wait_failed = if terminated {
-        !matches!(
-            time_timeout(
-                Duration::from_millis(POST_TERMINATION_GRACE_MS),
-                child.wait(),
-            )
-            .await,
-            Ok(Ok(_))
+        match time_timeout(
+            Duration::from_millis(POST_TERMINATION_GRACE_MS),
+            child.wait(),
         )
+        .await
+        {
+            Ok(Ok(status)) => {
+                exit_status = Some(status);
+                false
+            }
+            _ => true,
+        }
     } else {
         false
     };
@@ -287,14 +292,9 @@ pub async fn process_run(
         ));
     }
 
-    let status = child
-        .try_wait()
-        .map_err(|_| {
-            CoreToolError::new(CoreToolErrorCode::ProcessIo, "process status unavailable")
-        })?
-        .ok_or_else(|| {
-            CoreToolError::new(CoreToolErrorCode::ProcessIo, "process was not reaped")
-        })?;
+    let status = exit_status.ok_or_else(|| {
+        CoreToolError::new(CoreToolErrorCode::ProcessIo, "process status unavailable")
+    })?;
     let output = Arc::try_unwrap(output)
         .map_err(|_| CoreToolError::new(CoreToolErrorCode::ProcessIo, "output state unavailable"))?
         .into_inner();
