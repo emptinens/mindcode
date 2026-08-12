@@ -1,0 +1,4 @@
+API Error: VexzyError: 400 Vexzy request failed (400)
+    at createVexzyError (/$bunfs/root/mindcode-linux-x64:26217:24)
+    at executeRequest (/$bunfs/root/mindcode-linux-x64:286876:43)
+    at processTicksAndRejections (native:7:39)

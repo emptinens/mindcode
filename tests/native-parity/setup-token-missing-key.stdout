@@ -1,0 +1,7 @@
+[?2026h
+[?2026lVEXZY authentication uses VEXZY_API_KEY.
+
+Set it in your shell:
+  export VEXZY_API_KEY="forge-…"
+
+The legacy OAuth setup flow is not used by MindCode.
