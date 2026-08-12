@@ -387,6 +387,7 @@ version = "0.1.3"
 dependencies = [
  "anyhow",
  "clap",
+ "mindcode-vexzy",
  "mindcoded",
  "serde_json",
  "tokio",
