@@ -403,6 +403,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mindcode-settings"
+version = "0.1.3"
+dependencies = [
+ "mindcode-vexzy",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "mindcode-state"
 version = "0.1.3"
 dependencies = [
