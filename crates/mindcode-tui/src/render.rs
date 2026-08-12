@@ -445,31 +445,24 @@ fn render_sidebar(
             theme.style(ColorToken::Muted),
         )));
     }
-    lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "NAVIGATION",
         theme.style(ColorToken::Muted).add_modifier(Modifier::BOLD),
     )));
+    let navigation_width = inner.width.saturating_sub(1) as usize;
     for view in NavigationView::ALL {
         let active = view == state.active_view;
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!(" {} ", view.icon()),
-                if active {
-                    theme.style(ColorToken::Accent)
-                } else {
-                    theme.style(ColorToken::Muted)
-                },
-            ),
-            Span::styled(
-                view.label(),
-                if active {
-                    theme.style(ColorToken::Text).add_modifier(Modifier::BOLD)
-                } else {
-                    theme.style(ColorToken::Muted)
-                },
-            ),
-        ]));
+        let label = format!(" {} {}", view.icon(), view.label());
+        let row = format!("{label:<navigation_width$}");
+        let style = if active {
+            theme
+                .style(ColorToken::Text)
+                .bg(theme.color(ColorToken::Selection))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            theme.style(ColorToken::Muted)
+        };
+        lines.push(Line::from(Span::styled(row, style)));
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }

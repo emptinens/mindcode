@@ -201,6 +201,8 @@ pub struct App {
     workspace_id: String,
     terminal_size: (u16, u16),
     drag_target: Option<DragTarget>,
+    pointer_press: Option<(u16, u16)>,
+    last_mouse_scroll_at: Option<Instant>,
     suppress_input: bool,
     started_at: Instant,
     sidebar_visible: bool,
@@ -268,6 +270,8 @@ impl App {
             workspace_id: "default".into(),
             terminal_size: (140, 45),
             drag_target: None,
+            pointer_press: None,
+            last_mouse_scroll_at: None,
             suppress_input: false,
             started_at: Instant::now(),
             sidebar_visible: true,
@@ -358,6 +362,7 @@ impl App {
         self.show_welcome = false;
         self.focus = PanelFocus::Content;
         self.drag_target = None;
+        self.pointer_press = None;
     }
 
     fn select_workspace(&mut self, workspace: String) {
@@ -518,6 +523,10 @@ impl App {
     }
 
     fn apply_local_intents(&mut self, intents: &[LocalIntent]) -> bool {
+        self.apply_local_intents_at(intents, Instant::now())
+    }
+
+    fn apply_local_intents_at(&mut self, intents: &[LocalIntent], _now: Instant) -> bool {
         let mut consumed = false;
         for intent in intents {
             match intent {
@@ -578,10 +587,9 @@ impl App {
                     }
                     consumed = true;
                 }
-                // Up/down in the composer are cursor movement rather
-                // than transcript scrolling. Let the original key
-                // event reach `apply_input`; page and mouse scrolling
-                // remain local.
+                // Up/down in the composer are cursor movement rather than
+                // transcript scrolling. Let the original key event reach
+                // `apply_input`; page scrolling remains local.
                 LocalIntent::Scroll {
                     target,
                     axis,
@@ -600,6 +608,18 @@ impl App {
                     if !composer_cursor_move {
                         consumed = true;
                     }
+                }
+                LocalIntent::MouseScroll {
+                    target,
+                    axis,
+                    delta,
+                } => {
+                    if self.overlay == OverlayView::None
+                        && *axis == interaction::ScrollAxis::Vertical
+                    {
+                        self.scroll_by(*target, *delta);
+                    }
+                    consumed = true;
                 }
                 LocalIntent::JumpToLatest { target } => {
                     if self.overlay == OverlayView::None {
@@ -645,7 +665,15 @@ impl App {
                 }
                 LocalIntent::EndDrag { column, row } => {
                     if self.overlay == OverlayView::None {
-                        self.end_drag(*column, *row);
+                        if self.show_welcome && self.pointer_press == Some((*column, *row)) {
+                            self.show_welcome = false;
+                            self.focus = PanelFocus::Composer;
+                            self.input_cursor = self.input_buffer.len();
+                            self.pointer_press = None;
+                            self.drag_target = None;
+                        } else {
+                            self.end_drag(*column, *row);
+                        }
                     } else {
                         consumed = true;
                     }
@@ -653,6 +681,7 @@ impl App {
                 LocalIntent::Resize { width, height } => {
                     self.terminal_size = (*width, *height);
                     self.drag_target = None;
+                    self.pointer_press = None;
                 }
                 LocalIntent::Paste(_) => {
                     // apply_input performs the single local insertion and
@@ -665,6 +694,27 @@ impl App {
             }
         }
         consumed
+    }
+
+    /// Gate physical wheel events before they reach either local rendering or
+    /// the TypeScript transcript boundary. Keyboard scrolling is never throttled.
+    fn admit_mouse_scroll(&mut self, intents: &mut Vec<LocalIntent>, now: Instant) -> bool {
+        if !intents
+            .iter()
+            .any(|intent| matches!(intent, LocalIntent::MouseScroll { .. }))
+        {
+            return true;
+        }
+        const MOUSE_SCROLL_THROTTLE: Duration = Duration::from_millis(80);
+        if self
+            .last_mouse_scroll_at
+            .is_some_and(|previous| now.saturating_duration_since(previous) < MOUSE_SCROLL_THROTTLE)
+        {
+            intents.retain(|intent| !matches!(intent, LocalIntent::MouseScroll { .. }));
+            return false;
+        }
+        self.last_mouse_scroll_at = Some(now);
+        true
     }
 
     fn effective_scroll_target(
@@ -1198,7 +1248,7 @@ impl App {
                         }
                     })
                     .unwrap_or(1);
-                index.checked_sub(session_lines.saturating_add(2)) // blank + NAVIGATION
+                index.checked_sub(session_lines.saturating_add(1)) // NAVIGATION heading
             }
             ui::Breakpoint::Narrow => None,
         };
@@ -1208,19 +1258,19 @@ impl App {
     }
 
     fn begin_drag(&mut self, column: u16, row: u16) {
-        self.focus_at(column, row);
         let layout = self.interaction_layout();
-        if !rect_contains(layout.chat, column, row)
-            && !rect_contains(layout.sidebar, column, row)
-            && !rect_contains(layout.inspector, column, row)
-        {
-            return;
-        }
-        if layout.sidebar.width > 0 && near_boundary(column, layout.sidebar.right()) {
-            self.drag_target = Some(DragTarget::SidebarChat);
-        } else if layout.inspector_is_pane() && near_boundary(column, layout.chat.right()) {
-            self.drag_target = Some(DragTarget::ChatInspector);
-        }
+        self.drag_target =
+            if layout.sidebar.width > 0 && near_boundary(column, layout.sidebar.right()) {
+                Some(DragTarget::SidebarChat)
+            } else if layout.inspector_is_pane() && near_boundary(column, layout.chat.right()) {
+                Some(DragTarget::ChatInspector)
+            } else {
+                None
+            };
+        // A press in a panel is deliberately inert. It becomes a click only if
+        // the left-button release returns to this exact terminal cell. A press
+        // on a divider has no click target and may resize only that divider.
+        self.pointer_press = self.drag_target.is_none().then_some((column, row));
     }
 
     fn drag_to(&mut self, column: u16, _row: u16) {
@@ -1233,8 +1283,11 @@ impl App {
         if self.drag_target.is_some() {
             self.drag_to(column, row);
             self.persist_preferences();
+        } else if self.pointer_press.take() == Some((column, row)) {
+            self.focus_at(column, row);
         }
         self.drag_target = None;
+        self.pointer_press = None;
     }
 
     fn resize_by_keyboard(&mut self, delta: i16) {
@@ -1780,6 +1833,11 @@ mod unix_runtime {
                 .min(SOCKET_READ_TIMEOUT);
             if crossterm::event::poll(poll_interval)? {
                 let mut captured = read_input_event()?;
+                let accepted_mouse_scroll =
+                    app.admit_mouse_scroll(&mut captured.intents, Instant::now());
+                if !accepted_mouse_scroll && is_mouse_wheel_message(captured.message.as_ref()) {
+                    captured.message = None;
+                }
                 if let Some(message) = captured.message.as_mut() {
                     needs_redraw |= app.contextualize_input(message);
                 }
@@ -1875,7 +1933,12 @@ mod unix_runtime {
                 Duration::from_millis(250)
             };
             if crossterm::event::poll(wait)? {
-                let captured = read_input_event()?;
+                let mut captured = read_input_event()?;
+                let accepted_mouse_scroll =
+                    app.admit_mouse_scroll(&mut captured.intents, Instant::now());
+                if !accepted_mouse_scroll && is_mouse_wheel_message(captured.message.as_ref()) {
+                    captured.message = None;
+                }
                 if captured.message.as_ref().is_some_and(should_quit) {
                     return Ok(None);
                 }
@@ -2024,6 +2087,20 @@ mod unix_runtime {
             crossterm::event::MouseButton::Middle => mindcode_protocol::ui::UiMouseButton::Middle,
             crossterm::event::MouseButton::Right => mindcode_protocol::ui::UiMouseButton::Right,
         }
+    }
+
+    fn is_mouse_wheel_message(message: Option<&UiMessage>) -> bool {
+        matches!(
+            message,
+            Some(UiMessage::InputEvent {
+                event: UiInputEventKind::Mouse(mouse),
+                ..
+            }) if matches!(
+                mouse.kind,
+                mindcode_protocol::ui::UiMouseEventKind::ScrollUp
+                    | mindcode_protocol::ui::UiMouseEventKind::ScrollDown
+            )
+        )
     }
 
     fn should_quit(message: &UiMessage) -> bool {
@@ -2509,6 +2586,111 @@ mod tests {
     }
 
     #[test]
+    fn mouse_click_activates_only_when_release_matches_press_and_drag_stays_on_dividers() {
+        let mut current = snapshot(1);
+        let mut second_task = current.tasks[0].clone();
+        second_task.id = "task-2".into();
+        second_task.title = "selected-task".into();
+        second_task.metadata.agent_id = None;
+        current.tasks.push(second_task);
+
+        let mut app = App {
+            show_welcome: false,
+            active_view: NavigationView::Tasks,
+            terminal_size: (140, 45),
+            ..App::default()
+        };
+        app.apply_message(render_message(current, "mouse-release"));
+        let layout = app.interaction_layout();
+        let task_row = layout.chat.y + 1 + 3;
+        let task_column = layout.chat.x + 2;
+
+        app.apply_local_intents(&[LocalIntent::BeginDrag {
+            column: task_column,
+            row: task_row,
+        }]);
+        assert_eq!(app.selected_task, None, "press must not activate content");
+        app.apply_local_intents(&[LocalIntent::EndDrag {
+            column: task_column.saturating_add(1),
+            row: task_row,
+        }]);
+        assert_eq!(
+            app.selected_task, None,
+            "release elsewhere must not activate content"
+        );
+
+        app.apply_local_intents(&[LocalIntent::BeginDrag {
+            column: task_column,
+            row: task_row,
+        }]);
+        app.apply_local_intents(&[LocalIntent::EndDrag {
+            column: task_column,
+            row: task_row,
+        }]);
+        assert_eq!(app.selected_task, Some(1));
+
+        let before = app.ratios;
+        app.apply_local_intents(&[LocalIntent::BeginDrag {
+            column: task_column,
+            row: task_row,
+        }]);
+        app.apply_local_intents(&[LocalIntent::Drag {
+            column: task_column.saturating_add(8),
+            row: task_row,
+        }]);
+        app.apply_local_intents(&[LocalIntent::EndDrag {
+            column: task_column.saturating_add(8),
+            row: task_row,
+        }]);
+        assert_eq!(app.ratios, before, "content drag must not resize panes");
+
+        let divider = app.interaction_layout().sidebar.right();
+        app.apply_local_intents(&[LocalIntent::BeginDrag {
+            column: divider,
+            row: task_row,
+        }]);
+        app.apply_local_intents(&[LocalIntent::Drag {
+            column: divider.saturating_add(6),
+            row: task_row,
+        }]);
+        app.apply_local_intents(&[LocalIntent::EndDrag {
+            column: divider.saturating_add(6),
+            row: task_row,
+        }]);
+        assert_ne!(app.ratios, before, "divider drag must resize panes");
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_one_line_and_is_throttled_for_eighty_milliseconds() {
+        let mut app = App {
+            show_welcome: false,
+            focus: PanelFocus::Content,
+            ..App::default()
+        };
+        let started = Instant::now();
+        let tick = LocalIntent::MouseScroll {
+            target: interaction::ScrollTarget::Transcript,
+            axis: interaction::ScrollAxis::Vertical,
+            delta: -1,
+        };
+
+        let mut first = vec![tick.clone()];
+        assert!(app.admit_mouse_scroll(&mut first, started));
+        assert!(app.apply_local_intents_at(&first, started));
+        assert_eq!(app.transcript_scroll, 1);
+
+        let mut too_fast = vec![tick.clone()];
+        assert!(!app.admit_mouse_scroll(&mut too_fast, started + Duration::from_millis(79)));
+        assert!(too_fast.is_empty());
+        assert_eq!(app.transcript_scroll, 1);
+
+        let mut next = vec![tick];
+        assert!(app.admit_mouse_scroll(&mut next, started + Duration::from_millis(80)));
+        app.apply_local_intents_at(&next, started + Duration::from_millis(80));
+        assert_eq!(app.transcript_scroll, 2);
+    }
+
+    #[test]
     fn task_and_change_clicks_update_renderer_selection() {
         use mindcode_protocol::ui::UiChangeSnapshot;
 
@@ -2661,7 +2843,7 @@ mod tests {
         app.apply_message(render_message(snapshot(1), "snapshot"));
         app.terminal_size = (140, 45);
         let sidebar = app.interaction_layout().sidebar;
-        let navigation_start = sidebar.y + 1 + 2 + 2;
+        let navigation_start = sidebar.y + 1 + 2 + 1;
         app.focus_at(sidebar.x + 1, navigation_start + 2);
         assert_eq!(app.active_view, NavigationView::Tasks);
 

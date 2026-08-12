@@ -59,10 +59,11 @@ pub struct PaneRatios {
 }
 
 impl PaneRatios {
+    /// Balanced chat-first desktop layout.
     pub const DEFAULT: Self = Self {
-        sidebar: 24,
-        chat: 52,
-        inspector: 24,
+        sidebar: 18,
+        chat: 64,
+        inspector: 18,
     };
 
     pub const fn new(sidebar: u16, chat: u16, inspector: u16) -> Self {
@@ -341,6 +342,14 @@ mod tests {
         assert_eq!(Breakpoint::for_width(99), Breakpoint::Compact);
         assert_eq!(Breakpoint::for_width(72), Breakpoint::Compact);
         assert_eq!(Breakpoint::for_width(71), Breakpoint::Narrow);
+    }
+
+    #[test]
+    fn balanced_default_prioritizes_chat_width() {
+        assert_eq!(PaneRatios::DEFAULT, PaneRatios::new(18, 64, 18));
+        let layout = calculate_layout(area(200, 30), PaneRatios::DEFAULT);
+        assert!(layout.chat.width > layout.sidebar.width);
+        assert!(layout.chat.width > layout.inspector.width);
     }
 
     #[test]

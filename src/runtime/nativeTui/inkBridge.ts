@@ -87,6 +87,8 @@ type MutableTtyInput = PassThrough & {
   isTTY: boolean;
   isRaw: boolean;
   setRawMode(raw: boolean): MutableTtyInput;
+  ref(): MutableTtyInput;
+  unref(): MutableTtyInput;
 };
 
 type MutableTtyOutput = Writable & {
@@ -156,6 +158,11 @@ export class NativeTuiInkBridge {
       input.isRaw = raw;
       return input;
     };
+    // Ink keeps a raw-mode input source alive with ref()/unref(). PassThrough
+    // does not expose those process-handle APIs, so provide inert compatible
+    // methods for the bridge-owned virtual terminal stream.
+    input.ref = (): MutableTtyInput => input;
+    input.unref = (): MutableTtyInput => input;
     this.inputStream = input;
 
     const output = new Writable({

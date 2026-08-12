@@ -11,6 +11,22 @@ import {
 } from "./protocol.js";
 
 describe("native TUI Ink bridge", () => {
+  test("provides ref-compatible virtual stdin for Ink raw-mode lifecycle", () => {
+    const bridge = new NativeTuiInkBridge({
+      publish: () => undefined,
+    } as unknown as NativeTuiControlServer);
+    const stdin = bridge.renderOptions.stdin as unknown as {
+      ref?: () => unknown;
+      unref?: () => unknown;
+    };
+
+    expect(typeof stdin.ref).toBe("function");
+    expect(typeof stdin.unref).toBe("function");
+    expect(stdin.ref?.()).toBe(stdin);
+    expect(stdin.unref?.()).toBe(stdin);
+    bridge.close();
+  });
+
   test("maps semantic input into the hidden Ink stdin", async () => {
     const published: unknown[] = [];
     const bridge = new NativeTuiInkBridge({

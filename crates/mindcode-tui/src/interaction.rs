@@ -229,6 +229,13 @@ pub enum LocalIntent {
         axis: ScrollAxis,
         delta: i32,
     },
+    /// One physical mouse-wheel tick. The concrete renderer may rate-limit
+    /// these without slowing keyboard navigation.
+    MouseScroll {
+        target: ScrollTarget,
+        axis: ScrollAxis,
+        delta: i32,
+    },
     JumpToLatest {
         target: ScrollTarget,
     },
@@ -386,9 +393,7 @@ impl ViewState {
                 {
                     true
                 }
-                Event::Mouse(mouse) => {
-                    matches!(mouse.kind, MouseEventKind::Down(_) | MouseEventKind::Moved)
-                }
+                Event::Mouse(mouse) => matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)),
                 _ => false,
             };
             if dismiss {
@@ -444,6 +449,11 @@ impl ViewState {
             }
             LocalIntent::FocusAt { column, row } => self.pointer = Some((*column, *row)),
             LocalIntent::Scroll {
+                target,
+                axis,
+                delta,
+            }
+            | LocalIntent::MouseScroll {
                 target,
                 axis,
                 delta,
@@ -577,33 +587,34 @@ pub fn map_mouse_event(event: MouseEvent) -> Vec<LocalIntent> {
     let column = event.column;
     let row = event.row;
     match event.kind {
-        MouseEventKind::Down(MouseButton::Left) => vec![
-            LocalIntent::FocusAt { column, row },
-            LocalIntent::BeginDrag { column, row },
-        ],
-        MouseEventKind::Down(_) => vec![LocalIntent::FocusAt { column, row }],
-        MouseEventKind::Up(_) => vec![LocalIntent::EndDrag { column, row }],
-        MouseEventKind::Drag(_) => vec![LocalIntent::Drag { column, row }],
-        MouseEventKind::Moved => vec![LocalIntent::FocusAt { column, row }],
-        MouseEventKind::ScrollUp => vec![LocalIntent::Scroll {
+        // Do not activate content on press. The renderer records this press and
+        // activates only when the matching release lands on the same target.
+        MouseEventKind::Down(MouseButton::Left) => vec![LocalIntent::BeginDrag { column, row }],
+        MouseEventKind::Up(MouseButton::Left) => vec![LocalIntent::EndDrag { column, row }],
+        MouseEventKind::Drag(MouseButton::Left) => vec![LocalIntent::Drag { column, row }],
+        MouseEventKind::Down(_)
+        | MouseEventKind::Up(_)
+        | MouseEventKind::Drag(_)
+        | MouseEventKind::Moved => Vec::new(),
+        MouseEventKind::ScrollUp => vec![LocalIntent::MouseScroll {
             target: ScrollTarget::Transcript,
             axis: ScrollAxis::Vertical,
-            delta: -3,
+            delta: -1,
         }],
-        MouseEventKind::ScrollDown => vec![LocalIntent::Scroll {
+        MouseEventKind::ScrollDown => vec![LocalIntent::MouseScroll {
             target: ScrollTarget::Transcript,
             axis: ScrollAxis::Vertical,
-            delta: 3,
+            delta: 1,
         }],
-        MouseEventKind::ScrollLeft => vec![LocalIntent::Scroll {
+        MouseEventKind::ScrollLeft => vec![LocalIntent::MouseScroll {
             target: ScrollTarget::Changes,
             axis: ScrollAxis::Horizontal,
-            delta: -3,
+            delta: -1,
         }],
-        MouseEventKind::ScrollRight => vec![LocalIntent::Scroll {
+        MouseEventKind::ScrollRight => vec![LocalIntent::MouseScroll {
             target: ScrollTarget::Changes,
             axis: ScrollAxis::Horizontal,
-            delta: 3,
+            delta: 1,
         }],
     }
 }
@@ -720,10 +731,7 @@ mod tests {
         };
         assert_eq!(
             map_mouse_event(down),
-            vec![
-                LocalIntent::FocusAt { column: 4, row: 7 },
-                LocalIntent::BeginDrag { column: 4, row: 7 }
-            ]
+            vec![LocalIntent::BeginDrag { column: 4, row: 7 }]
         );
         let scroll = MouseEvent {
             kind: MouseEventKind::ScrollUp,
@@ -734,7 +742,7 @@ mod tests {
         assert_eq!(map_mouse_event(scroll).len(), 1);
         assert!(matches!(
             map_mouse_event(scroll).first(),
-            Some(LocalIntent::Scroll { delta: -3, .. })
+            Some(LocalIntent::MouseScroll { delta: -1, .. })
         ));
     }
 
