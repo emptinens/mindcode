@@ -1,8 +1,8 @@
 [workspace]
-members = ["crates/mindcode-protocol", "crates/mindcode-state", "crates/mindcoded", "crates/mindcode-core-tools"]
+members = ["crates/mindcode-protocol", "crates/mindcode-state", "crates/mindcoded", "crates/mindcode-core-tools", "crates/mindcode-native"]
 resolver = "2"
 
 [workspace.package]
 edition = "2021"
-version = "0.1.2"
+version = "0.1.3"
 license = "MIT"
