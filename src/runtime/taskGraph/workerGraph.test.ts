@@ -48,6 +48,7 @@ type Calls = {
   update: number
   renew: number
   release: number
+  recover: number
 }
 
 function calls(): Calls {
@@ -59,6 +60,7 @@ function calls(): Calls {
     update: 0,
     renew: 0,
     release: 0,
+    recover: 0,
   }
 }
 
@@ -120,6 +122,11 @@ function daemonFor(
       fail('release')
       return { lease: await backing.releaseLease(leaseId, options) }
     },
+    recover: async (now?: string | Date) => {
+      counts.recover += 1
+      fail('recover')
+      return backing.recover(now)
+    },
   } as unknown as WorkerTaskGraphDaemon
 }
 
@@ -162,6 +169,28 @@ describe('worker task graph authority adapter', () => {
     })
     expect(localFactoryCalls).toBe(0)
     expect(localGraph.snapshot().tasks).toHaveLength(0)
+  })
+
+  test('recovers through the selected daemon authority', async () => {
+    const daemonGraph = graph()
+    const localGraph = graph()
+    const daemonCalls = calls()
+    const adapter = createWorkerTaskGraph({
+      daemon: daemonFor(daemonGraph, daemonCalls),
+      localFactory: () => localGraph,
+    })
+
+    await adapter.route({ id: 'recover-task' })
+    const claim = await adapter.claimTask('recover-task', 'worker', {
+      ttl_ms: 1,
+      now: '2026-08-11T00:00:00.000Z',
+    })
+    expect(claim.ok).toBe(true)
+    const recovered = await adapter.recover('2026-08-11T00:00:01.000Z')
+    expect(recovered.recovered_tasks.map(task => task.id)).toEqual(['recover-task'])
+    expect(daemonCalls.recover).toBe(1)
+    expect(localGraph.snapshot().tasks).toHaveLength(0)
+    await adapter.close()
   })
 
   test('selects local authority once after disabled daemon and never calls daemon again', async () => {

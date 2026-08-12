@@ -242,8 +242,20 @@ describe("status HTML report", () => {
       workerModel: apiKey,
       models: fixture().models.map((model) => ({ ...model, name: bearer })),
       roleBreakdown: {
-        leader: { requests: 1, inputTokens: 1, outputTokens: 1, reasoningTokens: 1, effort: absolutePath },
-        worker: { requests: 1, inputTokens: 1, outputTokens: 1, reasoningTokens: 1, effort: keyedSecret },
+        leader: {
+          requests: 1,
+          inputTokens: 1,
+          outputTokens: 1,
+          reasoningTokens: 1,
+          effort: absolutePath,
+        },
+        worker: {
+          requests: 1,
+          inputTokens: 1,
+          outputTokens: 1,
+          reasoningTokens: 1,
+          effort: keyedSecret,
+        },
       },
       taskMetrics: {
         available: true,
@@ -264,6 +276,27 @@ describe("status HTML report", () => {
     expect(html).not.toContain(keyedSecret);
     expect(html).not.toContain(rawResponse);
     expect(html).not.toContain("rawResponseBody");
+  });
+
+  test("renders bounded recovery audit telemetry without secrets", () => {
+    const html = renderStatusHtml({
+      ...fixture(),
+      recovery: {
+        latest: {
+          source: "resume",
+          attempted_at: "2026-08-05T11:05:00.000Z",
+          completed_at: "2026-08-05T11:05:01.000Z",
+          expired_lease_count: 2,
+          recovered_task_count: 1,
+          ok: true,
+        },
+        audit: [],
+      },
+    });
+    expect(html).toContain("Worker recovery / reconcile");
+    expect(html).toContain("Recovered tasks");
+    expect(html).toContain("2 expired leases");
+    expect(html).not.toMatch(/forge-|Bearer\s+/i);
   });
 
   test("contains compact self-contained Sakura report without legacy branding", () => {

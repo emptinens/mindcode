@@ -36,6 +36,7 @@ import type { McpSdkServerConfig, McpServerConfig, ScopedMcpServerConfig } from 
 import type { ToolInputJSONSchema } from './Tool.js';
 import { createSyntheticOutputTool, isSyntheticOutputToolEnabled } from './tools/SyntheticOutputTool/SyntheticOutputTool.js';
 import { getTools } from './tools.js';
+import { reconcileWorkerTaskGraph } from './runtime/taskGraph/recovery.js';
 import { canUserConfigureAdvisor, getInitialAdvisorSetting, isAdvisorEnabled, isValidAdvisorModel, modelSupportsAdvisor } from './utils/advisor.js';
 import { isAgentSwarmsEnabled } from './utils/agentSwarmsEnabled.js';
 import { count, uniq } from './utils/array.js';
@@ -665,6 +666,12 @@ async function run(): Promise<CommanderCommand> {
     profileCheckpoint('preAction_after_mdm');
     await init();
     profileCheckpoint('preAction_after_init');
+    const recovery = await reconcileWorkerTaskGraph({ source: 'startup' });
+    if (recovery.audit.ok && recovery.audit.recovered_task_count > 0) {
+      logForDebugging(
+        `[RECOVERY] Recovered ${recovery.audit.recovered_task_count} task(s) and ${recovery.audit.expired_lease_count} lease(s)`,
+      );
+    }
 
     // process.title on Windows sets the console title directly; on POSIX,
     // terminal shell integration may mirror the process name to the tab.
@@ -2372,6 +2379,7 @@ async function run(): Promise<CommanderCommand> {
           clearSessionCaches
         } = await import('./commands/clear/caches.js');
         clearSessionCaches();
+        await reconcileWorkerTaskGraph({ source: 'resume' });
         const result = await loadConversationForResume(undefined /* sessionId */, undefined /* sourceFile */);
         if (!result) {
           logEvent('tengu_continue', {
@@ -2424,6 +2432,7 @@ async function run(): Promise<CommanderCommand> {
         clearSessionCaches
       } = await import('./commands/clear/caches.js');
       clearSessionCaches();
+      await reconcileWorkerTaskGraph({ source: 'resume' });
       let processedResume: ProcessedResume | undefined = undefined;
       let maybeSessionId = validateUuid(options.resume);
       let searchTerm: string | undefined = undefined;

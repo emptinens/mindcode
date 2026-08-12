@@ -287,6 +287,11 @@ impl Daemon {
             .await
             .context("join task graph initialization")??;
 
+        let task_graph = Arc::clone(&self.state.task_graph);
+        tokio::task::spawn_blocking(move || task_graph.recover(None))
+            .await
+            .context("join task graph recovery")??;
+
         let session_index = Arc::clone(&self.state.session_index);
         tokio::task::spawn_blocking(move || session_index.initialize())
             .await

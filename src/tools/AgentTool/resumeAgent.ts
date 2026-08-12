@@ -15,6 +15,7 @@ import {
   type WorkerTaskGraph,
   createWorkerTaskGraph,
 } from '../../runtime/taskGraph/workerGraph.js'
+import { reconcileWorkerTaskGraph } from '../../runtime/taskGraph/recovery.js'
 import type { TaskRecord } from '../../tasks/graph/index.js'
 import {
   parsePolicyEpochEnvironment,
@@ -350,6 +351,11 @@ export async function resumeAgentBackground({
   let priorTask: TaskRecord | null
   let workerExecution: Awaited<ReturnType<typeof acquireWorkerExecution>>
   try {
+    await reconcileWorkerTaskGraph({
+      source: 'resume',
+      graph: workerGraph,
+      signal: toolUseContext.abortController.signal,
+    })
     priorTask = await findPriorWorkerTask(
       agentId,
       runtimeScope,

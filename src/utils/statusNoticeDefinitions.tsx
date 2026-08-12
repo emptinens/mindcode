@@ -11,6 +11,7 @@ import type { AgentDefinitionsResult } from '../tools/AgentTool/loadAgentsDir.js
 import { getAgentDescriptionsTotalTokens, AGENT_DESCRIPTIONS_THRESHOLD } from './statusNoticeHelpers.js';
 import { isSupportedJetBrainsTerminal, toIDEDisplayName, getTerminalIdeType } from './ide.js';
 import { isJetBrainsPluginInstalledCachedSync } from './jetbrains.js';
+import { getWorkerRecoveryStatus } from '../runtime/taskGraph/recovery.js';
 
 // Types
 export type StatusNoticeType = 'warning' | 'info';
@@ -69,6 +70,25 @@ const largeAgentDescriptionsNotice: StatusNoticeDefinition = {
       </Box>;
   }
 };
+const workerRecoveryNotice: StatusNoticeDefinition = {
+  id: 'worker-recovery',
+  type: 'info',
+  isActive: () => {
+    const recovery = getWorkerRecoveryStatus();
+    return recovery?.ok === true && recovery.recovered_task_count > 0;
+  },
+  render: () => {
+    const recovery = getWorkerRecoveryStatus();
+    if (!recovery || !recovery.ok || recovery.recovered_task_count === 0) return null;
+    return <Box flexDirection="row">
+      <Text color="info">{figures.info}</Text>
+      <Text color="info">
+        Recovered <Text bold>{formatNumber(recovery.recovered_task_count)}</Text> interrupted Worker task(s)
+        <Text dimColor> · stale leases reconciled</Text>
+      </Text>
+    </Box>;
+  },
+};
 const jetbrainsPluginNotice: StatusNoticeDefinition = {
   id: 'jetbrains-plugin-install',
   type: 'info',
@@ -100,7 +120,7 @@ const jetbrainsPluginNotice: StatusNoticeDefinition = {
 };
 
 // All notice definitions
-export const statusNoticeDefinitions: StatusNoticeDefinition[] = [largeMemoryFilesNotice, largeAgentDescriptionsNotice, jetbrainsPluginNotice];
+export const statusNoticeDefinitions: StatusNoticeDefinition[] = [largeMemoryFilesNotice, largeAgentDescriptionsNotice, workerRecoveryNotice, jetbrainsPluginNotice];
 
 // Helper functions for external use
 export function getActiveNotices(context: StatusNoticeContext): StatusNoticeDefinition[] {

@@ -11,6 +11,7 @@ import type {
   TaskLease,
   TaskRecord,
   TaskUpdate,
+  RecoveryResult,
 } from '../../tasks/graph/types.js'
 import { AbortError } from '../../utils/errors.js'
 import {
@@ -63,12 +64,20 @@ export type WorkerTaskGraph = {
     options?: { owner?: string; now?: string | Date },
     signal?: AbortSignal,
   ) => Promise<TaskLease | null>
+  recover: (now?: string | Date, signal?: AbortSignal) => Promise<RecoveryResult>
   close: () => Promise<void>
 }
 
 export type WorkerTaskGraphDaemon = Pick<
   TaskGraphDaemonClient,
-  'route' | 'read' | 'list' | 'claim' | 'update' | 'renewLease' | 'releaseLease'
+  | 'route'
+  | 'read'
+  | 'list'
+  | 'claim'
+  | 'update'
+  | 'renewLease'
+  | 'releaseLease'
+  | 'recover'
 >
 
 export type WorkerTaskGraphOptions = {
@@ -182,6 +191,12 @@ function daemonBackend(client: WorkerTaskGraphDaemon): Backend {
       throwIfAborted(signal)
       return result.lease
     },
+    recover: async (now, signal) => {
+      throwIfAborted(signal)
+      const result = await client.recover(now, { signal })
+      throwIfAborted(signal)
+      return result
+    },
     close: async () => {},
   }
 }
@@ -212,6 +227,7 @@ function localBackend(graph: TaskGraph, closeGraph: boolean): Backend {
       run(() => graph.renewLease(leaseId, options), signal),
     releaseLease: (leaseId, options, signal) =>
       run(() => graph.releaseLease(leaseId, options), signal),
+    recover: (now, signal) => run(() => graph.recover(now), signal),
     close: async () => {
       if (closeGraph) graph.close()
     },
@@ -343,6 +359,10 @@ class WorkerTaskGraphAdapter implements WorkerTaskGraph {
       backend => backend.releaseLease(leaseId, options, signal),
       signal,
     )
+  }
+
+  recover(now?: string | Date, signal?: AbortSignal) {
+    return this.dispatch(backend => backend.recover(now, signal), signal)
   }
 
   async close(): Promise<void> {

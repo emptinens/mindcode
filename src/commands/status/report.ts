@@ -38,6 +38,11 @@ import type { TaskGraphSnapshot } from "../../tasks/graph/types.js";
 import { getMindCodeConfigHomeDir } from "../../utils/envUtils.js";
 import { getConfiguredSubagentModel } from "../../utils/model/subagentModel.js";
 import {
+  getWorkerRecoveryStatus,
+  readWorkerRecoveryAudit,
+} from "../../runtime/taskGraph/recovery.js";
+import { writeDiagnosticExport } from "../../services/diagnostics/export.js";
+import {
   getSwarmConcurrencySnapshot,
   getSwarmWorkerWeight,
 } from "../../utils/swarm/concurrencyPolicy.js";
@@ -143,6 +148,10 @@ export type StatusReportData = {
         status: string;
       }[]
     | null;
+  recovery?: {
+    latest: Awaited<ReturnType<typeof getWorkerRecoveryStatus>>;
+    audit: Awaited<ReturnType<typeof readWorkerRecoveryAudit>>;
+  };
 };
 
 export function escapeHtml(value: unknown): string {
@@ -388,6 +397,23 @@ function timelineRows(metrics: StatusTaskMetrics): string {
     .join("");
 }
 
+function recoveryRows(data: StatusReportData): string {
+  const latest = data.recovery?.latest;
+  const entries = data.recovery?.audit ?? [];
+  const latestRow = latest
+    ? `<tr><th>Latest source</th><td>${escapeHtml(safeOpaque(latest.source))}</td><td>${escapeHtml(latest.ok ? "ok" : "failed")}</td></tr><tr><th>Recovered tasks</th><td>${escapeHtml(number.format(latest.recovered_task_count))}</td><td>${escapeHtml(`${number.format(latest.expired_lease_count)} expired leases`)}</td></tr>`
+    : '<tr><th>Latest recovery</th><td colspan="2">unavailable</td></tr>';
+  const auditRows = entries
+    .slice(-16)
+    .reverse()
+    .map(
+      (entry) =>
+        `<tr><td>${escapeHtml(displayTimestamp(entry.completed_at))}</td><td>${escapeHtml(safeOpaque(entry.source))}</td><td>${escapeHtml(entry.ok ? `${entry.recovered_task_count} tasks / ${entry.expired_lease_count} leases` : safeOpaque(entry.error ?? "failed"))}</td></tr>`,
+    )
+    .join("");
+  return `${latestRow}${auditRows || '<tr><td colspan="3" class="empty">No recovery audit entries.</td></tr>'}`;
+}
+
 function compactHistoryRows(
   history: StatusReportData["compactHistory"],
 ): string {
@@ -517,6 +543,7 @@ export function renderStatusHtml(data: StatusReportData): string {
 <section class="panel"><h2>Runtime and context</h2><table><tbody>${contextRows(data.context)}<tr><th>API with retries</th><td>${escapeHtml(duration(data.apiDurationMs))}</td><th>API without retries</th><td>${escapeHtml(duration(data.apiDurationWithoutRetriesMs))}</td></tr><tr><th>Retry overhead</th><td>${escapeHtml(duration(retryOverhead))}</td><th>API utilization</th><td>${escapeHtml(`${apiUtilization}% of wall time`)}</td></tr><tr><th>Worker cap</th><td>${escapeHtml(data.scheduler.workerCap === undefined ? "unavailable" : `${number.format(data.scheduler.workerCap)} active`)}</td><th>Queue semantics</th><td>queued requests are not active workers</td></tr><tr><th>Active worker weight</th><td>${escapeHtml(`${number.format(data.scheduler.activeWeight)} / ${number.format(data.scheduler.budget)}`)}</td><th>Queued worker weight</th><td>${escapeHtml(number.format(data.scheduler.queuedWeight))}</td></tr>${creditsPolicyRows(data.scheduler.credits)}</tbody></table></section>
 <section class="panel"><h2>Task and lease observability</h2><table><thead><tr><th>Metric</th><th>Count</th><th>Weight / detail</th></tr></thead><tbody>${taskCountRows(taskMetrics)}<tr><th>Active leases</th><td>${escapeHtml(displayNumber(taskMetrics.activeLeases))}</td><td>persistent task leases</td></tr><tr><th>Runtime errors</th><td>${escapeHtml(displayNumber(errors.runtime))}</td><td>error log not exposed to status</td></tr><tr><th>Failed tasks</th><td>${escapeHtml(number.format(errors.taskFailures))}</td><td>task graph failures</td></tr><tr><th>Total errors</th><td>${escapeHtml(displayNumber(errors.total))}</td><td>unavailable unless role/runtime counters expose it</td></tr></tbody></table></section>
 <section class="panel"><h2>Task lifecycle / timeline</h2><table><thead><tr><th>Task</th><th>Status</th><th>Owner</th><th>Effort</th><th>Claimed</th><th>Started</th><th>Finished</th></tr></thead><tbody>${timelineRows(taskMetrics)}</tbody></table></section>
+<section class="panel"><h2>Worker recovery / reconcile</h2><table><thead><tr><th>Entry</th><th>Value</th><th>Detail</th></tr></thead><tbody>${recoveryRows(data)}</tbody></table></section>
 <section class="panel"><h2>Compact thresholds and history</h2><table><thead><tr><th>Time</th><th>Event</th><th>Status</th></tr></thead><tbody>${compactHistoryRows(data.compactHistory)}</tbody></table></section>
 ${architecture(data)}<footer>Generated locally by /status html · no external assets, scripts, or network report upload</footer></main></body></html>`;
 }
@@ -673,6 +700,10 @@ export async function generateStatusHtmlReport(): Promise<string> {
       total: null,
     },
     compactHistory: null,
+    recovery: {
+      latest: getWorkerRecoveryStatus(),
+      audit: await readWorkerRecoveryAudit(),
+    },
   };
   const html = renderStatusHtml(data);
   const reportsDir = join(getMindCodeConfigHomeDir(), "reports");
@@ -684,4 +715,32 @@ export async function generateStatusHtmlReport(): Promise<string> {
   const path = join(reportsDir, `status-${stamp}.html`);
   await writeFile(path, html, "utf8");
   return path;
+}
+
+export async function generateDiagnosticExport(options: {
+  jsonPath: string;
+  htmlPath: string;
+}): Promise<{ jsonPath: string; htmlPath: string; bytes: number }> {
+  const generatedAt = new Date();
+  const recovery = {
+    latest: getWorkerRecoveryStatus(),
+    audit: await readWorkerRecoveryAudit(),
+  };
+  const taskMetrics = await readTaskMetrics(getTaskGraphDatabasePath());
+  return writeDiagnosticExport({
+    jsonPath: options.jsonPath,
+    htmlPath: options.htmlPath,
+    metadata: {
+      generated_at: generatedAt.toISOString(),
+      session_id: String(getSessionId()),
+      platform: process.platform,
+      arch: process.arch,
+      version: typeof MACRO === "undefined" ? "unknown" : MACRO.VERSION,
+      worker_model: getConfiguredSubagentModel(),
+      request_count: getTotalRequestCount(),
+      api_duration_ms: getTotalAPIDuration(),
+      task_graph: taskMetrics,
+      recovery,
+    },
+  });
 }
