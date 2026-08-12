@@ -415,6 +415,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mindcode-vexzy"
+version = "0.1.3"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mindcoded"
 version = "0.1.3"
 dependencies = [
