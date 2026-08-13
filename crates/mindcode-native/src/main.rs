@@ -12,6 +12,11 @@ use mindcode_provider::{
     ProviderId, SecretKey,
 };
 use mindcode_settings::{default_settings_path, load_settings, save_settings, NativeSettings};
+use mindcode_tui::TuiConfig;
+use mindcode_tui_server::{
+    ConnectionInput, ControlServer, ControlServerConfig, ProjectionInput, StatusInput,
+    TelemetryInput,
+};
 use mindcode_vexzy::{
     eligible_worker_models, parse_vexzy_model_catalog, VexzyModel, VexzyModelCatalog, WorkerEffort,
 };
@@ -31,7 +36,7 @@ const SETTINGS_KEY_CONFIRMATION: &str = "configured";
     name = "mindcode",
     version = VERSION,
     about = "MindCode native Rust foundation (multi-provider)",
-    after_help = "Commands:\n  auth status       Show active provider authentication status\n  model eligible    Inspect eligible Worker models in a supplied VEXZY catalog\n  effort worker     Validate a Worker model and optional effort lock in a supplied catalog\n  provider          Manage provider profiles (list, use, add, remove, edit)\n  settings          Manage settings (show, key, allowlist, model, effort lock)\n  setup-token       Show VEXZY_API_KEY setup instructions\n  doctor            Check native/VEXZY foundation health\n  update            Show local checkout update instructions\n  daemon            Run the native mindcoded daemon in-process"
+    after_help = "Commands:\n  auth status       Show active provider authentication status\n  model eligible    Inspect eligible Worker models in a supplied VEXZY catalog\n  effort worker     Validate a Worker model and optional effort lock in a supplied catalog\n  provider          Manage provider profiles (list, use, add, remove, edit)\n  settings          Manage settings (show, key, allowlist, model, effort lock)\n  setup-token       Show VEXZY_API_KEY setup instructions\n  doctor            Check native/VEXZY foundation health\n  update            Show local checkout update instructions\n  daemon            Run the native mindcoded daemon in-process\n  tui               Run the native terminal interface"
 )]
 struct RootArgs {
     #[arg(
@@ -341,6 +346,17 @@ struct DoctorArgs {}
 struct UpdateArgs {}
 
 #[derive(Debug, Parser)]
+#[command(
+    name = "mindcode tui",
+    version = VERSION,
+    about = "Run the native terminal interface (in-process control server)"
+)]
+struct TuiArgs {
+    #[arg(long, value_name = "ID", help = "TUI session id (defaults to 'tui')")]
+    session_id: Option<String>,
+}
+
+#[derive(Debug, Parser)]
 #[command(name = "mindcode daemon", version = VERSION, about = "Run the native mindcoded daemon")]
 struct DaemonArgs {
     #[arg(long, value_name = "PATH", default_value_os_t = DaemonConfig::default_socket())]
@@ -390,6 +406,7 @@ async fn dispatch(arguments: Vec<OsString>) -> Result<i32> {
         "doctor" => run_doctor(arguments),
         "update" | "upgrade" => run_update(arguments),
         "daemon" => run_daemon(arguments).await,
+        "tui" => run_tui(arguments).await,
         "-h" | "--help" | "-V" | "--version" => run_root_parser(arguments, run_active.as_ref()),
         value if value.starts_with('-') => run_root_parser(arguments, run_active.as_ref()),
         // Removed TUI commands surface as a stable unknown-command error
@@ -919,6 +936,92 @@ async fn run_daemon(arguments: Vec<OsString>) -> Result<i32> {
     .await
     .context("native daemon exited with an error")?;
     Ok(0)
+}
+
+const DEFAULT_TUI_SESSION_ID: &str = "tui";
+
+/// Runtime directory shared with the daemon (`~/.mindcode/run`).
+fn tui_runtime_dir() -> PathBuf {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".mindcode/run")
+}
+
+fn tui_socket_path(session_id: &str) -> PathBuf {
+    tui_runtime_dir().join(format!("native-tui-{session_id}.sock"))
+}
+
+/// Secret-free initial snapshot published once on start so the renderer has
+/// state to show before any live session data exists.
+fn tui_initial_input() -> ProjectionInput {
+    let settings = load_native_settings().ok();
+    ProjectionInput {
+        status: StatusInput {
+            state: Some("ready".to_owned()),
+            ..Default::default()
+        },
+        telemetry: TelemetryInput {
+            model: settings
+                .as_ref()
+                .and_then(|s| s.global_worker_model.clone()),
+            effort: settings
+                .as_ref()
+                .and_then(|s| s.worker_effort_lock)
+                .map(|effort| effort.to_string()),
+            connection: ConnectionInput {
+                state: Some("connected".to_owned()),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
+    let args = match TuiArgs::try_parse_from(with_command_program_name(arguments, "mindcode tui")) {
+        Ok(args) => args,
+        Err(error) => return Ok(print_clap_error(error)),
+    };
+    let session_id = args
+        .session_id
+        .unwrap_or_else(|| DEFAULT_TUI_SESSION_ID.to_owned());
+    if session_id.is_empty()
+        || !session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(anyhow!(
+            "tui session id must contain only ASCII path-safe characters"
+        ));
+    }
+    let socket_path = tui_socket_path(&session_id);
+    let server = ControlServer::new(
+        ControlServerConfig::new(session_id.clone(), &socket_path),
+        None,
+    )
+    .map_err(anyhow::Error::msg)?;
+    server.start().await.map_err(anyhow::Error::msg)?;
+    let _ = server.publish(&tui_initial_input()).await;
+
+    let tui_config = TuiConfig {
+        control_socket: socket_path,
+        session_id,
+    };
+    let outcome = tokio::task::spawn_blocking(move || mindcode_tui::run(tui_config)).await;
+    server.close().await;
+    match outcome {
+        Ok(Ok(())) => Ok(0),
+        Ok(Err(error)) => {
+            eprintln!("mindcode: {error}");
+            Ok(1)
+        }
+        Err(error) => {
+            eprintln!("mindcode: {error}");
+            Ok(1)
+        }
+    }
 }
 
 fn run_regular_prompt(_prompt: Option<&str>, run_active: Option<&ProviderId>) -> Result<i32> {
@@ -2259,5 +2362,101 @@ mod tests {
     async fn unknown_slash_commands_are_not_mistaken_for_native_flags() {
         let code = dispatch(vec![OsString::from("/version")]).await.unwrap();
         assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn tui_args_accept_session_id() {
+        let args = TuiArgs::try_parse_from(["mindcode tui", "--session-id", "abc"]).unwrap();
+        assert_eq!(args.session_id.as_deref(), Some("abc"));
+        let args = TuiArgs::try_parse_from(["mindcode tui"]).unwrap();
+        assert!(args.session_id.is_none());
+    }
+
+    #[test]
+    fn tui_socket_path_joins_home_runtime_dir() {
+        with_sandbox_env(|dir| {
+            assert_eq!(
+                tui_socket_path("abc"),
+                dir.join(".mindcode/run/native-tui-abc.sock")
+            );
+        });
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tui_control_server_serves_snapshot_over_a_unix_socket() {
+        use mindcode_protocol::ui::{
+            decode_ui_frame, encode_ui_frame, UiMessage, UI_PROTOCOL_VERSION,
+        };
+
+        let temp = tempdir().unwrap();
+        let socket = temp.path().join("native-tui-smoke.sock");
+        let server = ControlServer::new(
+            ControlServerConfig::new("smoke".to_owned(), socket.clone()),
+            None,
+        )
+        .unwrap();
+        server.start().await.unwrap();
+        let _ = server.publish(&ProjectionInput::default()).await;
+
+        let client_socket = socket.clone();
+        let messages = tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Write};
+            use std::os::unix::net::UnixStream;
+            let mut stream = UnixStream::connect(&client_socket).unwrap();
+            let handshake = encode_ui_frame(&UiMessage::Handshake {
+                version: UI_PROTOCOL_VERSION,
+                id: "smoke".to_owned(),
+                client: "mindcode-tui".to_owned(),
+                capabilities: [
+                    "render_snapshot",
+                    "input",
+                    "resize",
+                    "shutdown",
+                    "mouse",
+                    "action",
+                ]
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
+            })
+            .unwrap();
+            stream.write_all(&handshake).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut buffer = Vec::new();
+            let mut messages = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 4096];
+                let count = stream.read(&mut chunk).unwrap();
+                buffer.extend_from_slice(&chunk[..count]);
+                while buffer.len() >= 4 {
+                    let payload = u32::from_be_bytes(buffer[..4].try_into().unwrap()) as usize;
+                    if buffer.len() < 4 + payload {
+                        break;
+                    }
+                    let frame: Vec<u8> = buffer.drain(..4 + payload).collect();
+                    messages.push(decode_ui_frame(&frame).unwrap());
+                }
+                if messages
+                    .iter()
+                    .any(|message| matches!(message, UiMessage::RenderSnapshot { .. }))
+                {
+                    break;
+                }
+            }
+            messages
+        })
+        .await
+        .unwrap();
+
+        assert!(messages
+            .iter()
+            .any(|message| matches!(message, UiMessage::Capabilities { .. })));
+        assert!(messages
+            .iter()
+            .any(|message| matches!(message, UiMessage::RenderSnapshot { .. })));
+
+        server.close().await;
     }
 }

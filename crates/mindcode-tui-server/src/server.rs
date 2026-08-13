@@ -174,6 +174,7 @@ struct State {
     accept_handle: Option<JoinHandle<()>>,
 }
 
+#[derive(Clone)]
 pub struct ControlServer {
     inner: Arc<Inner>,
 }

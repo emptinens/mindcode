@@ -977,8 +977,11 @@ version = "0.1.3"
 dependencies = [
  "anyhow",
  "clap",
+ "mindcode-protocol",
  "mindcode-provider",
  "mindcode-settings",
+ "mindcode-tui",
+ "mindcode-tui-server",
  "mindcode-vexzy",
  "mindcoded",
  "serde_json",
