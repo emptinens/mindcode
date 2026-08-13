@@ -19,3 +19,15 @@ coverage/
 .env.*
 !.env.example
 *.local.json
+
+# Internal planning/status docs — this repository is public; these stay local.
+PLAN.md
+STATUS.md
+VEXZY_ROADMAP.md
+
+# Local agent/tooling state (Freebuff/Codex task DBs and leftovers).
+.freebuff/
+.agents/
+.codex/
+.codex-backups/
+src/
