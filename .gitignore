@@ -27,8 +27,8 @@ VEXZY_ROADMAP.md
 AGENTS.md
 
 # Local agent/tooling state (Freebuff/Codex task DBs and leftovers).
-.freebuff/
-.agents/
-.codex/
+/.freebuff/
+/.agents/
+/.codex/
 .codex-backups/
-src/
+/src/
