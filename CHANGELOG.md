@@ -16,7 +16,7 @@
   compatibility fixture covering the supported and removed surfaces.
 - 2026-08-13 — multi-provider amendment (docs-only contract update): two
   protocols (`openai-compatible` via `/models` + `/chat/completions`,
-  `anthropic-compatible` via `/v1/messages`); VEXZY as the editable built-in
+  `anthropic-compatible` via `/v1/models` + `/v1/messages`); VEXZY as the editable built-in
   `openai-compatible` profile; on-disk secret store
   (`~/.config/mindcode/credentials.json`, 0600/0700) separate from the
   secret-free `settings.json`, with env → store → fail-closed precedence; any
@@ -28,6 +28,23 @@
   `openai-compatible` chat path is `/chat/completions` (with `/models` for the
   catalog).  Legacy `/v1/responses` references are removed during the
   migration.
+- Implement provider profiles end-to-end in the native CLI: the secret-free
+  `settings.json` provider table with active-provider invariants and
+  allowlist eligibility (VEXZY catalog-driven, custom allowlist fail-closed),
+  the `provider list|use|add|remove|edit` and `settings show|key|allowlist|
+  model|effort` surfaces, `auth status`, and the `--provider <id>` run option.
+  Seed the built-in VEXZY profile (active, `VEXZY_API_KEY`) on first run
+  without resurrecting it after explicit removal.
+- Add the `mindcode-transport` client (reqwest + rustls, no OpenSSL):
+  `openai-compatible` `/models` + streaming `/chat/completions`, and
+  `anthropic-compatible` `/v1/models` + `/v1/messages`, with any-`https` /
+  loopback-only-`http` transport rules.
+- Fold the native TUI renderer into the workspace and add
+  `mindcode-tui-server`: an in-process Rust port of the UI protocol v2 control
+  server (handshake/capability negotiation, backpressure-bounded outbound
+  queue, input routing, state-to-snapshot projection).  `mindcode tui` runs
+  the renderer and control server in-process over a Unix socket without Bun
+  or Node.
 
 ## 0.1.2 — checkpointed, untagged
 
