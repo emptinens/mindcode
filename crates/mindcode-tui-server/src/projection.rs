@@ -289,6 +289,9 @@ pub struct ProjectionInput {
     pub permissions: Vec<PermissionInput>,
     pub providers: Vec<ProviderInput>,
     pub writer: WriterInput,
+    /// True while the runtime is streaming the final assistant turn
+    /// (§10.2); the projection marks the last markdown block accordingly.
+    pub streaming: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -962,6 +965,7 @@ pub fn project_transcript(
                         true,
                     )?,
                     created_at_ms: None,
+                    streaming: false,
                 }));
             }
         }
@@ -996,6 +1000,7 @@ fn project_transcript_block(
                     true,
                 )?,
                 created_at_ms: None,
+                streaming: block.streaming,
             };
             if let Some(created) = block.created_at_ms {
                 result.created_at_ms = Some(integer(
@@ -1709,7 +1714,15 @@ pub fn project_render_snapshot(
         telemetry: project_telemetry(&input.telemetry)?,
         tasks: project_tasks(&input.tasks)?,
         agents: project_agents(&input.agents)?,
-        transcript: project_transcript(&input.transcript)?,
+        transcript: {
+            let mut transcript = project_transcript(&input.transcript)?;
+            if input.streaming {
+                if let Some(UiTranscriptBlock::Markdown(block)) = transcript.last_mut() {
+                    block.streaming = true;
+                }
+            }
+            transcript
+        },
         transcript_window: project_transcript_window(&input.transcript_window)?,
         changes: project_changes(&input.changes)?,
         activity: project_activity(&input.activity)?,
@@ -1917,5 +1930,54 @@ mod tests {
         let sessions = project_sessions(&input).unwrap();
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].name, "s1");
+    }
+
+    #[test]
+    fn streaming_flag_marks_only_the_last_assistant_block() {
+        let input = ProjectionInput {
+            transcript: vec![
+                TranscriptInput::Entry {
+                    sequence: 1,
+                    role: "user".into(),
+                    text: "hi".into(),
+                },
+                TranscriptInput::Entry {
+                    sequence: 2,
+                    role: "assistant".into(),
+                    text: "hello".into(),
+                },
+            ],
+            streaming: true,
+            ..Default::default()
+        };
+        let snapshot = project_render_snapshot("snap", 1, &input).unwrap();
+        let blocks = snapshot.transcript;
+        assert_eq!(blocks.len(), 2);
+        let UiTranscriptBlock::Markdown(last) = &blocks[1] else {
+            panic!("expected markdown block");
+        };
+        assert!(last.streaming, "last assistant block must be streaming");
+        let UiTranscriptBlock::Markdown(first) = &blocks[0] else {
+            panic!("expected markdown block");
+        };
+        assert!(!first.streaming, "earlier blocks must not be streaming");
+    }
+
+    #[test]
+    fn streaming_flag_absent_keeps_blocks_static() {
+        let input = ProjectionInput {
+            transcript: vec![TranscriptInput::Entry {
+                sequence: 2,
+                role: "assistant".into(),
+                text: "done".into(),
+            }],
+            streaming: false,
+            ..Default::default()
+        };
+        let snapshot = project_render_snapshot("snap", 1, &input).unwrap();
+        let UiTranscriptBlock::Markdown(block) = &snapshot.transcript[0] else {
+            panic!("expected markdown block");
+        };
+        assert!(!block.streaming);
     }
 }

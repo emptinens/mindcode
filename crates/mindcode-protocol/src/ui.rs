@@ -310,6 +310,10 @@ pub struct UiMarkdownBlock {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at_ms: Option<u64>,
+    /// True while this assistant turn is still being streamed (§10.2);
+    /// the renderer shows the in-progress text with a shimmer and cursor.
+    #[serde(default)]
+    pub streaming: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1906,6 +1910,7 @@ mod tests {
                     role: "assistant".into(),
                     text: "hello".into(),
                     created_at_ms: None,
+                    streaming: true,
                 }),
                 UiTranscriptBlock::Code(UiCodeBlock {
                     id: "code-1".into(),

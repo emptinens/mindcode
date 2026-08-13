@@ -9,7 +9,7 @@ use mindcode_protocol::ui::{
     UiTranscriptBlock, UiTranscriptWindow,
 };
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, BorderType, Borders, Clear, List, ListItem, Padding, Paragraph, Wrap,
@@ -510,9 +510,10 @@ fn render_chat(frame: &mut Frame<'_>, area: Rect, state: &RenderState<'_>) {
     // on compact terminals.
     let max_blocks = ((transcript_area.height as usize).saturating_div(4) + 1).min(40);
     let range = transcript_range(window.blocks.len(), state.transcript_scroll, max_blocks);
+    let shimmer = Some(streaming_style(state.theme, state.elapsed, state.motion));
     let mut lines = Vec::new();
     for entry in &window.blocks[range] {
-        transcript_card(entry, theme, &mut lines);
+        transcript_card(entry, theme, &mut lines, shimmer);
         lines.push(Line::from(""));
     }
     if lines.is_empty() {
@@ -546,7 +547,13 @@ fn render_transcript_marker(frame: &mut Frame<'_>, area: Rect, older: bool, them
     );
 }
 
-fn transcript_card(entry: &UiTranscriptBlock, theme: Theme, lines: &mut Vec<Line<'static>>) {
+fn transcript_card(
+    entry: &UiTranscriptBlock,
+    theme: Theme,
+    lines: &mut Vec<Line<'static>>,
+    shimmer: Option<Style>,
+) {
+    let streaming = matches!(entry, UiTranscriptBlock::Markdown(block) if block.streaming);
     let (title, role, status, body): (String, String, Option<String>, Vec<String>) = match entry {
         UiTranscriptBlock::Markdown(block) => (
             capitalize(&block.role),
@@ -635,13 +642,50 @@ fn transcript_card(entry: &UiTranscriptBlock, theme: Theme, lines: &mut Vec<Line
     }
     header.push(Span::styled(" ─", theme.style(border)));
     lines.push(Line::from(header));
-    for body_line in body {
+    let body_style = if streaming {
+        shimmer.unwrap_or_else(|| theme.style(ColorToken::Text))
+    } else {
+        theme.style(ColorToken::Text)
+    };
+    let body_len = body.len();
+    for (index, body_line) in body.into_iter().enumerate() {
+        let mut line_text = body_line;
+        if streaming && index + 1 == body_len {
+            line_text.push('▍');
+        }
         lines.push(Line::from(vec![
             Span::styled("│ ", theme.style(border)),
-            Span::styled(body_line, theme.style(ColorToken::Text)),
+            Span::styled(line_text, body_style),
         ]));
     }
     lines.push(Line::from(Span::styled("╰─", theme.style(border))));
+}
+
+/// The streaming "shimmer": a slow color cycle between the accent tones
+/// applied to the in-progress assistant text (§10.2).  Reduced motion
+/// renders a static accent so nothing pulses for users who opt out.
+fn streaming_style(theme: Theme, elapsed: Duration, motion: MotionMode) -> Style {
+    if matches!(motion, MotionMode::Reduced) {
+        return theme.style(ColorToken::Accent);
+    }
+    let phase = (elapsed.as_millis() as f64 / 2400.0).fract();
+    let t = ((phase * std::f64::consts::TAU).cos() * 0.5 + 0.5) as f32;
+    let from = theme.color(ColorToken::AccentSoft);
+    let to = theme.color(ColorToken::Accent);
+    Style::new().fg(interpolate_color(from, to, t))
+}
+
+fn interpolate_color(from: Color, to: Color, t: f32) -> Color {
+    match (from, to) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
+            Color::Rgb(lerp(r1, r2, t), lerp(g1, g2, t), lerp(b1, b2, t))
+        }
+        _ => to,
+    }
+}
+
+fn lerp(a: u8, b: u8, t: f32) -> u8 {
+    (a as f32 + (b as f32 - a as f32) * t).round() as u8
 }
 
 fn render_task_tree(frame: &mut Frame<'_>, area: Rect, state: &RenderState<'_>) {
@@ -1490,6 +1534,7 @@ mod tests {
                 role: "assistant".into(),
                 text: "legacy".into(),
                 created_at_ms: None,
+                streaming: false,
             },
         )];
         let fallback_window = UiTranscriptWindow {
@@ -1509,6 +1554,7 @@ mod tests {
             role: "assistant".into(),
             text: "window".into(),
             created_at_ms: None,
+            streaming: false,
         });
         let populated_window = UiTranscriptWindow {
             start_sequence: 2,

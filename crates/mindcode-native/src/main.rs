@@ -1179,7 +1179,7 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
                             // Fire-and-forget: the projection revision is
                             // monotonic, so the client drops any intermediate
                             // snapshot that lands after the final one.
-                            let snapshot = tui_snapshot(&transcript.entries);
+                            let snapshot = tui_streaming_snapshot(&transcript.entries);
                             let server = server.clone();
                             tokio::spawn(async move {
                                 let _ = server.publish(&snapshot).await;
@@ -1304,6 +1304,14 @@ fn tui_snapshot(transcript: &[TranscriptInput]) -> ProjectionInput {
     } else {
         transcript.to_vec()
     };
+    input
+}
+
+/// A snapshot published mid-stream: the last assistant turn is marked
+/// `streaming` so the renderer shows the shimmer + cursor (§10.2).
+fn tui_streaming_snapshot(transcript: &[TranscriptInput]) -> ProjectionInput {
+    let mut input = tui_snapshot(transcript);
+    input.streaming = true;
     input
 }
 
@@ -1635,7 +1643,6 @@ async fn chat_tui_turn(
         }
         Err(error) => transcript.finish_last("system", format!("chat failed: {error:#}")),
     }
-    on_progress(transcript);
     Ok(())
 }
 

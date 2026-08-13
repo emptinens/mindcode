@@ -665,7 +665,13 @@ impl App {
     }
 
     fn animation_scheduler(&self) -> AnimationScheduler {
+        let streaming = self.latest_snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.transcript.iter().any(|block| {
+                matches!(block, mindcode_protocol::ui::UiTranscriptBlock::Markdown(markdown) if markdown.streaming)
+            })
+        });
         let activity = if self.show_welcome
+            || streaming
             || self
                 .latest_snapshot
                 .as_ref()
@@ -2652,6 +2658,7 @@ mod tests {
                 role: "assistant".into(),
                 text: "hello".into(),
                 created_at_ms: Some(1),
+                streaming: false,
             })],
             transcript_window: None,
             changes: Vec::new(),
