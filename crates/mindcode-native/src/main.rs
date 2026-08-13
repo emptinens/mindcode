@@ -417,7 +417,8 @@ async fn dispatch(arguments: Vec<OsString>) -> Result<i32> {
     }
 
     let Some(first) = arguments.first().and_then(|arg| arg.to_str()) else {
-        return run_root_parser(vec![OsString::from("--help")], run_active.as_ref()).await;
+        // The TUI is the main interface: a bare invocation opens it.
+        return run_tui(arguments).await;
     };
 
     match first {
@@ -953,16 +954,31 @@ fn worker_effort_output(
     worker_effort_value(&catalog, model_id, lock)
 }
 
+fn setup_token_text() -> String {
+    "MindCode resolves each provider credential environment-first, then from\nthe on-disk secret store (~/.config/mindcode/credentials.json).\n\nThe built-in VEXZY profile uses the VEXZY_API_KEY environment variable:\n  export VEXZY_API_KEY=\"forge-…\"\n\nCustom providers store their key in the secret store instead; manage\nproviders and keys with `mindcode provider` and `mindcode settings key`.\n\nThe legacy OAuth setup flow is not used by MindCode."
+        .to_owned()
+}
+
 fn run_setup_token(arguments: Vec<OsString>) -> Result<i32> {
     if let Err(error) =
         SetupTokenArgs::try_parse_from(with_command_program_name(arguments, "mindcode setup-token"))
     {
         return Ok(print_clap_error(error));
     }
-    println!(
-        "MindCode resolves each provider credential environment-first, then from\nthe on-disk secret store (~/.config/mindcode/credentials.json).\n\nThe built-in VEXZY profile uses the VEXZY_API_KEY environment variable:\n  export VEXZY_API_KEY=\"forge-…\"\n\nCustom providers store their key in the secret store instead; manage\nproviders and keys with `mindcode provider` and `mindcode settings key`.\n\nThe legacy OAuth setup flow is not used by MindCode."
-    );
+    println!("{}", setup_token_text());
     Ok(0)
+}
+
+fn doctor_text() -> String {
+    let configured = current_api_key().is_some();
+    format!(
+        "MindCode native doctor\n{API_KEY_ENV}: {}\nAuthentication: multi-provider (env -> secret store, fail-closed)\nDaemon: available (in-process mindcoded::Daemon)\nChat runtime: live (mindcode-transport, both protocols)",
+        if configured {
+            "configured"
+        } else {
+            "not configured"
+        }
+    )
 }
 
 fn run_doctor(arguments: Vec<OsString>) -> Result<i32> {
@@ -971,20 +987,14 @@ fn run_doctor(arguments: Vec<OsString>) -> Result<i32> {
     {
         return Ok(print_clap_error(error));
     }
-    let configured = current_api_key().is_some();
-    println!("MindCode native doctor");
-    println!(
-        "{API_KEY_ENV}: {}",
-        if configured {
-            "configured"
-        } else {
-            "not configured"
-        }
-    );
-    println!("Authentication: multi-provider (env -> secret store, fail-closed)");
-    println!("Daemon: available (in-process mindcoded::Daemon)");
-    println!("Chat runtime: live (mindcode-transport, both protocols)");
+    println!("{}", doctor_text());
     Ok(0)
+}
+
+fn update_text() -> String {
+    format!(
+        "Current version: {VERSION}\nMindCode uses the local Git checkout for updates; no remote updater is configured.\nApply changes in the local MindCode repository, then rebuild the local bundle."
+    )
 }
 
 fn run_update(arguments: Vec<OsString>) -> Result<i32> {
@@ -993,9 +1003,7 @@ fn run_update(arguments: Vec<OsString>) -> Result<i32> {
     {
         return Ok(print_clap_error(error));
     }
-    println!("Current version: {VERSION}");
-    println!("MindCode uses the local Git checkout for updates; no remote updater is configured.");
-    println!("Apply changes in the local MindCode repository, then rebuild the local bundle.");
+    println!("{}", update_text());
     Ok(0)
 }
 
@@ -1193,12 +1201,28 @@ impl TuiTranscript {
     }
 }
 
+/// The transcript entry shown on a fresh dashboard, before the first turn.
+fn tui_hint() -> TranscriptInput {
+    TranscriptInput::Entry {
+        sequence: 0,
+        role: "system".to_owned(),
+        text:
+            "MindCode 0.1.3 — type a message to chat, /help for commands, Ctrl+P for provider setup"
+                .to_owned(),
+    }
+}
+
 /// Build a republish snapshot from a fresh settings read (so `/model`,
 /// `/effort` and `/provider use` changes surface immediately) carrying the
-/// current conversation transcript.
+/// current conversation transcript.  An empty conversation keeps the start
+/// hint so the dashboard never opens blank.
 fn tui_snapshot(transcript: &[TranscriptInput]) -> ProjectionInput {
     let mut input = tui_initial_input();
-    input.transcript = transcript.to_vec();
+    input.transcript = if transcript.is_empty() {
+        vec![tui_hint()]
+    } else {
+        transcript.to_vec()
+    };
     input
 }
 
@@ -1210,6 +1234,14 @@ Commands (type and press Enter):
   /effort [<level>|off] show or set the effort lock (none|low|medium|high|xhigh|max)
   /provider             list provider profiles (* = active)
   /provider use <id>    switch the active provider
+  /provider remove <id> remove a provider profile
+  /allowlist <id> <m,…> set a profile's Worker model allowlist (empty clears)
+  /settings             show settings summary
+  /auth                 show active provider auth status
+  /eligible             show eligible Worker models of the active provider
+  /doctor               native health check
+  /setup-token          credential setup instructions
+  /update               update instructions
   /help                 show this help
   Ctrl+P                provider setup screen (add / remove / switch)";
 
@@ -1290,6 +1322,19 @@ async fn dispatch_tui_input(text: &str, transcript: &mut TuiTranscript) -> Resul
                     save_native_settings(&settings)?;
                     transcript.push("system", format!("active provider: {id}"));
                 }
+                "remove" => {
+                    let id = sub_tokens.next().map(str::trim).unwrap_or("");
+                    if id.is_empty() {
+                        return Err(anyhow!("usage: /provider remove <id>"));
+                    }
+                    let mut settings = load_native_settings()?;
+                    let provider_id = ProviderId::new(id.to_owned()).map_err(anyhow::Error::msg)?;
+                    settings
+                        .remove_provider(&provider_id)
+                        .map_err(anyhow::Error::msg)?;
+                    save_native_settings(&settings)?;
+                    transcript.push("system", format!("removed provider: {id}"));
+                }
                 "" => {
                     let settings = load_native_settings()?;
                     let mut lines = Vec::new();
@@ -1328,6 +1373,60 @@ async fn dispatch_tui_input(text: &str, transcript: &mut TuiTranscript) -> Resul
             chat_tui_turn(argument, transcript).await?;
             Ok(true)
         }
+        "allowlist" => {
+            let mut tokens = argument.splitn(2, char::is_whitespace);
+            let id = tokens.next().unwrap_or("").trim();
+            let models = tokens.next().map(str::trim).unwrap_or("");
+            if id.is_empty() {
+                return Err(anyhow!("usage: /allowlist <id> <model,…> (empty clears)"));
+            }
+            let allowlist = parse_allowlist(if models.is_empty() {
+                None
+            } else {
+                Some(models)
+            })
+            .map_err(anyhow::Error::msg)?;
+            let mut settings = load_native_settings()?;
+            let provider_id = ProviderId::new(id.to_owned()).map_err(anyhow::Error::msg)?;
+            settings
+                .set_allowlist(&provider_id, allowlist)
+                .map_err(anyhow::Error::msg)?;
+            save_native_settings(&settings)?;
+            transcript.push(
+                "system",
+                if models.is_empty() {
+                    format!("allowlist for {id} cleared")
+                } else {
+                    format!("allowlist for {id}: {models}")
+                },
+            );
+            Ok(true)
+        }
+        "settings" => {
+            let settings = load_native_settings()?;
+            transcript.push("system", settings_summary_text(&settings));
+            Ok(true)
+        }
+        "auth" => {
+            transcript.push("system", auth_status_text()?);
+            Ok(true)
+        }
+        "eligible" => {
+            transcript.push("system", eligible_text()?);
+            Ok(true)
+        }
+        "doctor" => {
+            transcript.push("system", doctor_text());
+            Ok(true)
+        }
+        "setup-token" => {
+            transcript.push("system", setup_token_text());
+            Ok(true)
+        }
+        "update" => {
+            transcript.push("system", update_text());
+            Ok(true)
+        }
         _ => {
             transcript.push(
                 "system",
@@ -1354,6 +1453,92 @@ async fn chat_tui_turn(prompt: &str, transcript: &mut TuiTranscript) -> Result<(
         Err(error) => transcript.push("system", format!("chat failed: {error:#}")),
     }
     Ok(())
+}
+
+/// Secret-free settings summary rendered as a `/settings` transcript line.
+fn settings_summary_text(settings: &NativeSettings) -> String {
+    let active = settings
+        .active_provider
+        .as_ref()
+        .map(ProviderId::as_str)
+        .unwrap_or("none");
+    let model = settings.global_worker_model.as_deref().unwrap_or("not set");
+    let effort = settings
+        .worker_effort_lock
+        .map(WorkerEffort::as_str)
+        .unwrap_or("off");
+    let providers = settings
+        .providers()
+        .iter()
+        .map(|provider| {
+            let marker = if settings.active_provider.as_ref() == Some(&provider.id) {
+                "*"
+            } else {
+                " "
+            };
+            format!(
+                "{marker} {} ({}) — {}",
+                provider.id, provider.protocol, provider.name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "active provider: {active}\nworker model: {model}\nworker effort lock: {effort}\nproviders:\n{providers}"
+    )
+}
+
+/// Secret-free auth summary for the active provider (`/auth`).
+fn auth_status_text() -> Result<String> {
+    let settings = load_native_settings()?;
+    let Some(provider) = settings.active_provider_config() else {
+        return Ok("no active provider is configured".to_owned());
+    };
+    let store = load_store(&native_store_path()?).map_err(anyhow::Error::msg)?;
+    let configured = store
+        .resolve(&provider.credential, |name| env::var(name).ok())
+        .is_ok();
+    Ok(format!(
+        "{}: {}\ncredential: {}",
+        provider.id,
+        if configured {
+            "logged in"
+        } else {
+            "not logged in"
+        },
+        credential_ref_kind(provider),
+    ))
+}
+
+/// Eligible Worker models of the active provider, secret-free (`/eligible`).
+fn eligible_text() -> Result<String> {
+    let settings = load_native_settings()?;
+    let Some(provider) = settings.active_provider_config() else {
+        return Ok("no active provider is configured".to_owned());
+    };
+    if provider.id.as_str() == mindcode_settings::BUILTIN_VEXZY_PROVIDER_ID {
+        return Ok(format!(
+            "{}: catalog-driven; worker model {}",
+            provider.id,
+            settings
+                .global_worker_model
+                .as_deref()
+                .unwrap_or("gpt-5.6-luna")
+        ));
+    }
+    let models = provider
+        .allowlist
+        .iter()
+        .map(ModelId::as_str)
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        Ok(format!(
+            "{}: no eligible models (allowlist is empty, fails closed)",
+            provider.id
+        ))
+    } else {
+        Ok(format!("{}: {}", provider.id, models.join(", ")))
+    }
 }
 
 /// The provider-add payload sent by the renderer as a JSON action value.
@@ -3109,6 +3294,132 @@ mod tests {
     }
 
     #[test]
+    fn tui_snapshot_keeps_hint_until_first_turn() {
+        with_sandbox_env(|dir| {
+            seed_builtin_active(dir);
+            let empty = tui_snapshot(&[]);
+            assert_eq!(empty.transcript.len(), 1);
+            let TranscriptInput::Entry { role, text, .. } = &empty.transcript[0] else {
+                panic!("expected hint entry");
+            };
+            assert_eq!(role, "system");
+            assert!(text.contains("MindCode"));
+            assert!(text.contains("/help"));
+
+            let mut transcript = TuiTranscript::default();
+            transcript.push("user", "hi");
+            let populated = tui_snapshot(&transcript.entries);
+            assert_eq!(populated.transcript.len(), 1);
+        });
+    }
+
+    #[test]
+    fn tui_slash_provider_remove_allowlist_and_status_commands() {
+        with_sandbox_env(|dir| {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                seed_builtin_active(dir);
+                let mut settings = load_sandbox_settings(dir);
+                settings
+                    .add_provider(profile(
+                        "custom",
+                        "Custom",
+                        Protocol::OpenAiCompatible,
+                        "http://127.0.0.1:1/v1",
+                        CredentialRef::env("CUSTOM_KEY"),
+                        &["m1"],
+                    ))
+                    .unwrap();
+                seed_settings(dir, &settings);
+                let mut transcript = TuiTranscript::default();
+
+                // /provider remove removes the profile.
+                assert!(
+                    dispatch_tui_input("/provider remove custom", &mut transcript)
+                        .await
+                        .unwrap()
+                );
+                let id = ProviderId::new("custom".to_owned()).unwrap();
+                assert!(load_sandbox_settings(dir).provider(&id).is_none());
+
+                // Re-add with an empty allowlist, then /allowlist sets and clears.
+                let mut settings = load_sandbox_settings(dir);
+                settings
+                    .add_provider(profile(
+                        "custom",
+                        "Custom",
+                        Protocol::OpenAiCompatible,
+                        "http://127.0.0.1:1/v1",
+                        CredentialRef::env("CUSTOM_KEY"),
+                        &[],
+                    ))
+                    .unwrap();
+                seed_settings(dir, &settings);
+                assert!(
+                    dispatch_tui_input("/allowlist custom m1,m2", &mut transcript)
+                        .await
+                        .unwrap()
+                );
+                let loaded = load_sandbox_settings(dir);
+                let provider = loaded.provider(&id).unwrap();
+                assert_eq!(provider.allowlist.len(), 2);
+                assert!(dispatch_tui_input("/allowlist custom", &mut transcript)
+                    .await
+                    .unwrap());
+                let loaded = load_sandbox_settings(dir);
+                let provider = loaded.provider(&id).unwrap();
+                assert!(provider.allowlist.is_empty());
+
+                // /eligible on the catalog-driven VEXZY active profile.
+                assert!(dispatch_tui_input("/eligible", &mut transcript)
+                    .await
+                    .unwrap());
+                let TranscriptInput::Entry { text, .. } = transcript.entries.last().unwrap() else {
+                    panic!("expected entry");
+                };
+                assert!(text.contains("vexzy"));
+
+                // /auth resolves fail-closed without a key and stays secret-free.
+                let had_vexzy_key = env::var_os("VEXZY_API_KEY");
+                env::remove_var("VEXZY_API_KEY");
+                assert!(dispatch_tui_input("/auth", &mut transcript).await.unwrap());
+                match had_vexzy_key {
+                    Some(value) => env::set_var("VEXZY_API_KEY", value),
+                    None => env::remove_var("VEXZY_API_KEY"),
+                }
+                let TranscriptInput::Entry { text, .. } = transcript.entries.last().unwrap() else {
+                    panic!("expected entry");
+                };
+                assert!(text.contains("not logged in"));
+                assert!(!text.contains("forge-"));
+
+                // /settings summary reflects the persisted state.
+                assert!(dispatch_tui_input("/settings", &mut transcript)
+                    .await
+                    .unwrap());
+                let TranscriptInput::Entry { text, .. } = transcript.entries.last().unwrap() else {
+                    panic!("expected entry");
+                };
+                assert!(text.contains("active provider: vexzy"));
+
+                // /doctor, /setup-token and /update are transcript lines.
+                assert!(dispatch_tui_input("/doctor", &mut transcript)
+                    .await
+                    .unwrap());
+                assert!(dispatch_tui_input("/setup-token", &mut transcript)
+                    .await
+                    .unwrap());
+                assert!(dispatch_tui_input("/update", &mut transcript)
+                    .await
+                    .unwrap());
+                let TranscriptInput::Entry { text, .. } = transcript.entries.last().unwrap() else {
+                    panic!("expected entry");
+                };
+                assert!(text.contains("Current version"));
+            });
+        });
+    }
+
+    #[test]
     fn tui_transcript_sequences_entries_in_order() {
         let mut transcript = TuiTranscript::default();
         transcript.push("user", "hi");
@@ -3307,6 +3618,147 @@ mod tests {
             .any(|message| matches!(message, UiMessage::RenderSnapshot { .. })));
 
         server.close().await;
+    }
+
+    #[test]
+    fn tui_composer_submit_round_trips_through_the_socket() {
+        use mindcode_protocol::ui::{
+            decode_ui_frame, encode_ui_frame, UiActionInput, UiInputEventKind, UiMessage,
+            UI_PROTOCOL_VERSION,
+        };
+
+        with_sandbox_env(|dir| {
+            seed_builtin_active(dir);
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let temp = tempdir().unwrap();
+                let socket = temp.path().join("native-tui-composer.sock");
+
+                // The same wiring as `run_tui`: handler -> channel -> processor
+                // that dispatches composer submissions and republishes.
+                let (action_tx, mut action_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<UiActionInput>();
+                let handler: InputHandler = Arc::new(move |message| {
+                    if let UiMessage::InputEvent {
+                        event: UiInputEventKind::Action(action),
+                        ..
+                    } = message
+                    {
+                        let _ = action_tx.send(action);
+                    }
+                });
+                let server = ControlServer::new(
+                    ControlServerConfig::new("composer".to_owned(), socket.clone()),
+                    Some(handler),
+                )
+                .unwrap();
+                server.start().await.unwrap();
+                let _ = server.publish(&tui_snapshot(&[])).await;
+
+                let processor_server = server.clone();
+                let processor = tokio::spawn(async move {
+                    let mut transcript = TuiTranscript::default();
+                    while let Some(action) = action_rx.recv().await {
+                        if action.action == "composer_submit" {
+                            let Some(text) = action.value else { continue };
+                            let _ = dispatch_tui_input(&text, &mut transcript).await;
+                            let _ = processor_server
+                                .publish(&tui_snapshot(&transcript.entries))
+                                .await;
+                        }
+                    }
+                });
+
+                let client_socket = socket.clone();
+                let reply = tokio::task::spawn_blocking(move || {
+                    use std::io::{Read, Write};
+                    use std::os::unix::net::UnixStream;
+                    let mut stream = UnixStream::connect(&client_socket).unwrap();
+                    let handshake = encode_ui_frame(&UiMessage::Handshake {
+                        version: UI_PROTOCOL_VERSION,
+                        id: "composer".to_owned(),
+                        client: "mindcode-tui".to_owned(),
+                        capabilities: [
+                            "render_snapshot",
+                            "input",
+                            "resize",
+                            "shutdown",
+                            "mouse",
+                            "action",
+                        ]
+                        .iter()
+                        .map(|value| value.to_string())
+                        .collect(),
+                    })
+                    .unwrap();
+                    stream.write_all(&handshake).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    let mut buffer = Vec::new();
+                    let mut messages: Vec<UiMessage> = Vec::new();
+                    let mut sent = false;
+                    for _ in 0..400 {
+                        let mut chunk = [0_u8; 4096];
+                        let count = stream.read(&mut chunk).unwrap();
+                        buffer.extend_from_slice(&chunk[..count]);
+                        while buffer.len() >= 4 {
+                            let payload =
+                                u32::from_be_bytes(buffer[..4].try_into().unwrap()) as usize;
+                            if buffer.len() < 4 + payload {
+                                break;
+                            }
+                            let frame: Vec<u8> = buffer.drain(..4 + payload).collect();
+                            messages.push(decode_ui_frame(&frame).unwrap());
+                        }
+                        let has_snapshot = messages
+                            .iter()
+                            .any(|message| matches!(message, UiMessage::RenderSnapshot { .. }));
+                        if !sent && has_snapshot {
+                            let input = UiMessage::InputEvent {
+                                version: UI_PROTOCOL_VERSION,
+                                id: "composer".to_owned(),
+                                sequence: 1,
+                                event: UiInputEventKind::Action(UiActionInput {
+                                    action: "composer_submit".to_owned(),
+                                    target: None,
+                                    value: Some("/model gpt-5.6-luna".to_owned()),
+                                }),
+                            };
+                            stream.write_all(&encode_ui_frame(&input).unwrap()).unwrap();
+                            sent = true;
+                            continue;
+                        }
+                        if sent {
+                            for message in &messages {
+                                if let UiMessage::RenderSnapshot { transcript, .. } = message {
+                                    for block in transcript {
+                                        if let mindcode_protocol::ui::UiTranscriptBlock::Markdown(
+                                            markdown,
+                                        ) = block
+                                        {
+                                            if markdown.text.contains("worker model set to") {
+                                                return markdown.text.clone();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    panic!("no composer_submit reply received");
+                })
+                .await
+                .unwrap();
+
+                assert!(reply.contains("gpt-5.6-luna"));
+                assert_eq!(
+                    load_sandbox_settings(dir).global_worker_model.as_deref(),
+                    Some("gpt-5.6-luna")
+                );
+                processor.abort();
+                server.close().await;
+            });
+        });
     }
 
     #[test]

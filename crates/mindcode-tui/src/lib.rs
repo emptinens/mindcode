@@ -359,9 +359,12 @@ impl App {
             input_buffer: String::new(),
             input_cursor: 0,
             preferred_column: None,
-            show_welcome: true,
+            // The TUI opens directly on the dashboard: the composer is the
+            // main interface and there is no session/workspace backend behind
+            // the legacy welcome screen.
+            show_welcome: false,
             active_view: NavigationView::Chat,
-            focus: PanelFocus::Content,
+            focus: PanelFocus::Composer,
             overlay: OverlayView::None,
             focus_before_overlay: None,
             theme: Theme::new(preferences.theme, color_mode),
@@ -2835,6 +2838,13 @@ mod tests {
     }
 
     #[test]
+    fn default_app_opens_on_dashboard_with_composer_focused() {
+        let app = App::default();
+        assert!(!app.show_welcome);
+        assert_eq!(app.focus, PanelFocus::Composer);
+    }
+
+    #[test]
     fn provider_form_payload_is_valid_json_without_a_credential_value() {
         let form = ProviderForm {
             field: ProviderFormField::Id,
@@ -3004,6 +3014,7 @@ mod tests {
     #[test]
     fn welcome_sakura_is_compact_and_symmetric() {
         let app = App {
+            show_welcome: true,
             motion: MotionMode::Reduced,
             ..App::default()
         };
