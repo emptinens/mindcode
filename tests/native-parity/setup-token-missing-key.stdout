@@ -1,6 +1,10 @@
-VEXZY authentication uses VEXZY_API_KEY.
+MindCode resolves each provider credential environment-first, then from
+the on-disk secret store (~/.config/mindcode/credentials.json).
 
-Set it in your shell:
+The built-in VEXZY profile uses the VEXZY_API_KEY environment variable:
   export VEXZY_API_KEY="forge-…"
+
+Custom providers store their key in the secret store instead; manage
+providers and keys with `mindcode provider` and `mindcode settings key`.
 
 The legacy OAuth setup flow is not used by MindCode.

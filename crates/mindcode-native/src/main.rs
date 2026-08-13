@@ -2,8 +2,8 @@
 //!
 //! The native binary deliberately keeps the supported surface small: daemon
 //! lifecycle, multi-provider profile management, secret-free settings
-//! persistence, and provider-aware authentication status are native today;
-//! regular chat prompts remain an explicit migration diagnostic.
+//! persistence, provider-aware authentication status, live chat through the
+//! active provider, and the in-process TUI are native today.
 
 use anyhow::{anyhow, Context, Result};
 use clap::{error::ErrorKind, Parser, Subcommand};
@@ -28,7 +28,6 @@ use std::{env, ffi::OsString, fs, io, io::BufRead, path::PathBuf, process, time:
 
 const VERSION: &str = "0.1.3";
 const API_KEY_ENV: &str = "VEXZY_API_KEY";
-const NATIVE_CHAT_NOT_MIGRATED: &str = "native chat runtime is not migrated yet";
 /// The only stdout write of `settings key`; asserting the constant guarantees
 /// the credential value and the store path can never be echoed.
 const SETTINGS_KEY_CONFIRMATION: &str = "configured";
@@ -38,13 +37,13 @@ const SETTINGS_KEY_CONFIRMATION: &str = "configured";
     name = "mindcode",
     version = VERSION,
     about = "MindCode native Rust foundation (multi-provider)",
-    after_help = "Commands:\n  auth status       Show active provider authentication status\n  model eligible    Inspect eligible Worker models in a supplied VEXZY catalog\n  effort worker     Validate a Worker model and optional effort lock in a supplied catalog\n  provider          Manage provider profiles (list, use, add, remove, edit)\n  settings          Manage settings (show, key, allowlist, model, effort lock)\n  setup-token       Show VEXZY_API_KEY setup instructions\n  doctor            Check native/VEXZY foundation health\n  update            Show local checkout update instructions\n  daemon            Run the native mindcoded daemon in-process\n  tui               Run the native terminal interface\n  chat              Complete a chat request through the active provider"
+    after_help = "Commands:\n  auth status       Show active provider authentication status\n  model eligible    Inspect eligible Worker models of the active provider\n  effort worker     Validate a Worker model and optional effort lock\n  provider          Manage provider profiles (list, use, add, remove, edit)\n  settings          Manage settings (show, key, allowlist, model, effort lock)\n  setup-token       Show credential setup instructions\n  doctor            Check native foundation health\n  update            Show local checkout update instructions\n  daemon            Run the native mindcoded daemon in-process\n  tui               Run the native terminal interface\n  chat              Complete a chat request through the active provider"
 )]
 struct RootArgs {
     #[arg(
         value_name = "PROMPT",
         trailing_var_arg = true,
-        help = "Regular prompt (chat runtime is not migrated yet)"
+        help = "Complete a chat request through the active provider"
     )]
     prompt: Vec<String>,
 }
@@ -415,7 +414,7 @@ async fn dispatch(arguments: Vec<OsString>) -> Result<i32> {
     }
 
     let Some(first) = arguments.first().and_then(|arg| arg.to_str()) else {
-        return run_regular_prompt(None, run_active.as_ref());
+        return run_root_parser(vec![OsString::from("--help")], run_active.as_ref()).await;
     };
 
     match first {
@@ -430,13 +429,21 @@ async fn dispatch(arguments: Vec<OsString>) -> Result<i32> {
         "daemon" => run_daemon(arguments).await,
         "tui" => run_tui(arguments).await,
         "chat" => run_chat(arguments, run_active.as_ref(), run_worker_model.as_deref()).await,
-        "-h" | "--help" | "-V" | "--version" => run_root_parser(arguments, run_active.as_ref()),
-        value if value.starts_with('-') => run_root_parser(arguments, run_active.as_ref()),
+        "-h" | "--help" | "-V" | "--version" => {
+            run_root_parser(arguments, run_active.as_ref()).await
+        }
+        value if value.starts_with('-') => run_root_parser(arguments, run_active.as_ref()).await,
         // Removed TUI commands surface as a stable unknown-command error
         // before any prompt path runs. No alias or hidden route is registered.
         "config" | "submodel" => run_removed_command(first),
         value if value.starts_with('/') => run_removed_command(value),
-        _ => run_regular_prompt(Some(first), run_active.as_ref()),
+        _ => {
+            let prompt = arguments
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            run_regular_prompt(&prompt, run_active.as_ref()).await
+        }
     }
 }
 
@@ -531,9 +538,9 @@ fn resolve_run_provider(id: &str) -> Result<ProviderId, anyhow::Error> {
     Ok(provider_id)
 }
 
-fn run_root_parser(arguments: Vec<OsString>, run_active: Option<&ProviderId>) -> Result<i32> {
+async fn run_root_parser(arguments: Vec<OsString>, run_active: Option<&ProviderId>) -> Result<i32> {
     match RootArgs::try_parse_from(with_program_name(arguments)) {
-        Ok(args) => run_regular_prompt(args.prompt.first().map(String::as_str), run_active),
+        Ok(args) => run_regular_prompt(&args.prompt, run_active).await,
         Err(error) => Ok(print_clap_error(error)),
     }
 }
@@ -950,7 +957,7 @@ fn run_setup_token(arguments: Vec<OsString>) -> Result<i32> {
         return Ok(print_clap_error(error));
     }
     println!(
-        "VEXZY authentication uses VEXZY_API_KEY.\n\nSet it in your shell:\n  export VEXZY_API_KEY=\"forge-…\"\n\nThe legacy OAuth setup flow is not used by MindCode."
+        "MindCode resolves each provider credential environment-first, then from\nthe on-disk secret store (~/.config/mindcode/credentials.json).\n\nThe built-in VEXZY profile uses the VEXZY_API_KEY environment variable:\n  export VEXZY_API_KEY=\"forge-…\"\n\nCustom providers store their key in the secret store instead; manage\nproviders and keys with `mindcode provider` and `mindcode settings key`.\n\nThe legacy OAuth setup flow is not used by MindCode."
     );
     Ok(0)
 }
@@ -973,7 +980,7 @@ fn run_doctor(arguments: Vec<OsString>) -> Result<i32> {
     );
     println!("Authentication: multi-provider (env -> secret store, fail-closed)");
     println!("Daemon: available (in-process mindcoded::Daemon)");
-    println!("Chat runtime: {NATIVE_CHAT_NOT_MIGRATED}");
+    println!("Chat runtime: live (mindcode-transport, both protocols)");
     Ok(0)
 }
 
@@ -1129,26 +1136,41 @@ async fn run_chat(
         Ok(args) => args,
         Err(error) => return Ok(print_clap_error(error)),
     };
-    let prompt = args.prompt.join(" ");
+    stream_chat_response(
+        &args.prompt.join(" "),
+        args.model.as_deref().or(run_worker_model),
+        run_active,
+    )
+    .await
+}
+
+/// Resolve the active provider, its credential (env -> store -> fail-closed)
+/// and model, then stream one chat completion over the matching protocol.
+/// Resolution failures return exit code 1 with a secret-free diagnostic; the
+/// credential value never reaches output.
+async fn stream_chat_response(
+    prompt: &str,
+    model_override: Option<&str>,
+    run_active: Option<&ProviderId>,
+) -> Result<i32> {
     let settings = load_native_settings()?;
     let Some(provider) = run_active_provider_config(&settings, run_active) else {
-        return Err(anyhow!("no active provider is configured"));
+        eprintln!("mindcode: no active provider is configured");
+        return Ok(1);
     };
     let store = load_store(&native_store_path()?).map_err(anyhow::Error::msg)?;
-    let key = store
-        .resolve(&provider.credential, |name| env::var(name).ok())
-        .map_err(|_| {
-            anyhow!(
-                "credential for provider '{}' is not configured ({})",
+    let key = match store.resolve(&provider.credential, |name| env::var(name).ok()) {
+        Ok(key) => key,
+        Err(_) => {
+            eprintln!(
+                "mindcode: credential for provider '{}' is not configured ({})",
                 provider.id,
                 credential_ref_kind(provider)
-            )
-        })?;
-    let model = select_chat_model(
-        &settings,
-        provider,
-        args.model.as_deref().or(run_worker_model),
-    )?;
+            );
+            return Ok(1);
+        }
+    };
+    let model = select_chat_model(&settings, provider, model_override)?;
     let transport = Transport::new(&provider.base_url).map_err(anyhow::Error::msg)?;
 
     match provider.protocol {
@@ -1157,7 +1179,7 @@ async fn run_chat(
                 model,
                 messages: vec![ChatMessage {
                     role: "user".to_owned(),
-                    content: prompt,
+                    content: prompt.to_owned(),
                 }],
                 max_tokens: None,
                 temperature: None,
@@ -1181,7 +1203,7 @@ async fn run_chat(
                 max_tokens: 1024,
                 messages: vec![ChatMessage {
                     role: "user".to_owned(),
-                    content: prompt,
+                    content: prompt.to_owned(),
                 }],
                 system: None,
                 temperature: None,
@@ -1209,28 +1231,11 @@ async fn run_chat(
     Ok(0)
 }
 
-fn run_regular_prompt(_prompt: Option<&str>, run_active: Option<&ProviderId>) -> Result<i32> {
-    let settings = load_native_settings()?;
-    let Some(provider) = run_active_provider_config(&settings, run_active) else {
-        eprintln!("mindcode: no active provider is configured");
-        return Ok(1);
-    };
-    let store = load_store(&native_store_path()?).map_err(anyhow::Error::msg)?;
-    if store
-        .resolve(&provider.credential, |name| env::var(name).ok())
-        .is_err()
-    {
-        eprintln!(
-            "mindcode: credential for provider '{}' is not configured ({})",
-            provider.id,
-            credential_ref_kind(provider)
-        );
-        return Ok(1);
-    }
-    eprintln!(
-        "{NATIVE_CHAT_NOT_MIGRATED}: regular prompts are not available in this native foundation."
-    );
-    Ok(1)
+/// A bare prompt (`mindcode hello world`) behaves like `mindcode chat`:
+/// join all trailing arguments into one prompt and stream a completion
+/// through the active provider, failing closed on missing configuration.
+async fn run_regular_prompt(prompt: &[String], run_active: Option<&ProviderId>) -> Result<i32> {
+    stream_chat_response(&prompt.join(" "), None, run_active).await
 }
 
 fn current_api_key() -> Option<String> {
@@ -1576,7 +1581,8 @@ mod tests {
         assert!(help.contains("setup-token"));
         assert!(help.contains("provider"));
         assert!(help.contains("settings"));
-        assert!(help.contains("VEXZY"));
+        assert!(help.contains("chat"));
+        assert!(help.contains("multi-provider"));
     }
 
     #[test]
@@ -2537,11 +2543,10 @@ mod tests {
     }
 
     #[test]
-    fn regular_prompt_diagnostic_is_explicit() {
-        assert_eq!(
-            NATIVE_CHAT_NOT_MIGRATED,
-            "native chat runtime is not migrated yet"
-        );
+    fn root_help_no_longer_claims_chat_is_unmigrated() {
+        let help = RootArgs::command().render_long_help().to_string();
+        assert!(!help.contains("not migrated"));
+        assert!(help.contains("chat request through the active provider"));
     }
 
     #[test]

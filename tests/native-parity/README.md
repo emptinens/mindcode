@@ -23,6 +23,6 @@ Vectors:
 - auth-missing-key.*          `auth status` with the active vexzy profile and
                               no credential (exit 1, JSON "not configured")
 - print-missing-key.*         a regular prompt with the active vexzy profile
-                              and no credential (exit 1, not-migrated
-                              diagnostic on stderr)
+                              and no credential (exit 1, credential-not-
+                              configured diagnostic on stderr)
 - setup-token-missing-key.*   `setup-token` (no key required, exit 0)
