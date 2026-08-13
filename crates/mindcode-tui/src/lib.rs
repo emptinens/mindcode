@@ -313,6 +313,7 @@ pub struct App {
     selected_change: Option<usize>,
     provider_selection: usize,
     provider_form: Option<ProviderForm>,
+    providers_auto_opened: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,6 +391,7 @@ impl App {
             selected_change: None,
             provider_selection: 0,
             provider_form: None,
+            providers_auto_opened: false,
         }
     }
 
@@ -495,6 +497,24 @@ impl App {
         };
     }
 
+    /// Interactive first-run flow: if the active provider has no resolvable
+    /// credential, surface the provider setup screen once on startup so the
+    /// user can switch or add a profile instead of hitting a dead end.
+    fn auto_open_providers_if_unconfigured(&mut self) {
+        if self.providers_auto_opened {
+            return;
+        }
+        self.providers_auto_opened = true;
+        let needs_setup = self
+            .latest_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.providers.iter().find(|provider| provider.active))
+            .is_some_and(|provider| !provider.configured);
+        if needs_setup && self.overlay == OverlayView::None {
+            self.set_overlay(OverlayView::Providers);
+        }
+    }
+
     fn select_workspace(&mut self, workspace: String) {
         if workspace == self.workspace_id {
             return;
@@ -591,6 +611,7 @@ impl App {
                     .filter(|index| *index < snapshot.changes.len());
                 self.latest_snapshot = Some(snapshot);
                 self.clamp_provider_selection();
+                self.auto_open_providers_if_unconfigured();
                 return true;
             }
         }
@@ -2638,6 +2659,7 @@ mod tests {
                 base_url: "https://api.echogate.one/v1".into(),
                 active: true,
                 credential: Some("env:VEXZY_API_KEY".into()),
+                configured: true,
             }],
             writer: UiWriterState {
                 mode: "writer".into(),
@@ -2715,6 +2737,7 @@ mod tests {
                 base_url: "https://api.echogate.one/v1".into(),
                 active: true,
                 credential: Some("env:VEXZY_API_KEY".into()),
+                configured: true,
             },
             UiProviderSnapshot {
                 id: "custom-a".into(),
@@ -2723,6 +2746,7 @@ mod tests {
                 base_url: "https://custom.example/v1".into(),
                 active: false,
                 credential: Some("env:CUSTOM_KEY".into()),
+                configured: false,
             },
         ];
         let mut app = App::default();
@@ -2767,6 +2791,28 @@ mod tests {
         assert!(app.contextualize_input(&mut esc));
         assert!(app.provider_form.is_none());
         assert_eq!(app.overlay, OverlayView::Providers);
+    }
+
+    #[test]
+    fn providers_overlay_auto_opens_when_active_provider_is_unconfigured() {
+        let mut app = App::default();
+        let mut unconfigured = snapshot(1);
+        unconfigured.providers[0].configured = false;
+        app.apply_message(render_message(unconfigured, "first-run"));
+        assert_eq!(app.overlay, OverlayView::Providers);
+
+        // Dismissing the setup screen is respected: the next snapshot does
+        // not yank it back open.
+        app.set_overlay(OverlayView::None);
+        app.apply_message(render_message(snapshot(2), "later"));
+        assert_eq!(app.overlay, OverlayView::None);
+    }
+
+    #[test]
+    fn providers_overlay_stays_closed_when_active_provider_is_configured() {
+        let mut app = App::default();
+        app.apply_message(render_message(snapshot(1), "configured"));
+        assert_eq!(app.overlay, OverlayView::None);
     }
 
     #[test]

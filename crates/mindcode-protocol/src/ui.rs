@@ -505,6 +505,10 @@ pub struct UiProviderSnapshot {
     pub active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
+    /// Whether the profile's credential currently resolves (env → store →
+    /// fail-closed).  Only a bool; the value never enters a snapshot.
+    #[serde(default)]
+    pub configured: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1988,6 +1992,7 @@ mod tests {
                 base_url: "https://api.echogate.one/v1".into(),
                 active: true,
                 credential: Some("env:VEXZY_API_KEY".into()),
+                configured: true,
             }],
             writer: UiWriterState {
                 mode: "writer".into(),

@@ -1054,8 +1054,23 @@ fn providers_input(settings: &NativeSettings) -> Vec<ProviderInput> {
             base_url: provider.base_url.clone(),
             active: Some(active == Some(&provider.id)),
             credential: Some(credential_ref_kind(provider)),
+            configured: Some(provider_credential_configured(provider)),
         })
         .collect()
+}
+
+/// Secret-free "is this profile usable right now" check: env → store →
+/// fail-closed.  The resolved value is never retained or projected.
+fn provider_credential_configured(provider: &ProviderConfig) -> bool {
+    let Ok(path) = native_store_path() else {
+        return false;
+    };
+    let Ok(store) = load_store(&path) else {
+        return false;
+    };
+    store
+        .resolve(&provider.credential, |name| env::var(name).ok())
+        .is_ok()
 }
 
 /// Secret-free initial snapshot published once on start so the renderer has
@@ -2690,6 +2705,21 @@ mod tests {
                         .as_deref()
                         .is_none_or(|credential| !credential.contains("forge-"))
             }));
+        });
+    }
+
+    #[test]
+    fn providers_input_reports_whether_the_credential_resolves() {
+        with_sandbox_env(|dir| {
+            seed_builtin_active(dir);
+            without_env_var("VEXZY_API_KEY", || {
+                let inputs = providers_input(&load_sandbox_settings(dir));
+                assert_eq!(inputs[0].configured, Some(false));
+            });
+            with_env_var("VEXZY_API_KEY", "forge-test-key", || {
+                let inputs = providers_input(&load_sandbox_settings(dir));
+                assert_eq!(inputs[0].configured, Some(true));
+            });
         });
     }
 

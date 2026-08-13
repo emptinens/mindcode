@@ -269,6 +269,8 @@ pub struct ProviderInput {
     pub base_url: String,
     pub active: Option<bool>,
     pub credential: Option<String>,
+    /// Whether the credential currently resolves (env → store → fail-closed).
+    pub configured: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -629,6 +631,7 @@ pub fn project_providers(
                         )
                     })
                     .transpose()?,
+                configured: input.configured.unwrap_or(false),
             })
         })
         .collect()
