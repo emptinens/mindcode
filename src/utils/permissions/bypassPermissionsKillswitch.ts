@@ -134,7 +134,7 @@ export function useKickOffCheckAndDisableAutoModeIfNeeded(): void {
 
   // Runs on mount (startup check) AND whenever the model or fast mode changes
   // (kick-out / carousel-restore). Watching both model fields covers /model,
-  // Cmd+P picker, /config, and bridge onSetModel paths; fastMode covers
+  // the Cmd+P picker, and bridge onSetModel paths; fastMode covers
   // /fast on|off for the tengu_auto_mode_config.disableFastMode circuit
   // breaker. The print.ts headless paths are covered by the sync
   // isAutoModeGateEnabled() check.

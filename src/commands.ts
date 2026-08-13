@@ -3,7 +3,6 @@ import clear from './commands/clear/index.js'
 import compact from './commands/compact/index.js'
 import copy from './commands/copy/index.js'
 import copycon from './commands/copycon/index.js'
-import config from './commands/config/index.js'
 import { context, contextNonInteractive } from './commands/context/index.js'
 import diff from './commands/diff/index.js'
 import doctor from './commands/doctor/index.js'
@@ -54,7 +53,6 @@ import model from './commands/model/index.js'
 import outputStyle from './commands/output-style/index.js'
 import statusline from './commands/statusline.js'
 import effort from './commands/effort/index.js'
-import submodel from './commands/submodel/index.js'
 import stats from './commands/stats/index.js'
 import { logError } from './utils/log.js'
 import { toError } from './utils/errors.js'
@@ -96,13 +94,11 @@ const COMMANDS = memoize((): Command[] => [
   compact,
   copy,
   copycon,
-  config,
   context,
   contextNonInteractive,
   diff,
   doctor,
   effort,
-  submodel,
   exit,
   folder,
   help,

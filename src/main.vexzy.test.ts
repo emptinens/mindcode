@@ -35,8 +35,8 @@ describe('main.tsx VEXZY-only startup regression', () => {
       'process.env.MINDCODE_MODEL',
       "'--model <model>'",
       "'--agent-teams'",
-      "Worker sessions are fixed",
-      "/submodel reports that invariant",
+      "global Worker model",
+      "selected via /model",
       'runHeadless',
       'launchRepl',
       'getMindCodeMcpConfigs',
@@ -46,6 +46,11 @@ describe('main.tsx VEXZY-only startup regression', () => {
     ]) {
       expect(runtimeSource).toContain(retained)
     }
+  })
+
+  test('the --model help no longer advertises the removed /submodel command', () => {
+    expect(runtimeSource).not.toContain('/submodel')
+    expect(runtimeSource).not.toContain('Worker sessions are fixed')
   })
 
   test('does not invalidate the ready catalog with a redundant startup refresh', () => {

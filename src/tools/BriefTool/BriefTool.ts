@@ -108,7 +108,6 @@ export function isBriefEntitled(): boolean {
  *   - `--brief` CLI flag (maybeActivateBrief in main.tsx)
  *   - `defaultView: 'chat'` in settings (main.tsx init)
  *   - `/brief` slash command (brief.ts)
- *   - `/config` defaultView picker (Config.tsx)
  *   - SendUserMessage in `--tools` / SDK `tools` option (main.tsx)
  *   - MINDCODE_BRIEF env var (maybeActivateBrief — dev/testing bypass)
  * Assistant mode (kairosActive) bypasses opt-in since its system prompt

@@ -158,7 +158,7 @@ function IDEScreen(t0) {
   }
   let t8;
   if ($[26] !== availableIDEs.length) {
-    t8 = availableIDEs.length !== 0 && !isSupportedTerminal() && <Box marginTop={1}><Text dimColor={true}>Tip: You can enable auto-connect to IDE in /config or with the --ide flag</Text></Box>;
+    t8 = availableIDEs.length !== 0 && !isSupportedTerminal() && <Box marginTop={1}><Text dimColor={true}>Tip: You can enable auto-connect to IDE with the --ide flag</Text></Box>;
     $[26] = availableIDEs.length;
     $[27] = t8;
   } else {

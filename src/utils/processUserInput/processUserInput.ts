@@ -425,7 +425,7 @@ async function processUserInputBase(
   // immediate-command fast paths). Resolve the command here — if it passes
   // isBridgeSafeCommand, clear the skip so the gate below opens. If it's a
   // known-but-unsafe command (local-jsx UI or terminal-only), short-circuit
-  // with a helpful message rather than letting the model see raw "/config".
+  // with a helpful message rather than letting the model see the raw command.
   let effectiveSkipSlash = skipSlashCommands
   if (bridgeOrigin && inputString !== null && inputString.startsWith('/')) {
     const parsed = parseSlashCommand(inputString)

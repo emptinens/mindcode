@@ -123,7 +123,7 @@ export function executeEffort(args: string, model?: string): EffortCommandResult
     if (!workflowGate.isWorkflowsEnabled()) {
       return {
         message:
-          'Ultracode needs dynamic workflows enabled (see /config). Valid options are: none, minimal, low, medium, high, xhigh, max, auto'
+          'Ultracode needs dynamic workflows enabled. Valid options are: none, minimal, low, medium, high, xhigh, max, auto'
       };
     }
     if (model && !modelSupportsXhighEffort(model)) {

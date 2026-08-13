@@ -381,7 +381,7 @@ export type GlobalConfig = {
   // from the title (the dot makes it redundant).
   showStatusInTerminalTab?: boolean
 
-  // Push-notification toggles (set via /config). Default off — explicit opt-in required.
+  // Push-notification toggles. Default off — explicit opt-in required.
   taskCompleteNotifEnabled?: boolean
   inputNeededNotifEnabled?: boolean
   agentPushNotifEnabled?: boolean
@@ -429,8 +429,7 @@ export type GlobalConfig = {
   // Cached GrowthBook feature values
   cachedGrowthBookFeatures?: { [featureName: string]: unknown }
 
-  // Local GrowthBook overrides (ant-only, set via /config Gates tab).
-  // Checked after env-var overrides but before the real resolved value.
+  // Local GrowthBook overrides. Checked after env-var overrides but before the real resolved value.
   growthBookOverrides?: { [featureName: string]: unknown }
 
   // Emergency tip tracking - stores the last shown tip to prevent re-showing
@@ -484,7 +483,7 @@ export type GlobalConfig = {
   // Teammate spawn mode: 'auto' | 'tmux' | 'in-process'
   teammateMode?: 'auto' | 'tmux' | 'in-process' // How to spawn teammates (default: 'auto')
   // Legacy persisted teammate-model preference. Runtime worker routing ignores
-  // this field and uses the dedicated /submodel setting.
+  // this field; the global Worker model is selected via /model.
   teammateDefaultModel?: string | null
 
   // PR status footer configuration (feature-flagged via GrowthBook)

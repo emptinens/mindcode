@@ -15,7 +15,7 @@ type PaneProps = {
 /**
  * A pane — a region of the terminal that appears below the REPL prompt,
  * bounded by a colored top line with a one-row gap above and horizontal
- * padding. Used by all slash-command screens: /config, /help, /plugins,
+ * padding. Used by all slash-command screens: /help, /plugins,
  * /sandbox, /stats, /permissions.
  *
  * For confirm/cancel dialogs (Esc to dismiss, Enter to confirm), use

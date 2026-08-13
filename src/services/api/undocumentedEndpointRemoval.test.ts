@@ -45,7 +45,7 @@ describe('VEXZY endpoint boundary', () => {
       'utf8',
     )
     expect(config).toContain('/chat/completions')
-    expect(config).toContain('/responses')
+    expect(config).not.toContain('/responses')
     expect(config).toContain('/models')
     expect(config).toContain('/v1/messages')
     expect(statSync(join(sourceRoot, 'services/api/vexzy')).isDirectory()).toBe(

@@ -185,6 +185,10 @@ async fn dispatch(arguments: Vec<OsString>) -> Result<i32> {
         "daemon" => run_daemon(arguments).await,
         "-h" | "--help" | "-V" | "--version" => run_root_parser(arguments),
         value if value.starts_with('-') => run_root_parser(arguments),
+        // Removed TUI commands surface as a stable unknown-command error
+        // before any prompt path runs. No alias or hidden route is registered.
+        "config" | "submodel" => run_removed_command(first),
+        value if value.starts_with('/') => run_removed_command(value),
         _ => Ok(run_regular_prompt(Some(first))),
     }
 }
@@ -194,6 +198,17 @@ fn run_root_parser(arguments: Vec<OsString>) -> Result<i32> {
         Ok(args) => Ok(run_regular_prompt(args.prompt.first().map(String::as_str))),
         Err(error) => Ok(print_clap_error(error)),
     }
+}
+
+/// Stable, bounded diagnostic for commands removed from the native surface.
+/// The literal `unknown_command` marker keeps the exit contract greppable.
+fn removed_command_error(command: &str) -> String {
+    format!("unknown_command: '{command}' is not a native mindcode command")
+}
+
+fn run_removed_command(command: &str) -> Result<i32> {
+    eprintln!("mindcode: {}", removed_command_error(command));
+    Ok(1)
 }
 
 fn run_auth(arguments: Vec<OsString>) -> Result<i32> {
@@ -619,5 +634,40 @@ mod tests {
             NATIVE_CHAT_NOT_MIGRATED,
             "native chat runtime is not migrated yet"
         );
+    }
+
+    #[test]
+    fn removed_command_error_is_stable_bounded_and_marked() {
+        for command in ["/config", "config", "/submodel", "submodel"] {
+            let message = removed_command_error(command);
+            assert!(message.contains("unknown_command"), "{message}");
+            assert!(!message.contains("forge-"));
+        }
+        assert_eq!(
+            removed_command_error("/config"),
+            removed_command_error("/config")
+        );
+    }
+
+    #[tokio::test]
+    async fn removed_slash_commands_exit_one_without_a_prompt_path() {
+        for command in ["/config", "/submodel", "/settings", "/help"] {
+            let code = dispatch(vec![OsString::from(command)]).await.unwrap();
+            assert_eq!(code, 1, "{command} must exit 1");
+        }
+    }
+
+    #[tokio::test]
+    async fn removed_plain_commands_exit_one_without_a_prompt_path() {
+        for command in ["config", "submodel"] {
+            let code = dispatch(vec![OsString::from(command)]).await.unwrap();
+            assert_eq!(code, 1, "{command} must exit 1");
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_slash_commands_are_not_mistaken_for_native_flags() {
+        let code = dispatch(vec![OsString::from("/version")]).await.unwrap();
+        assert_eq!(code, 1);
     }
 }

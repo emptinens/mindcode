@@ -1041,7 +1041,7 @@ export function REPL({
   const agentTitle = mainThreadAgentDefinition?.agentType;
   const terminalTitle = sessionTitle ?? agentTitle ?? haikuTitle ?? 'MindCode';
   const isWaitingForApproval = toolUseConfirmQueue.length > 0 || promptQueue.length > 0 || pendingWorkerRequest || pendingSandboxRequest;
-  // Local-jsx commands (like /plugin, /config) show user-facing dialogs that
+  // Local-jsx commands (like /plugin, /doctor) show user-facing dialogs that
   // wait for input. Require jsx != null — if the flag is stuck true but jsx
   // is null, treat as not-showing so TextInput focus and queue processor
   // aren't deadlocked by a phantom overlay.
@@ -3004,7 +3004,7 @@ export function REPL({
               });
               // In fullscreen the command just showed as a centered modal
               // pane — the notification above is enough feedback. Adding
-              // "❯ /config" + "⎿ dismissed" to the transcript is clutter
+              // "❯ /doctor" + "⎿ dismissed" to the transcript is clutter
               // (those messages are type:system subtype:local_command —
               // user-visible but NOT sent to the model, so skipping them
               // doesn't change model context). Outside fullscreen the
@@ -4214,7 +4214,7 @@ export function REPL({
   // and skip their own top-level frame. Non-fullscreen keeps the inline
   // render paths below. Commands that used to route through bottom
   // (immediate: /model, /mcp, /btw, ...) and scrollable (non-immediate:
-  // /config, /theme, /diff, ...) both go here now.
+  // /theme, /diff, ...) both go here now.
   const toolJsxCentered = isFullscreenEnvEnabled() && toolJSX?.isLocalJSXCommand === true;
   const centeredModal: React.ReactNode = toolJsxCentered ? toolJSX!.jsx : null;
 
@@ -4249,8 +4249,8 @@ export function REPL({
               <AwsAuthStatusBox />
               {/* Hide the processing placeholder while a modal is showing —
                   it would sit at the last visible transcript row right above
-                  the ▔ divider, showing "❯ /config" as redundant clutter
-                  (the modal IS the /config UI). Outside modals it stays so
+                  the ▔ divider, showing "❯ /doctor" as redundant clutter
+                  (the modal IS the /doctor UI). Outside modals it stays so
                   the user sees their input echoed while Claude processes. */}
               {!disabled && placeholderText && !centeredModal && <UserTextMessage param={{
           text: placeholderText,

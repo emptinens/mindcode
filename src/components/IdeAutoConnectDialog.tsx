@@ -54,7 +54,7 @@ export function IdeAutoConnectDialog(t0) {
   }
   let t4;
   if ($[5] === Symbol.for("react.memo_cache_sentinel")) {
-    t4 = <Text dimColor={true}>You can also configure this in /config or with the --ide flag</Text>;
+    t4 = <Text dimColor={true}>You can also configure this in your settings file or with the --ide flag</Text>;
     $[5] = t4;
   } else {
     t4 = $[5];
@@ -132,7 +132,7 @@ export function IdeDisableAutoConnectDialog(t0) {
   }
   let t5;
   if ($[7] !== handleCancel || $[8] !== t4) {
-    t5 = <Dialog title="Do you wish to disable auto-connect to IDE?" subtitle="You can also configure this in /config" onCancel={handleCancel} color="ide">{t4}</Dialog>;
+    t5 = <Dialog title="Do you wish to disable auto-connect to IDE?" subtitle="You can also configure this in your settings file" onCancel={handleCancel} color="ide">{t4}</Dialog>;
     $[7] = handleCancel;
     $[8] = t4;
     $[9] = t5;

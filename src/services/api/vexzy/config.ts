@@ -7,7 +7,6 @@ export const VEXZY_MESSAGES_BASE_URL = 'https://api.echogate.one'
 
 export const VEXZY_OPENAI_ENDPOINTS = Object.freeze({
   chatCompletions: `${VEXZY_OPENAI_BASE_URL}/chat/completions`,
-  responses: `${VEXZY_OPENAI_BASE_URL}/responses`,
   models: `${VEXZY_OPENAI_BASE_URL}/models`,
 })
 

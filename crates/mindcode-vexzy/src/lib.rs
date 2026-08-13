@@ -15,7 +15,6 @@ pub const VEXZY_BASE_URL: &str = "https://api.echogate.one";
 pub const VEXZY_OPENAI_BASE_URL: &str = "https://api.echogate.one/v1";
 pub const VEXZY_MODELS_ENDPOINT: &str = "https://api.echogate.one/v1/models";
 pub const VEXZY_CHAT_COMPLETIONS_ENDPOINT: &str = "https://api.echogate.one/v1/chat/completions";
-pub const VEXZY_RESPONSES_ENDPOINT: &str = "https://api.echogate.one/v1/responses";
 pub const VEXZY_MESSAGES_ENDPOINT: &str = "https://api.echogate.one/v1/messages";
 
 /// The sole environment variable from which a VEXZY credential may be read.
@@ -321,10 +320,6 @@ mod tests {
         assert_eq!(
             VEXZY_CHAT_COMPLETIONS_ENDPOINT,
             "https://api.echogate.one/v1/chat/completions"
-        );
-        assert_eq!(
-            VEXZY_RESPONSES_ENDPOINT,
-            "https://api.echogate.one/v1/responses"
         );
         assert_eq!(
             VEXZY_MESSAGES_ENDPOINT,

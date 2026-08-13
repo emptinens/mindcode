@@ -110,7 +110,7 @@ const externalTips: Tip[] = [
   {
     id: 'default-permission-mode-config',
     content: async () =>
-      `Use /config to change your default permission mode (including Plan Mode)`,
+      `Set your default permission mode (including Plan Mode) in your settings file`,
     cooldownSessions: 10,
     isRelevant: async () => {
       try {

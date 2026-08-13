@@ -167,7 +167,7 @@ export const WorkflowTool = buildTool({
       return {
         result: false,
         message:
-          'Dynamic workflows are not enabled for this session (org policy, launch gate, or the "Dynamic workflows" setting in /config).',
+          'Dynamic workflows are not enabled for this session (org policy, launch gate, or the "Dynamic workflows" setting).',
         errorCode: 6,
       }
     }

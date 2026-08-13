@@ -224,7 +224,7 @@ export async function handlePromptSubmit(
   )
   logEvent('tengu_paste_text', { pastedTextCount, pastedTextBytes })
 
-  // Handle local-jsx immediate commands (e.g., /config, /doctor)
+  // Handle local-jsx immediate commands (e.g., /doctor)
   // Skip for remote bridge messages — slash commands from CCR clients are plain text
   if (!skipSlashCommands && finalInput.trim().startsWith('/')) {
     const trimmedInput = finalInput.trim()

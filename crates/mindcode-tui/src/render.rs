@@ -249,7 +249,7 @@ fn render_welcome(frame: &mut Frame<'_>, state: &RenderState<'_>) {
         .snapshot
         .map(|snapshot| snapshot.telemetry.model.as_str())
         .filter(|value| !value.is_empty())
-        .unwrap_or("gpt-5.6-luna");
+        .unwrap_or("model");
 
     let mut lines = Vec::new();
     lines.extend(art.into_iter().map(|line| {
@@ -1049,7 +1049,6 @@ fn render_overlay(frame: &mut Frame<'_>, state: &RenderState<'_>) {
             "Command palette",
             &[
                 "/model  Select leader model",
-                "/submodel  Select worker model",
                 "/agents  Agent team",
                 "/tasks  Shared task graph",
                 "/status  Session report",

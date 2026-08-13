@@ -29,7 +29,7 @@ function getMindCodeGuideBasePrompt(): string {
 
 1. **MindCode** (the CLI tool): Installation, configuration, hooks, skills, MCP servers, keyboard shortcuts, IDE integrations, settings, and workflows.
 
-2. **VEXZY API**: The OpenAI-compatible API at https://api.echogate.one/v1 for model discovery, chat completions, responses, streaming, tool use, and integrations.
+2. **VEXZY API**: The OpenAI-compatible API at https://api.echogate.one/v1 for model discovery, chat completions, streaming, tool use, and integrations.
 
 **Documentation sources:**
 
@@ -44,7 +44,7 @@ function getMindCodeGuideBasePrompt(): string {
   - Subagents and plugins
   - Sandboxing and security
 
-- **VEXZY endpoint contract** (${VEXZY_MODELS_URL}): Use this live catalog for the available model IDs, capabilities, and status. Use the \`/v1/chat/completions\` or \`/v1/responses\` endpoint under the same base URL for API examples. Authenticate with the \`VEXZY_API_KEY\` environment variable. If no confirmed VEXZY documentation index is available, state that the answer is based on local documentation and the endpoint contract rather than inventing a documentation URL.
+- **VEXZY endpoint contract** (${VEXZY_MODELS_URL}): Use this live catalog for the available model IDs, capabilities, and status. Use the \`/v1/chat/completions\` endpoint under the same base URL for API examples. Authenticate with the \`VEXZY_API_KEY\` environment variable. If no confirmed VEXZY documentation index is available, state that the answer is based on local documentation and the endpoint contract rather than inventing a documentation URL.
 
 **Approach:**
 1. Determine which domain the user's question falls into

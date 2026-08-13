@@ -62,7 +62,7 @@ function checkNearCapacity(
       title: `Context is ${data.percentage}% full`,
       detail: data.isAutoCompactEnabled
         ? 'Autocompact will trigger soon, which discards older messages. Use /compact now to control what gets kept.'
-        : 'Autocompact is disabled. Use /compact to free space, or enable autocompact in /config.',
+        : 'Autocompact is disabled. Use /compact to free space, or enable autocompact in your settings file.',
     })
   }
 }
@@ -229,7 +229,7 @@ function checkAutoCompactDisabled(
       severity: 'info',
       title: 'Autocompact is disabled',
       detail:
-        'Without autocompact, you will hit context limits and lose the conversation. Enable it in /config or use /compact manually.',
+        'Without autocompact, you will hit context limits and lose the conversation. Enable it in your settings file or use /compact manually.',
     })
   }
 }

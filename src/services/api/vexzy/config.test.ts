@@ -17,9 +17,6 @@ describe('Vexzy configuration', () => {
     expect(VEXZY_ENDPOINTS.chatCompletions).toBe(
       'https://api.echogate.one/v1/chat/completions',
     )
-    expect(VEXZY_ENDPOINTS.responses).toBe(
-      'https://api.echogate.one/v1/responses',
-    )
     expect(VEXZY_ENDPOINTS.models).toBe('https://api.echogate.one/v1/models')
     expect(VEXZY_MESSAGES_ENDPOINT).toBe(
       'https://api.echogate.one/v1/messages',

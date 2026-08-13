@@ -736,8 +736,8 @@ async function run(): Promise<CommanderCommand> {
   .option(
     '--model <model>',
     "Vexzy model ID for the current Leader session (for example " +
-      "'gpt-5.6-sol' or 'gpt-5.6-terra'). Worker sessions are fixed " +
-      "to 'gpt-5.6-luna'; /submodel reports that invariant.",
+      "'gpt-5.6-sol' or 'gpt-5.6-terra'). The global Worker model " +
+      "for the active provider is selected via /model as well.",
   )
   .addOption(
     new Option(
