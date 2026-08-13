@@ -18,7 +18,7 @@ use mindcode_transport::{ChatCompletionsRequest, ChatMessage, MessagesRequest, T
 use mindcode_tui::TuiConfig;
 use mindcode_tui_server::{
     ConnectionInput, ControlServer, ControlServerConfig, InputHandler, ProjectionInput,
-    ProviderInput, StatusInput, TelemetryInput, TranscriptInput,
+    ProviderInput, StatusInput, TelemetryInput, TranscriptInput, WriterInput,
 };
 use mindcode_vexzy::{
     eligible_worker_models, parse_vexzy_model_catalog, VexzyModel, VexzyModelCatalog, WorkerEffort,
@@ -1082,6 +1082,13 @@ fn tui_initial_input() -> ProjectionInput {
             ..Default::default()
         },
         providers: settings.as_ref().map(providers_input).unwrap_or_default(),
+        // The native TUI is a single in-process client and is always the
+        // writer; marking it `observer` (the projection default) would render
+        // the composer read-only.
+        writer: WriterInput {
+            mode: Some("writer".to_owned()),
+            ..Default::default()
+        },
         ..Default::default()
     }
 }
@@ -3310,6 +3317,17 @@ mod tests {
             transcript.push("user", "hi");
             let populated = tui_snapshot(&transcript.entries);
             assert_eq!(populated.transcript.len(), 1);
+        });
+    }
+
+    #[test]
+    fn tui_snapshot_marks_the_client_as_writer_not_observer() {
+        with_sandbox_env(|dir| {
+            seed_builtin_active(dir);
+            // The projection defaults to `observer` when the mode is omitted;
+            // the native TUI is always the writer, otherwise the composer is
+            // rendered read-only and input is rejected.
+            assert_eq!(tui_snapshot(&[]).writer.mode.as_deref(), Some("writer"));
         });
     }
 
