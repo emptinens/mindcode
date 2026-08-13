@@ -400,12 +400,19 @@ async fn main() {
 }
 
 async fn dispatch(arguments: Vec<OsString>) -> Result<i32> {
-    let (selected_provider, arguments) =
-        scan_provider_option(&arguments).map_err(anyhow::Error::msg)?;
-    let run_active = match selected_provider {
+    let (options, arguments) = scan_run_options(&arguments).map_err(anyhow::Error::msg)?;
+    let run_active = match options.provider {
         Some(id) => Some(resolve_run_provider(&id)?),
         None => None,
     };
+    let run_worker_model = options
+        .worker_model
+        .as_deref()
+        .map(parse_worker_model_override)
+        .transpose()?;
+    if let Some(lock) = options.worker_effort_lock.as_deref() {
+        parse_effort_lock_override(lock)?;
+    }
 
     let Some(first) = arguments.first().and_then(|arg| arg.to_str()) else {
         return run_regular_prompt(None, run_active.as_ref());
@@ -422,7 +429,7 @@ async fn dispatch(arguments: Vec<OsString>) -> Result<i32> {
         "update" | "upgrade" => run_update(arguments),
         "daemon" => run_daemon(arguments).await,
         "tui" => run_tui(arguments).await,
-        "chat" => run_chat(arguments, run_active.as_ref()).await,
+        "chat" => run_chat(arguments, run_active.as_ref(), run_worker_model.as_deref()).await,
         "-h" | "--help" | "-V" | "--version" => run_root_parser(arguments, run_active.as_ref()),
         value if value.starts_with('-') => run_root_parser(arguments, run_active.as_ref()),
         // Removed TUI commands surface as a stable unknown-command error
@@ -433,13 +440,19 @@ async fn dispatch(arguments: Vec<OsString>) -> Result<i32> {
     }
 }
 
-/// Extract a global `--provider <id>` / `--provider=<id>` option from the raw
-/// argument list before clap parsing.  Both spellings are accepted anywhere on
-/// the command line, including before the subcommand name.  The option selects
-/// the run's active provider without persisting anything; malformed values
-/// fail closed in [`resolve_run_provider`].
-fn scan_provider_option(arguments: &[OsString]) -> Result<(Option<String>, Vec<OsString>), String> {
-    let mut selected = None;
+/// Run-scoped global options extracted from the raw argument list before clap
+/// parsing.  Each option accepts both `--flag value` and `--flag=value`
+/// spellings anywhere on the command line, including before the subcommand
+/// name, and none of them persist anything.
+#[derive(Debug, Default)]
+struct RunOptions {
+    provider: Option<String>,
+    worker_model: Option<String>,
+    worker_effort_lock: Option<String>,
+}
+
+fn scan_run_options(arguments: &[OsString]) -> Result<(RunOptions, Vec<OsString>), String> {
+    let mut options = RunOptions::default();
     let mut remaining = Vec::new();
     let mut iter = arguments.iter();
     while let Some(argument) = iter.next() {
@@ -447,20 +460,61 @@ fn scan_provider_option(arguments: &[OsString]) -> Result<(Option<String>, Vec<O
             remaining.push(argument.clone());
             continue;
         };
-        if text == "--provider" {
-            let Some(value) = iter.next().and_then(|value| value.to_str()) else {
-                return Err("--provider requires a provider id value".to_owned());
-            };
-            selected = Some(value.to_owned());
-            continue;
+        match text {
+            "--provider" | "--worker-model" | "--worker-effort-lock" => {
+                let Some(value) = iter.next().and_then(|value| value.to_str()) else {
+                    return Err(format!("{text} requires a value"));
+                };
+                assign_run_option(&mut options, text, value);
+                continue;
+            }
+            _ => {}
         }
-        if let Some(value) = text.strip_prefix("--provider=") {
-            selected = Some(value.to_owned());
+        if let Some(value) = text
+            .strip_prefix("--provider=")
+            .or_else(|| text.strip_prefix("--worker-model="))
+            .or_else(|| text.strip_prefix("--worker-effort-lock="))
+        {
+            assign_run_option(
+                &mut options,
+                &text[..text.find('=').unwrap_or(text.len())],
+                value,
+            );
             continue;
         }
         remaining.push(argument.clone());
     }
-    Ok((selected, remaining))
+    Ok((options, remaining))
+}
+
+fn assign_run_option(options: &mut RunOptions, flag: &str, value: &str) {
+    match flag {
+        "--provider" => options.provider = Some(value.to_owned()),
+        "--worker-model" => options.worker_model = Some(value.to_owned()),
+        "--worker-effort-lock" => options.worker_effort_lock = Some(value.to_owned()),
+        _ => {}
+    }
+}
+
+/// Validate a run-scoped `--worker-model` value without persisting it.
+fn parse_worker_model_override(value: &str) -> Result<String> {
+    if value.trim().is_empty() || value.chars().any(char::is_whitespace) {
+        return Err(anyhow!(
+            "--worker-model requires a non-empty model id without whitespace"
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+/// Validate a run-scoped `--worker-effort-lock` value (`off` clears the lock)
+/// without persisting it.  Fail-closed on an unknown effort.
+fn parse_effort_lock_override(value: &str) -> Result<Option<WorkerEffort>> {
+    if value == "off" {
+        return Ok(None);
+    }
+    value.parse::<WorkerEffort>().map(Some).map_err(|_| {
+        anyhow!("--worker-effort-lock must be none, low, medium, high, xhigh, max, or off")
+    })
 }
 
 /// Validate a run-selected `--provider` id against the persisted profile
@@ -1065,7 +1119,11 @@ fn select_chat_model(
         .ok_or_else(|| anyhow!("active provider has an empty model allowlist (fail closed)"))
 }
 
-async fn run_chat(arguments: Vec<OsString>, run_active: Option<&ProviderId>) -> Result<i32> {
+async fn run_chat(
+    arguments: Vec<OsString>,
+    run_active: Option<&ProviderId>,
+    run_worker_model: Option<&str>,
+) -> Result<i32> {
     let args = match ChatArgs::try_parse_from(with_command_program_name(arguments, "mindcode chat"))
     {
         Ok(args) => args,
@@ -1086,7 +1144,11 @@ async fn run_chat(arguments: Vec<OsString>, run_active: Option<&ProviderId>) -> 
                 credential_ref_kind(provider)
             )
         })?;
-    let model = select_chat_model(&settings, provider, args.model.as_deref())?;
+    let model = select_chat_model(
+        &settings,
+        provider,
+        args.model.as_deref().or(run_worker_model),
+    )?;
     let transport = Transport::new(&provider.base_url).map_err(anyhow::Error::msg)?;
 
     match provider.protocol {
@@ -1592,31 +1654,61 @@ mod tests {
     }
 
     #[test]
-    fn scan_provider_option_extracts_both_spellings_and_keeps_the_rest() {
-        let (selected, remaining) = scan_provider_option(&[
+    fn scan_run_options_extracts_all_flags_both_spellings_and_keeps_the_rest() {
+        let (options, remaining) = scan_run_options(&[
             OsString::from("--provider"),
             OsString::from("vexzy"),
+            OsString::from("--worker-model"),
+            OsString::from("gpt-5.6-luna"),
+            OsString::from("--worker-effort-lock"),
+            OsString::from("max"),
             OsString::from("auth"),
             OsString::from("status"),
         ])
         .unwrap();
-        assert_eq!(selected.as_deref(), Some("vexzy"));
+        assert_eq!(options.provider.as_deref(), Some("vexzy"));
+        assert_eq!(options.worker_model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(options.worker_effort_lock.as_deref(), Some("max"));
         assert_eq!(
             remaining,
             vec![OsString::from("auth"), OsString::from("status")]
         );
 
-        let (selected, remaining) =
-            scan_provider_option(&[OsString::from("--provider=vexzy"), OsString::from("list")])
-                .unwrap();
-        assert_eq!(selected.as_deref(), Some("vexzy"));
+        let (options, remaining) = scan_run_options(&[
+            OsString::from("--provider=vexzy"),
+            OsString::from("--worker-model=gpt-5.6-luna"),
+            OsString::from("--worker-effort-lock=off"),
+            OsString::from("list"),
+        ])
+        .unwrap();
+        assert_eq!(options.provider.as_deref(), Some("vexzy"));
+        assert_eq!(options.worker_model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(options.worker_effort_lock.as_deref(), Some("off"));
         assert_eq!(remaining, vec![OsString::from("list")]);
 
-        assert!(scan_provider_option(&[OsString::from("--provider")]).is_err());
-        let (selected, remaining) =
-            scan_provider_option(&[OsString::from("provider"), OsString::from("list")]).unwrap();
-        assert!(selected.is_none());
+        assert!(scan_run_options(&[OsString::from("--provider")]).is_err());
+        assert!(scan_run_options(&[OsString::from("--worker-model")]).is_err());
+        assert!(scan_run_options(&[OsString::from("--worker-effort-lock")]).is_err());
+        let (options, remaining) =
+            scan_run_options(&[OsString::from("provider"), OsString::from("list")]).unwrap();
+        assert!(options.provider.is_none());
+        assert!(options.worker_model.is_none());
+        assert!(options.worker_effort_lock.is_none());
         assert_eq!(remaining.len(), 2);
+    }
+
+    #[test]
+    fn worker_model_and_effort_lock_overrides_validate_fail_closed() {
+        assert!(parse_worker_model_override("gpt-5.6-luna").is_ok());
+        assert!(parse_worker_model_override("").is_err());
+        assert!(parse_worker_model_override("two words").is_err());
+
+        assert!(parse_effort_lock_override("off").unwrap().is_none());
+        assert_eq!(
+            parse_effort_lock_override("max").unwrap(),
+            Some(WorkerEffort::Max)
+        );
+        assert!(parse_effort_lock_override("auto").is_err());
     }
 
     #[test]
