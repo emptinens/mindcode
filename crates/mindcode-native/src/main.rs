@@ -27,6 +27,7 @@ use mindcoded::{Daemon, DaemonConfig};
 use serde_json::{json, Value};
 use std::{
     env, ffi::OsString, fs, io, io::BufRead, path::PathBuf, process, sync::Arc, time::Duration,
+    time::Instant,
 };
 
 const VERSION: &str = "0.1.3";
@@ -34,6 +35,9 @@ const API_KEY_ENV: &str = "VEXZY_API_KEY";
 /// The only stdout write of `settings key`; asserting the constant guarantees
 /// the credential value and the store path can never be echoed.
 const SETTINGS_KEY_CONFIRMATION: &str = "configured";
+/// Minimum delay between TUI snapshot republishes while a chat turn streams;
+/// tokens still accumulate locally between publishes.
+const STREAM_REPUBLISH_INTERVAL: Duration = Duration::from_millis(120);
 
 #[derive(Debug, Parser)]
 #[command(
@@ -1155,7 +1159,28 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
         while let Some(action) = action_rx.recv().await {
             if action.action == "composer_submit" {
                 let Some(text) = action.value else { continue };
-                let outcome = dispatch_tui_input(&text, &mut transcript).await;
+                // Republish a fresh snapshot as the assistant turn streams so
+                // tokens appear incrementally, throttled so the socket is not
+                // flooded on every delta.
+                let republish = {
+                    let server = processor_server.clone();
+                    let mut last_publish = Instant::now() - STREAM_REPUBLISH_INTERVAL;
+                    move |transcript: &TuiTranscript| {
+                        let now = Instant::now();
+                        if now.duration_since(last_publish) >= STREAM_REPUBLISH_INTERVAL {
+                            last_publish = now;
+                            // Fire-and-forget: the projection revision is
+                            // monotonic, so the client drops any intermediate
+                            // snapshot that lands after the final one.
+                            let snapshot = tui_snapshot(&transcript.entries);
+                            let server = server.clone();
+                            tokio::spawn(async move {
+                                let _ = server.publish(&snapshot).await;
+                            });
+                        }
+                    }
+                };
+                let outcome = dispatch_tui_input_streaming(&text, &mut transcript, republish).await;
                 match outcome {
                     Ok(true) => {
                         let _ = processor_server
@@ -1221,6 +1246,23 @@ impl TuiTranscript {
             text: text.into(),
         });
     }
+
+    /// Append a streamed delta to the most recent entry (the in-progress
+    /// assistant turn), leaving a `Block` entry untouched.
+    fn append_last(&mut self, text: &str) {
+        let Some(TranscriptInput::Entry { text: current, .. }) = self.entries.last_mut() else {
+            return;
+        };
+        current.push_str(text);
+    }
+
+    /// Replace the most recent entry's text with the final, trimmed value.
+    fn set_last(&mut self, text: impl Into<String>) {
+        let Some(TranscriptInput::Entry { text: current, .. }) = self.entries.last_mut() else {
+            return;
+        };
+        *current = text.into();
+    }
 }
 
 /// The transcript entry shown on a fresh dashboard, before the first turn.
@@ -1271,13 +1313,24 @@ Commands (type and press Enter):
 /// else is a live chat turn through the active provider.  Returns `Ok(true)`
 /// when the snapshot must be republished (a transcript entry was added or
 /// settings changed); the credential value never enters the transcript.
+#[cfg(test)]
 async fn dispatch_tui_input(text: &str, transcript: &mut TuiTranscript) -> Result<bool> {
+    dispatch_tui_input_streaming(text, transcript, |_| {}).await
+}
+
+/// Like [`dispatch_tui_input`], but republishes through `on_progress` while a
+/// live chat turn streams, so the renderer can show tokens as they arrive.
+async fn dispatch_tui_input_streaming(
+    text: &str,
+    transcript: &mut TuiTranscript,
+    mut on_progress: impl FnMut(&TuiTranscript),
+) -> Result<bool> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Ok(false);
     }
     let Some(rest) = trimmed.strip_prefix('/') else {
-        chat_tui_turn(trimmed, transcript).await?;
+        chat_tui_turn(trimmed, transcript, &mut on_progress).await?;
         return Ok(true);
     };
     let mut tokens = rest.splitn(2, char::is_whitespace);
@@ -1392,7 +1445,7 @@ async fn dispatch_tui_input(text: &str, transcript: &mut TuiTranscript) -> Resul
             if argument.is_empty() {
                 return Err(anyhow!("usage: /chat <text>"));
             }
-            chat_tui_turn(argument, transcript).await?;
+            chat_tui_turn(argument, transcript, &mut on_progress).await?;
             Ok(true)
         }
         "allowlist" => {
@@ -1461,19 +1514,32 @@ async fn dispatch_tui_input(text: &str, transcript: &mut TuiTranscript) -> Resul
 
 /// Append the user prompt, stream a completion through the active provider and
 /// append the assistant reply (or a secret-free error line) to the transcript.
-async fn chat_tui_turn(prompt: &str, transcript: &mut TuiTranscript) -> Result<()> {
+/// Each text delta is appended to the in-progress assistant entry and handed to
+/// `on_progress` so the renderer can repaint tokens as they arrive.
+async fn chat_tui_turn(
+    prompt: &str,
+    transcript: &mut TuiTranscript,
+    mut on_progress: impl FnMut(&TuiTranscript),
+) -> Result<()> {
     transcript.push("user", prompt);
-    match chat_completion_text(prompt, None, None).await {
+    transcript.push("assistant", String::new());
+    let outcome = chat_completion_with_chunks(prompt, None, None, |delta| {
+        transcript.append_last(delta);
+        on_progress(transcript);
+    })
+    .await;
+    match outcome {
         Ok(text) => {
             let text = text.trim();
             if text.is_empty() {
-                transcript.push("system", "(empty response)");
+                transcript.set_last("(empty response)");
             } else {
-                transcript.push("assistant", text);
+                transcript.set_last(text);
             }
         }
-        Err(error) => transcript.push("system", format!("chat failed: {error:#}")),
+        Err(error) => transcript.set_last(format!("chat failed: {error:#}")),
     }
+    on_progress(transcript);
     Ok(())
 }
 
@@ -1740,6 +1806,17 @@ async fn chat_completion_text(
     model_override: Option<&str>,
     run_active: Option<&ProviderId>,
 ) -> Result<String> {
+    chat_completion_with_chunks(prompt, model_override, run_active, |_| {}).await
+}
+
+/// Like [`chat_completion_text`], but hands every received text delta to
+/// `on_chunk` as it arrives so a live caller can repaint incrementally.
+async fn chat_completion_with_chunks(
+    prompt: &str,
+    model_override: Option<&str>,
+    run_active: Option<&ProviderId>,
+    mut on_chunk: impl FnMut(&str),
+) -> Result<String> {
     let settings = load_native_settings()?;
     let Some(provider) = run_active_provider_config(&settings, run_active) else {
         return Err(anyhow!("no active provider is configured"));
@@ -1779,6 +1856,7 @@ async fn chat_completion_text(
                 for choice in chunk.choices {
                     if let Some(content) = choice.delta.content {
                         output.push_str(&content);
+                        on_chunk(&content);
                     }
                 }
             }
@@ -1803,11 +1881,13 @@ async fn chat_completion_text(
                 if let Some(delta) = chunk.delta {
                     if let Some(text) = delta.text {
                         output.push_str(&text);
+                        on_chunk(&text);
                     }
                 }
                 if let Some(block) = chunk.content_block {
                     if let Some(text) = block.text {
                         output.push_str(&text);
+                        on_chunk(&text);
                     }
                 }
             }
@@ -2719,6 +2799,84 @@ mod tests {
             with_env_var("VEXZY_API_KEY", "forge-test-key", || {
                 let inputs = providers_input(&load_sandbox_settings(dir));
                 assert_eq!(inputs[0].configured, Some(true));
+            });
+        });
+    }
+
+    /// One-shot loopback SSE server: serves a fixed `data:` event stream for a
+    /// single connection.  Only used by the incremental-streaming test; the
+    /// credential is a test-only placeholder.
+    async fn spawn_sse_mock(
+        events: &[&str],
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect::<String>();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0_u8; 8192];
+            let _ = stream.read(&mut buffer).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+        (addr, handle)
+    }
+
+    #[test]
+    fn chat_completion_with_chunks_delivers_deltas_incrementally() {
+        with_sandbox_env(|dir| {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let (addr, server) = spawn_sse_mock(&[
+                    r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"model-alpha","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}"#,
+                    r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"model-alpha","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}"#,
+                    r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"model-alpha","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}"#,
+                    r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"model-alpha","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+                    "[DONE]",
+                ])
+                .await;
+
+                let mut settings = NativeSettings::default();
+                settings
+                    .add_provider(profile(
+                        "mock",
+                        "Mock",
+                        Protocol::OpenAiCompatible,
+                        &format!("http://{addr}/v1"),
+                        CredentialRef::env("MOCK_KEY"),
+                        &["model-alpha"],
+                    ))
+                    .unwrap();
+                settings
+                    .set_active_provider(&ProviderId::new("mock".to_owned()).unwrap())
+                    .unwrap();
+                seed_settings(dir, &settings);
+
+                let previous = env::var_os("MOCK_KEY");
+                env::set_var("MOCK_KEY", "mock-key");
+                let mut deltas = Vec::new();
+                let text = chat_completion_with_chunks("hi", None, None, |delta| {
+                    deltas.push(delta.to_owned());
+                })
+                .await
+                .unwrap();
+                match previous {
+                    Some(value) => env::set_var("MOCK_KEY", value),
+                    None => env::remove_var("MOCK_KEY"),
+                }
+
+                assert_eq!(text, "Hello world");
+                assert_eq!(deltas, ["Hello".to_owned(), " world".to_owned()]);
+                server.await.unwrap();
             });
         });
     }
