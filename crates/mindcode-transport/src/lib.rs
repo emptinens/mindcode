@@ -2,7 +2,8 @@
 //!
 //! Owns the two wire protocols of the 0.1.3 multi-provider contract:
 //! `openai-compatible` (`GET /models`, `POST /chat/completions`) and
-//! `anthropic-compatible` (`POST /v1/messages`). Both authenticate with a
+//! `anthropic-compatible` (`GET /v1/models`, `POST /v1/messages`). Both
+//! authenticate with a
 //! `Bearer` header built exclusively from the opaque [`SecretKey`]; the key
 //! value can never appear in any [`TransportError`] `Display`, `Debug`, or
 //! serialized diagnostic. Response bodies are never echoed into errors, all
@@ -16,7 +17,7 @@
 
 use futures_util::stream::{unfold, Stream};
 use futures_util::StreamExt;
-use mindcode_provider::{ModelId, SecretKey};
+use mindcode_provider::{ModelId, Protocol, SecretKey};
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -149,6 +150,34 @@ pub struct CatalogRow {
 pub struct ModelCatalog {
     pub object: String,
     pub data: Vec<CatalogRow>,
+}
+
+/// One row of the `anthropic-compatible` `GET {base_url}/v1/models` list.
+///
+/// The wire shape is deliberately strict: every field must be present and
+/// unknown fields are rejected, so a malformed page fails closed instead of
+/// being partially projected.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnthropicModelRow {
+    pub id: String,
+    pub r#type: String,
+    pub created_at: String,
+    pub display_name: String,
+}
+
+/// The typed `anthropic-compatible` `GET {base_url}/v1/models` response.
+///
+/// The pagination fields (`has_more`, `first_id`, `last_id`) are projected
+/// for completeness; the 0.1.3 transport returns the first page only and
+/// never follows `has_more`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnthropicModelList {
+    pub data: Vec<AnthropicModelRow>,
+    pub has_more: bool,
+    pub first_id: Option<String>,
+    pub last_id: Option<String>,
 }
 
 /// One request message shared by both chat protocols.
@@ -332,6 +361,59 @@ impl Transport {
             ids.push(id);
         }
         Ok(ids)
+    }
+
+    /// Fetch and validate model ids from the `anthropic-compatible`
+    /// `GET {base_url}/v1/models` endpoint.
+    ///
+    /// Parses the Anthropic list format (`data` rows with `id`, `type`,
+    /// `created_at`, and `display_name`). Only the first page is returned:
+    /// `has_more` pagination is intentionally not followed in this release.
+    /// A page with a malformed row, an invalid id, or a duplicated id fails
+    /// closed.
+    pub async fn fetch_anthropic_models(
+        &self,
+        key: &SecretKey,
+    ) -> Result<Vec<ModelId>, TransportError> {
+        let response = self
+            .client
+            .get(format!("{}/v1/models", self.base_url))
+            .bearer_auth(key.as_secret())
+            .send()
+            .await
+            .map_err(map_reqwest_error)?;
+        let response = expect_success(response)?;
+        let body = read_bounded_body(response, MAX_RESPONSE_BYTES).await?;
+        let list: AnthropicModelList =
+            serde_json::from_slice(&body).map_err(|_| TransportError::InvalidJson)?;
+        let mut seen = HashSet::with_capacity(list.data.len());
+        let mut ids = Vec::with_capacity(list.data.len());
+        for (index, row) in list.data.iter().enumerate() {
+            let id = ModelId::new(row.id.clone())
+                .map_err(|_| TransportError::InvalidCatalog { index })?;
+            if !seen.insert(id.clone()) {
+                return Err(TransportError::InvalidCatalog { index });
+            }
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    /// Fetch and validate model ids through the active provider protocol.
+    ///
+    /// Dispatches to the protocol's model-list endpoint:
+    /// `openai-compatible` fetches `GET {base_url}/models`,
+    /// `anthropic-compatible` fetches `GET {base_url}/v1/models`. Errors are
+    /// typed and never contain the credential value or any response body.
+    pub async fn fetch_provider_model_ids(
+        &self,
+        protocol: &Protocol,
+        key: &SecretKey,
+    ) -> Result<Vec<ModelId>, TransportError> {
+        match protocol {
+            Protocol::OpenAiCompatible => self.fetch_model_ids(key).await,
+            Protocol::AnthropicCompatible => self.fetch_anthropic_models(key).await,
+        }
     }
 
     /// Stream `openai-compatible` chat chunks from

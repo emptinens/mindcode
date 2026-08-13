@@ -1,0 +1,21 @@
+MindCode native Rust foundation (multi-provider)
+
+Usage: mindcode [PROMPT]...
+
+Arguments:
+  [PROMPT]...  Regular prompt (chat runtime is not migrated yet)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+
+Commands:
+  auth status       Show active provider authentication status
+  model eligible    Inspect eligible Worker models in a supplied VEXZY catalog
+  effort worker     Validate a Worker model and optional effort lock in a supplied catalog
+  provider          Manage provider profiles (list, use, add, remove, edit)
+  settings          Manage settings (show, key, allowlist, model, effort lock)
+  setup-token       Show VEXZY_API_KEY setup instructions
+  doctor            Check native/VEXZY foundation health
+  update            Show local checkout update instructions
+  daemon            Run the native mindcoded daemon in-process

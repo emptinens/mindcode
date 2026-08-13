@@ -17,6 +17,8 @@ pub const TEST_API_KEY: &str = "test-transport-key-9f8e7d6c5b4a";
 
 const CATALOG_JSON: &[u8] = br#"{"object":"list","data":[{"id":"model-alpha"},{"id":"model-beta","owned_by":"tests"},{"id":"model-gamma"}]}"#;
 
+const ANTHROPIC_CATALOG_JSON: &[u8] = br#"{"data":[{"id":"claude-sonnet-4-5","type":"model","created_at":"2025-07-01T00:00:00.000Z","display_name":"Claude Sonnet 4.5"},{"id":"claude-haiku-4-5","type":"model","created_at":"2025-07-01T00:00:00.000Z","display_name":"Claude Haiku 4.5"}],"has_more":false,"first_id":"claude-sonnet-4-5","last_id":"claude-haiku-4-5"}"#;
+
 const CHAT_CHUNK_ROLE: &str = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"model-alpha","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}"#;
 const CHAT_CHUNK_HELLO: &str = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"model-alpha","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}"#;
 const CHAT_CHUNK_WORLD: &str = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"model-alpha","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}"#;
@@ -36,6 +38,8 @@ const MESSAGE_DELTA_STOP: &str = r#"{"type":"message_delta","delta":{"stop_reaso
 pub struct MockRoutes {
     pub models_status: u16,
     pub models_body: Vec<u8>,
+    pub v1_models_status: u16,
+    pub v1_models_body: Vec<u8>,
     pub chat_status: u16,
     pub chat_events: Vec<String>,
     pub messages_status: u16,
@@ -48,6 +52,8 @@ impl Default for MockRoutes {
         Self {
             models_status: 200,
             models_body: CATALOG_JSON.to_vec(),
+            v1_models_status: 200,
+            v1_models_body: ANTHROPIC_CATALOG_JSON.to_vec(),
             chat_status: 200,
             chat_events: vec![
                 CHAT_CHUNK_ROLE.to_owned(),
@@ -164,6 +170,11 @@ async fn handle_connection(
         ("GET", "/models") => {
             http_response(routes.models_status, "application/json", routes.models_body)
         }
+        ("GET", "/v1/models") => http_response(
+            routes.v1_models_status,
+            "application/json",
+            routes.v1_models_body,
+        ),
         ("POST", "/chat/completions") => sse_response(routes.chat_status, &routes.chat_events),
         ("POST", "/v1/messages") => sse_response(routes.messages_status, &routes.messages_events),
         _ => http_response(404, "text/plain", b"not found".to_vec()),

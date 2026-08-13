@@ -1,28 +1,37 @@
 //! Rust-first single-executable foundation for MindCode.
 //!
 //! The native binary deliberately keeps the supported surface small: daemon
-//! lifecycle and VEXZY-only authentication/status commands are native today;
+//! lifecycle, multi-provider profile management, secret-free settings
+//! persistence, and provider-aware authentication status are native today;
 //! regular chat prompts remain an explicit migration diagnostic.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{error::ErrorKind, Parser, Subcommand};
+use mindcode_provider::{
+    default_store_path, load_store, save_store, CredentialRef, ModelId, Protocol, ProviderConfig,
+    ProviderId, SecretKey,
+};
+use mindcode_settings::{default_settings_path, load_settings, save_settings, NativeSettings};
 use mindcode_vexzy::{
     eligible_worker_models, parse_vexzy_model_catalog, VexzyModel, VexzyModelCatalog, WorkerEffort,
 };
 use mindcoded::{Daemon, DaemonConfig};
-use serde_json::json;
-use std::{env, ffi::OsString, fs, path::PathBuf, process, time::Duration};
+use serde_json::{json, Value};
+use std::{env, ffi::OsString, fs, io, io::BufRead, path::PathBuf, process, time::Duration};
 
 const VERSION: &str = "0.1.3";
 const API_KEY_ENV: &str = "VEXZY_API_KEY";
 const NATIVE_CHAT_NOT_MIGRATED: &str = "native chat runtime is not migrated yet";
+/// The only stdout write of `settings key`; asserting the constant guarantees
+/// the credential value and the store path can never be echoed.
+const SETTINGS_KEY_CONFIRMATION: &str = "configured";
 
 #[derive(Debug, Parser)]
 #[command(
     name = "mindcode",
     version = VERSION,
-    about = "MindCode native Rust foundation (VEXZY-only)",
-    after_help = "Commands:\n  auth status       Show VEXZY_API_KEY authentication status\n  model eligible    Inspect eligible Worker models in a supplied VEXZY catalog\n  effort worker     Validate a Worker model and optional effort lock in a supplied catalog\n  setup-token       Show VEXZY_API_KEY setup instructions\n  doctor            Check native/VEXZY foundation health\n  update            Show local checkout update instructions\n  daemon            Run the native mindcoded daemon in-process"
+    about = "MindCode native Rust foundation (multi-provider)",
+    after_help = "Commands:\n  auth status       Show active provider authentication status\n  model eligible    Inspect eligible Worker models in a supplied VEXZY catalog\n  effort worker     Validate a Worker model and optional effort lock in a supplied catalog\n  provider          Manage provider profiles (list, use, add, remove, edit)\n  settings          Manage settings (show, key, allowlist, model, effort lock)\n  setup-token       Show VEXZY_API_KEY setup instructions\n  doctor            Check native/VEXZY foundation health\n  update            Show local checkout update instructions\n  daemon            Run the native mindcoded daemon in-process"
 )]
 struct RootArgs {
     #[arg(
@@ -34,7 +43,11 @@ struct RootArgs {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "mindcode auth", version = VERSION, about = "VEXZY-only authentication")]
+#[command(
+    name = "mindcode auth",
+    version = VERSION,
+    about = "Provider-aware authentication"
+)]
 struct AuthArgs {
     #[command(subcommand)]
     command: AuthCommand,
@@ -42,7 +55,7 @@ struct AuthArgs {
 
 #[derive(Debug, Subcommand)]
 enum AuthCommand {
-    #[command(name = "status", about = "Show VEXZY_API_KEY authentication status")]
+    #[command(name = "status", about = "Show active provider authentication status")]
     Status(AuthStatusArgs),
 }
 
@@ -131,15 +144,200 @@ struct WorkerEffortArgs {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "mindcode setup-token", version = VERSION, about = "Show VEXZY API key setup instructions")]
+#[command(
+    name = "mindcode provider",
+    version = VERSION,
+    about = "Manage provider profiles"
+)]
+struct ProviderArgs {
+    #[command(subcommand)]
+    command: ProviderCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ProviderCommand {
+    #[command(name = "list", about = "List provider profiles with the active marker")]
+    List,
+    #[command(name = "use", about = "Set the active provider profile (persisted)")]
+    Use(ProviderIdArg),
+    #[command(name = "add", about = "Add a provider profile")]
+    Add(ProviderAddArgs),
+    #[command(name = "remove", about = "Remove a provider profile")]
+    Remove(ProviderIdArg),
+    #[command(name = "edit", about = "Edit a provider profile (id is immutable)")]
+    Edit(ProviderEditArgs),
+}
+
+#[derive(Debug, Parser)]
+struct ProviderIdArg {
+    #[arg(value_name = "ID", help = "Provider profile id")]
+    id: String,
+}
+
+#[derive(Debug, Parser)]
+struct ProviderAddArgs {
+    #[arg(long, value_name = "ID", help = "Profile id (immutable afterwards)")]
+    id: String,
+    #[arg(long, value_name = "NAME", help = "Display name")]
+    name: String,
+    #[arg(
+        long,
+        value_name = "PROTOCOL",
+        help = "openai-compatible or anthropic-compatible"
+    )]
+    protocol: String,
+    #[arg(
+        long,
+        value_name = "URL",
+        help = "Absolute https:// or http:// base URL"
+    )]
+    base_url: String,
+    #[arg(
+        long,
+        value_name = "ENV_VAR",
+        conflicts_with = "credential_store",
+        help = "Credential environment variable name"
+    )]
+    credential_env: Option<String>,
+    #[arg(
+        long,
+        value_name = "STORE_ID",
+        conflicts_with = "credential_env",
+        help = "Credential secret-store key"
+    )]
+    credential_store: Option<String>,
+    #[arg(
+        long,
+        value_name = "ID,ID,...",
+        help = "Comma-separated Worker model allowlist"
+    )]
+    allowlist: Option<String>,
+}
+
+#[derive(Debug, Parser)]
+struct ProviderEditArgs {
+    #[arg(value_name = "ID", help = "Provider profile id (immutable)")]
+    id: String,
+    #[arg(long, value_name = "NAME")]
+    name: Option<String>,
+    #[arg(
+        long,
+        value_name = "PROTOCOL",
+        help = "openai-compatible or anthropic-compatible"
+    )]
+    protocol: Option<String>,
+    #[arg(long, value_name = "URL")]
+    base_url: Option<String>,
+    #[arg(long, value_name = "ID,ID,...")]
+    allowlist: Option<String>,
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "mindcode settings",
+    version = VERSION,
+    about = "Manage secret-free native settings"
+)]
+struct SettingsArgs {
+    #[command(subcommand)]
+    command: SettingsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum SettingsCommand {
+    #[command(
+        name = "show",
+        about = "Show active provider, profiles, Worker model and effort lock"
+    )]
+    Show,
+    #[command(
+        name = "key",
+        about = "Write a credential into the secret store (value never echoed)"
+    )]
+    Key(SettingsKeyArgs),
+    #[command(name = "allowlist", about = "Set a profile's Worker model allowlist")]
+    Allowlist(SettingsAllowlistArgs),
+    #[command(name = "model", about = "Set the global Worker model")]
+    Model(SettingsModelArgs),
+    #[command(name = "effort", about = "Manage the global Worker effort lock")]
+    Effort(SettingsEffortArgs),
+}
+
+#[derive(Debug, Parser)]
+struct SettingsKeyArgs {
+    #[arg(
+        value_name = "PROVIDER_ID",
+        help = "Provider id the credential is stored under"
+    )]
+    provider_id: String,
+    #[arg(
+        long,
+        value_name = "ENV_VAR",
+        help = "Read the credential from this environment variable"
+    )]
+    from_env: Option<String>,
+}
+
+#[derive(Debug, Parser)]
+struct SettingsAllowlistArgs {
+    #[arg(value_name = "PROVIDER_ID")]
+    provider_id: String,
+    #[arg(
+        value_name = "ID,ID,...",
+        help = "Comma-separated model ids; empty clears the allowlist"
+    )]
+    allowlist: String,
+}
+
+#[derive(Debug, Parser)]
+struct SettingsModelArgs {
+    #[arg(value_name = "MODEL_ID")]
+    id: String,
+}
+
+#[derive(Debug, Parser)]
+struct SettingsEffortArgs {
+    #[command(subcommand)]
+    command: SettingsEffortCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum SettingsEffortCommand {
+    #[command(name = "lock", about = "Set or unset the global Worker effort lock")]
+    Lock(SettingsEffortLockArgs),
+}
+
+#[derive(Debug, Parser)]
+struct SettingsEffortLockArgs {
+    #[arg(
+        value_name = "EFFORT|off",
+        help = "off, none, low, medium, high, xhigh, or max"
+    )]
+    value: String,
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "mindcode setup-token",
+    version = VERSION,
+    about = "Show VEXZY API key setup instructions"
+)]
 struct SetupTokenArgs {}
 
 #[derive(Debug, Parser)]
-#[command(name = "mindcode doctor", version = VERSION, about = "Check native/VEXZY foundation health")]
+#[command(
+    name = "mindcode doctor",
+    version = VERSION,
+    about = "Check native/VEXZY foundation health"
+)]
 struct DoctorArgs {}
 
 #[derive(Debug, Parser)]
-#[command(name = "mindcode update", version = VERSION, about = "Show local checkout update instructions")]
+#[command(
+    name = "mindcode update",
+    version = VERSION,
+    about = "Show local checkout update instructions"
+)]
 struct UpdateArgs {}
 
 #[derive(Debug, Parser)]
@@ -171,31 +369,84 @@ async fn main() {
 }
 
 async fn dispatch(arguments: Vec<OsString>) -> Result<i32> {
+    let (selected_provider, arguments) =
+        scan_provider_option(&arguments).map_err(anyhow::Error::msg)?;
+    let run_active = match selected_provider {
+        Some(id) => Some(resolve_run_provider(&id)?),
+        None => None,
+    };
+
     let Some(first) = arguments.first().and_then(|arg| arg.to_str()) else {
-        return Ok(run_regular_prompt(None));
+        return run_regular_prompt(None, run_active.as_ref());
     };
 
     match first {
-        "auth" => run_auth(arguments),
+        "auth" => run_auth(arguments, run_active.as_ref()),
         "model" => run_model(arguments),
         "effort" => run_effort(arguments),
+        "provider" => run_provider(arguments, run_active.as_ref()),
+        "settings" => run_settings(arguments, run_active.as_ref()),
         "setup-token" => run_setup_token(arguments),
         "doctor" => run_doctor(arguments),
         "update" | "upgrade" => run_update(arguments),
         "daemon" => run_daemon(arguments).await,
-        "-h" | "--help" | "-V" | "--version" => run_root_parser(arguments),
-        value if value.starts_with('-') => run_root_parser(arguments),
+        "-h" | "--help" | "-V" | "--version" => run_root_parser(arguments, run_active.as_ref()),
+        value if value.starts_with('-') => run_root_parser(arguments, run_active.as_ref()),
         // Removed TUI commands surface as a stable unknown-command error
         // before any prompt path runs. No alias or hidden route is registered.
         "config" | "submodel" => run_removed_command(first),
         value if value.starts_with('/') => run_removed_command(value),
-        _ => Ok(run_regular_prompt(Some(first))),
+        _ => run_regular_prompt(Some(first), run_active.as_ref()),
     }
 }
 
-fn run_root_parser(arguments: Vec<OsString>) -> Result<i32> {
+/// Extract a global `--provider <id>` / `--provider=<id>` option from the raw
+/// argument list before clap parsing.  Both spellings are accepted anywhere on
+/// the command line, including before the subcommand name.  The option selects
+/// the run's active provider without persisting anything; malformed values
+/// fail closed in [`resolve_run_provider`].
+fn scan_provider_option(arguments: &[OsString]) -> Result<(Option<String>, Vec<OsString>), String> {
+    let mut selected = None;
+    let mut remaining = Vec::new();
+    let mut iter = arguments.iter();
+    while let Some(argument) = iter.next() {
+        let Some(text) = argument.to_str() else {
+            remaining.push(argument.clone());
+            continue;
+        };
+        if text == "--provider" {
+            let Some(value) = iter.next().and_then(|value| value.to_str()) else {
+                return Err("--provider requires a provider id value".to_owned());
+            };
+            selected = Some(value.to_owned());
+            continue;
+        }
+        if let Some(value) = text.strip_prefix("--provider=") {
+            selected = Some(value.to_owned());
+            continue;
+        }
+        remaining.push(argument.clone());
+    }
+    Ok((selected, remaining))
+}
+
+/// Validate a run-selected `--provider` id against the persisted profile
+/// table.  Unknown, empty, or malformed ids fail closed with exit 1.
+fn resolve_run_provider(id: &str) -> Result<ProviderId, anyhow::Error> {
+    if id.trim().is_empty() {
+        return Err(anyhow!("--provider requires a provider id value"));
+    }
+    let provider_id = ProviderId::new(id.to_owned()).map_err(anyhow::Error::msg)?;
+    let settings = load_native_settings()?;
+    if settings.provider(&provider_id).is_none() {
+        return Err(anyhow!("provider '{id}' is not configured"));
+    }
+    Ok(provider_id)
+}
+
+fn run_root_parser(arguments: Vec<OsString>, run_active: Option<&ProviderId>) -> Result<i32> {
     match RootArgs::try_parse_from(with_program_name(arguments)) {
-        Ok(args) => Ok(run_regular_prompt(args.prompt.first().map(String::as_str))),
+        Ok(args) => run_regular_prompt(args.prompt.first().map(String::as_str), run_active),
         Err(error) => Ok(print_clap_error(error)),
     }
 }
@@ -211,15 +462,43 @@ fn run_removed_command(command: &str) -> Result<i32> {
     Ok(1)
 }
 
-fn run_auth(arguments: Vec<OsString>) -> Result<i32> {
+fn run_auth(arguments: Vec<OsString>, run_active: Option<&ProviderId>) -> Result<i32> {
     let parsed =
         match AuthArgs::try_parse_from(with_command_program_name(arguments, "mindcode auth")) {
             Ok(args) => args,
             Err(error) => return Ok(print_clap_error(error)),
         };
     match parsed.command {
-        AuthCommand::Status(options) => Ok(run_auth_status(options)),
+        AuthCommand::Status(options) => run_auth_status(options, run_active),
     }
+}
+
+/// Resolve the active provider's credential (env -> secret store -> fail
+/// closed) and report only a secret-free status.  Exit 1 whenever the active
+/// provider's credential is missing or invalid.
+fn run_auth_status(options: AuthStatusArgs, run_active: Option<&ProviderId>) -> Result<i32> {
+    let settings = load_native_settings()?;
+    let Some(provider) = run_active_provider_config(&settings, run_active) else {
+        return Err(anyhow!("no active provider is configured"));
+    };
+    let store = load_store(&native_store_path()?).map_err(anyhow::Error::msg)?;
+    let configured = store
+        .resolve(&provider.credential, |name| env::var(name).ok())
+        .is_ok();
+    if options.text {
+        println!(
+            "{}: {}",
+            auth_provider_summary(provider),
+            if configured {
+                "configured"
+            } else {
+                "not configured"
+            }
+        );
+    } else {
+        println!("{}", auth_status_value(provider, configured));
+    }
+    Ok(i32::from(!configured))
 }
 
 fn run_model(arguments: Vec<OsString>) -> Result<i32> {
@@ -264,6 +543,225 @@ fn run_effort(arguments: Vec<OsString>) -> Result<i32> {
             }
         }
     }
+}
+
+fn run_provider(arguments: Vec<OsString>, run_active: Option<&ProviderId>) -> Result<i32> {
+    let parsed = match ProviderArgs::try_parse_from(with_command_program_name(
+        arguments,
+        "mindcode provider",
+    )) {
+        Ok(args) => args,
+        Err(error) => return Ok(print_clap_error(error)),
+    };
+
+    match parsed.command {
+        ProviderCommand::List => run_provider_list(run_active),
+        ProviderCommand::Use(args) => run_provider_use(&args.id),
+        ProviderCommand::Add(args) => run_provider_add(args),
+        ProviderCommand::Remove(args) => run_provider_remove(&args.id),
+        ProviderCommand::Edit(args) => run_provider_edit(args),
+    }
+}
+
+fn run_provider_list(run_active: Option<&ProviderId>) -> Result<i32> {
+    let settings = load_native_settings()?;
+    println!(
+        "{}",
+        json!(providers_list_value(
+            &settings,
+            effective_active(&settings, run_active)
+        ))
+    );
+    Ok(0)
+}
+
+fn run_provider_use(id: &str) -> Result<i32> {
+    let id = parse_provider_id(id)?;
+    let mut settings = load_native_settings()?;
+    settings
+        .set_active_provider(&id)
+        .map_err(anyhow::Error::msg)?;
+    save_native_settings(&settings)?;
+    println!("active provider: {id}");
+    Ok(0)
+}
+
+fn run_provider_add(args: ProviderAddArgs) -> Result<i32> {
+    let id = parse_provider_id(&args.id)?;
+    if args.name.trim().is_empty() {
+        return Err(anyhow!("provider name must not be empty"));
+    }
+    let protocol = args
+        .protocol
+        .parse::<Protocol>()
+        .map_err(anyhow::Error::msg)?;
+    let scheme = validate_base_url(&args.base_url)?;
+    if scheme == "http" && !base_url_host_is_loopback(&args.base_url) {
+        eprintln!("mindcode: warning: non-loopback http base URL may be refused by the transport");
+    }
+    let credential = match (args.credential_env, args.credential_store) {
+        (Some(name), None) => {
+            if name.trim().is_empty() || name.chars().any(char::is_whitespace) {
+                return Err(anyhow!(
+                    "credential environment variable name must be a non-empty string without whitespace"
+                ));
+            }
+            CredentialRef::Env(name)
+        }
+        (None, Some(key)) => CredentialRef::Store(parse_provider_id(&key)?.to_string()),
+        (Some(_), Some(_)) => {
+            unreachable!("clap conflicts_with prevents both credential options")
+        }
+        (None, None) => {
+            return Err(anyhow!(
+                "one of --credential-env or --credential-store is required"
+            ));
+        }
+    };
+    let allowlist = parse_allowlist(args.allowlist.as_deref())?;
+    let mut settings = load_native_settings()?;
+    settings
+        .add_provider(ProviderConfig {
+            id: id.clone(),
+            name: args.name,
+            protocol,
+            base_url: args.base_url,
+            credential,
+            allowlist,
+            active: false,
+        })
+        .map_err(anyhow::Error::msg)?;
+    save_native_settings(&settings)?;
+    println!("added provider: {id}");
+    Ok(0)
+}
+
+fn run_provider_remove(id: &str) -> Result<i32> {
+    let id = parse_provider_id(id)?;
+    let mut settings = load_native_settings()?;
+    settings.remove_provider(&id).map_err(anyhow::Error::msg)?;
+    save_native_settings(&settings)?;
+    println!("removed provider: {id}");
+    Ok(0)
+}
+
+fn run_provider_edit(args: ProviderEditArgs) -> Result<i32> {
+    let id = parse_provider_id(&args.id)?;
+    let mut settings = load_native_settings()?;
+    let mut edited = settings
+        .provider(&id)
+        .cloned()
+        .ok_or_else(|| anyhow!("provider profile not found ({id})"))?;
+    if let Some(name) = args.name {
+        if name.trim().is_empty() {
+            return Err(anyhow!("provider name must not be empty"));
+        }
+        edited.name = name;
+    }
+    if let Some(protocol) = args.protocol {
+        edited.protocol = protocol.parse::<Protocol>().map_err(anyhow::Error::msg)?;
+    }
+    if let Some(base_url) = args.base_url {
+        let scheme = validate_base_url(&base_url)?;
+        if scheme == "http" && !base_url_host_is_loopback(&base_url) {
+            eprintln!(
+                "mindcode: warning: non-loopback http base URL may be refused by the transport"
+            );
+        }
+        edited.base_url = base_url;
+    }
+    if let Some(allowlist) = args.allowlist {
+        edited.allowlist = parse_allowlist(Some(&allowlist))?;
+    }
+    settings.edit_provider(edited).map_err(anyhow::Error::msg)?;
+    save_native_settings(&settings)?;
+    println!("updated provider: {id}");
+    Ok(0)
+}
+
+fn run_settings(arguments: Vec<OsString>, run_active: Option<&ProviderId>) -> Result<i32> {
+    let parsed = match SettingsArgs::try_parse_from(with_command_program_name(
+        arguments,
+        "mindcode settings",
+    )) {
+        Ok(args) => args,
+        Err(error) => return Ok(print_clap_error(error)),
+    };
+
+    match parsed.command {
+        SettingsCommand::Show => run_settings_show(run_active),
+        SettingsCommand::Key(args) => run_settings_key(args),
+        SettingsCommand::Allowlist(args) => run_settings_allowlist(args),
+        SettingsCommand::Model(args) => run_settings_model(args),
+        SettingsCommand::Effort(args) => run_settings_effort(args),
+    }
+}
+
+fn run_settings_show(run_active: Option<&ProviderId>) -> Result<i32> {
+    let settings = load_native_settings()?;
+    println!(
+        "{}",
+        settings_show_value(&settings, effective_active(&settings, run_active))
+    );
+    Ok(0)
+}
+
+fn run_settings_key(args: SettingsKeyArgs) -> Result<i32> {
+    let id = parse_provider_id(&args.provider_id)?;
+    let value = match args.from_env.as_deref() {
+        Some(name) => {
+            env::var(name).map_err(|_| anyhow!("environment variable '{name}' is not set"))?
+        }
+        None => read_credential_line(io::stdin().lock())?,
+    };
+    if value.trim().is_empty() {
+        return Err(anyhow!("credential value must not be empty"));
+    }
+    let path = native_store_path()?;
+    let mut store = load_store(&path).map_err(anyhow::Error::msg)?;
+    store.write(id, SecretKey::new(value));
+    save_store(&path, &store).map_err(anyhow::Error::msg)?;
+    println!("{SETTINGS_KEY_CONFIRMATION}");
+    Ok(0)
+}
+
+fn run_settings_allowlist(args: SettingsAllowlistArgs) -> Result<i32> {
+    let id = parse_provider_id(&args.provider_id)?;
+    let allowlist = parse_allowlist(Some(&args.allowlist))?;
+    let mut settings = load_native_settings()?;
+    settings
+        .set_allowlist(&id, allowlist)
+        .map_err(anyhow::Error::msg)?;
+    save_native_settings(&settings)?;
+    println!("allowlist for {id}: {}", args.allowlist);
+    Ok(0)
+}
+
+fn run_settings_model(args: SettingsModelArgs) -> Result<i32> {
+    let model = ModelId::new(args.id.clone()).map_err(anyhow::Error::msg)?;
+    let mut settings = load_native_settings()?;
+    settings.global_worker_model = Some(model.to_string());
+    save_native_settings(&settings)?;
+    println!("global worker model: {model}");
+    Ok(0)
+}
+
+fn run_settings_effort(args: SettingsEffortArgs) -> Result<i32> {
+    match args.command {
+        SettingsEffortCommand::Lock(args) => run_settings_effort_lock(args),
+    }
+}
+
+fn run_settings_effort_lock(args: SettingsEffortLockArgs) -> Result<i32> {
+    let lock = parse_worker_lock(Some(&args.value)).map_err(anyhow::Error::msg)?;
+    let mut settings = load_native_settings()?;
+    settings.worker_effort_lock = lock;
+    save_native_settings(&settings)?;
+    match lock {
+        Some(effort) => println!("worker effort lock: {effort}"),
+        None => println!("worker effort lock: off"),
+    }
+    Ok(0)
 }
 
 /// Read a catalog supplied explicitly by the caller.  This is deliberately
@@ -386,7 +884,7 @@ fn run_doctor(arguments: Vec<OsString>) -> Result<i32> {
             "not configured"
         }
     );
-    println!("Authentication: VEXZY-only (OAuth disabled)");
+    println!("Authentication: multi-provider (env -> secret store, fail-closed)");
     println!("Daemon: available (in-process mindcoded::Daemon)");
     println!("Chat runtime: {NATIVE_CHAT_NOT_MIGRATED}");
     Ok(0)
@@ -423,40 +921,28 @@ async fn run_daemon(arguments: Vec<OsString>) -> Result<i32> {
     Ok(0)
 }
 
-fn run_auth_status(options: AuthStatusArgs) -> i32 {
-    let configured = current_api_key().is_some();
-    if options.text {
-        if configured {
-            println!("{API_KEY_ENV}: configured");
-        } else {
-            println!("Not authenticated. Set {API_KEY_ENV} before starting MindCode.");
-        }
-    } else {
-        // Keep the key itself out of every output mode.
-        let mut output = json!({
-            "loggedIn": configured,
-            "authMethod": if configured { "vexzy_api_key" } else { "none" },
-            "apiProvider": "vexzy",
-        });
-        if configured {
-            output["apiKeySource"] = json!(API_KEY_ENV);
-        }
-        println!("{output}");
-    }
-    i32::from(!configured)
-}
-
-fn run_regular_prompt(_prompt: Option<&str>) -> i32 {
-    if current_api_key().is_none() {
+fn run_regular_prompt(_prompt: Option<&str>, run_active: Option<&ProviderId>) -> Result<i32> {
+    let settings = load_native_settings()?;
+    let Some(provider) = run_active_provider_config(&settings, run_active) else {
+        eprintln!("mindcode: no active provider is configured");
+        return Ok(1);
+    };
+    let store = load_store(&native_store_path()?).map_err(anyhow::Error::msg)?;
+    if store
+        .resolve(&provider.credential, |name| env::var(name).ok())
+        .is_err()
+    {
         eprintln!(
-            "{API_KEY_ENV} is not configured or invalid; set it to a non-empty forge-… value."
+            "mindcode: credential for provider '{}' is not configured ({})",
+            provider.id,
+            credential_ref_kind(provider)
         );
-        return 1;
+        return Ok(1);
     }
     eprintln!(
         "{NATIVE_CHAT_NOT_MIGRATED}: regular prompts are not available in this native foundation."
     );
-    1
+    Ok(1)
 }
 
 fn current_api_key() -> Option<String> {
@@ -469,6 +955,174 @@ fn is_valid_vexzy_api_key(value: &str) -> bool {
         return false;
     };
     !suffix.is_empty() && !value.chars().any(char::is_whitespace)
+}
+
+fn parse_provider_id(value: &str) -> Result<ProviderId, anyhow::Error> {
+    ProviderId::new(value.to_owned()).map_err(anyhow::Error::msg)
+}
+
+fn parse_allowlist(input: Option<&str>) -> Result<Vec<ModelId>, anyhow::Error> {
+    let Some(input) = input else {
+        return Ok(Vec::new());
+    };
+    if input.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    input
+        .split(',')
+        .map(|entry| ModelId::new(entry.to_owned()).map_err(anyhow::Error::msg))
+        .collect()
+}
+
+/// Bounded URL validation: an absolute https:// or http:// URL with a
+/// non-empty host.  Returns the scheme so callers can apply the loopback
+/// warning rule for plain http.
+fn validate_base_url(value: &str) -> Result<&'static str, anyhow::Error> {
+    if value.chars().any(char::is_whitespace) {
+        return Err(anyhow!("base URL must not contain whitespace"));
+    }
+    for scheme in ["https", "http"] {
+        let Some(rest) = value.strip_prefix(&format!("{scheme}://")) else {
+            continue;
+        };
+        if !rest.split(['/', '?', '#']).next().unwrap_or("").is_empty() {
+            return Ok(scheme);
+        }
+    }
+    Err(anyhow!(
+        "base URL must be an absolute https:// or http:// URL"
+    ))
+}
+
+fn base_url_host_is_loopback(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("http://") else {
+        return false;
+    };
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit('@')
+        .next()
+        .unwrap_or("");
+    host == "localhost"
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host == "[::1]"
+        || host.starts_with("127.")
+}
+
+/// The credential reference kind only — `env:NAME` or `store:KEY`.  The
+/// credential value itself never appears in any output path.
+fn credential_ref_kind(provider: &ProviderConfig) -> String {
+    match &provider.credential {
+        CredentialRef::Env(name) => format!("env:{name}"),
+        CredentialRef::Store(key) => format!("store:{key}"),
+    }
+}
+
+fn auth_provider_summary(provider: &ProviderConfig) -> String {
+    format!(
+        "{} ({}, {})",
+        provider.id,
+        provider.protocol,
+        credential_ref_kind(provider)
+    )
+}
+
+/// Secret-free `auth status` projection: status strings are exactly
+/// `configured` / `not configured`; the only credential data is the reference
+/// kind.
+fn auth_status_value(provider: &ProviderConfig, configured: bool) -> serde_json::Value {
+    json!({
+        "loggedIn": configured,
+        "authMethod": if configured { "provider_credential" } else { "none" },
+        "apiProvider": provider.id.to_string(),
+        "credential": if configured { "configured" } else { "not configured" },
+        "provider": {
+            "id": provider.id.to_string(),
+            "protocol": provider.protocol.to_string(),
+            "credential": credential_ref_kind(provider),
+        },
+    })
+}
+
+/// The run-active profile: the `--provider` override when present, otherwise
+/// the persisted active profile.
+fn effective_active<'a>(
+    settings: &'a NativeSettings,
+    run_active: Option<&'a ProviderId>,
+) -> Option<&'a ProviderId> {
+    run_active.or(settings.active_provider.as_ref())
+}
+
+fn run_active_provider_config<'a>(
+    settings: &'a NativeSettings,
+    run_active: Option<&'a ProviderId>,
+) -> Option<&'a ProviderConfig> {
+    match run_active {
+        Some(id) => settings.provider(id),
+        None => settings.active_provider_config(),
+    }
+}
+
+fn providers_list_value(settings: &NativeSettings, active: Option<&ProviderId>) -> Vec<Value> {
+    settings
+        .providers()
+        .iter()
+        .map(|provider| {
+            json!({
+                "id": provider.id.to_string(),
+                "name": provider.name,
+                "protocol": provider.protocol.to_string(),
+                "base_url": provider.base_url,
+                "allowlist": provider
+                    .allowlist
+                    .iter()
+                    .map(ModelId::to_string)
+                    .collect::<Vec<_>>(),
+                "credential": credential_ref_kind(provider),
+                "active": active == Some(&provider.id),
+            })
+        })
+        .collect()
+}
+
+/// Secret-free `settings show` dump mirroring the settings.json field names.
+fn settings_show_value(settings: &NativeSettings, active: Option<&ProviderId>) -> Value {
+    json!({
+        "active_provider": active.map(ProviderId::to_string),
+        "global_worker_model": settings.global_worker_model,
+        "worker_effort_lock": settings.worker_effort_lock.map(|effort| effort.to_string()),
+        "providers": providers_list_value(settings, active),
+    })
+}
+
+fn native_settings_path() -> Result<PathBuf, anyhow::Error> {
+    default_settings_path().map_err(|_| anyhow!("MindCode config home is unavailable"))
+}
+
+fn native_store_path() -> Result<PathBuf, anyhow::Error> {
+    default_store_path().map_err(|_| anyhow!("MindCode config home is unavailable"))
+}
+
+fn load_native_settings() -> Result<NativeSettings, anyhow::Error> {
+    load_settings(&native_settings_path()?).map_err(anyhow::Error::msg)
+}
+
+fn save_native_settings(settings: &NativeSettings) -> Result<(), anyhow::Error> {
+    save_settings(&native_settings_path()?, settings).map_err(anyhow::Error::msg)
+}
+
+/// Read exactly one line from the credential input.  Only the trailing
+/// newline is stripped; interior whitespace is preserved, and an empty result
+/// is rejected by the caller.
+fn read_credential_line(mut input: impl BufRead) -> Result<String, anyhow::Error> {
+    let mut line = String::new();
+    input
+        .read_line(&mut line)
+        .map_err(|_| anyhow!("could not read credential from stdin"))?;
+    Ok(line.trim_end_matches(['\n', '\r']).to_owned())
 }
 
 fn with_command_program_name(mut arguments: Vec<OsString>, name: &str) -> Vec<OsString> {
@@ -499,6 +1153,121 @@ fn print_clap_error(error: clap::Error) -> i32 {
 mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
+    use mindcode_provider::SecretStore;
+    use mindcode_settings::{builtin_vexzy_provider, BUILTIN_VEXZY_PROVIDER_ID};
+    use std::io::Cursor;
+    use std::path::Path;
+    use std::sync::Mutex;
+    use tempfile::tempdir;
+
+    /// Guards every test that mutates or reads the process environment.
+    /// Sandboxed tests run under this lock, and any test that reads env (e.g.
+    /// via `DaemonConfig::default_socket`), including the daemon-defaults
+    /// assertion, must take it too, so there is no cross-thread race.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn run_dispatch(arguments: Vec<OsString>) -> Result<i32> {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(dispatch(arguments))
+    }
+
+    /// The process exit code a CLI invocation would produce: `Err` from
+    /// `dispatch` is the domain-error path that main maps to exit 1.
+    fn run_dispatch_exit(arguments: Vec<OsString>) -> i32 {
+        run_dispatch(arguments).unwrap_or(1)
+    }
+
+    /// Point XDG_CONFIG_HOME and HOME at a fresh temporary directory for the
+    /// duration of the test, then restore the previous values.  Never touches
+    /// the real `~/.config/mindcode`.
+    fn with_sandbox_env<T>(test: impl FnOnce(&Path) -> T) -> T {
+        let _guard = ENV_LOCK.lock();
+        let temp = tempdir().unwrap();
+        let previous_xdg = env::var_os("XDG_CONFIG_HOME");
+        let previous_home = env::var_os("HOME");
+        env::set_var("XDG_CONFIG_HOME", temp.path());
+        env::set_var("HOME", temp.path());
+        let result = test(temp.path());
+        match previous_xdg {
+            Some(value) => env::set_var("XDG_CONFIG_HOME", value),
+            None => env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match previous_home {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+        result
+    }
+
+    fn with_env_var<T>(name: &str, value: &str, test: impl FnOnce() -> T) -> T {
+        let previous = env::var_os(name);
+        env::set_var(name, value);
+        let result = test();
+        match previous {
+            Some(value) => env::set_var(name, value),
+            None => env::remove_var(name),
+        }
+        result
+    }
+
+    fn without_env_var<T>(name: &str, test: impl FnOnce() -> T) -> T {
+        let previous = env::var_os(name);
+        env::remove_var(name);
+        let result = test();
+        match previous {
+            Some(value) => env::set_var(name, value),
+            None => env::remove_var(name),
+        }
+        result
+    }
+
+    fn sandbox_settings_path(dir: &Path) -> PathBuf {
+        dir.join("mindcode/settings.json")
+    }
+
+    fn sandbox_store_path(dir: &Path) -> PathBuf {
+        dir.join("mindcode/credentials.json")
+    }
+
+    fn seed_settings(dir: &Path, settings: &NativeSettings) {
+        save_settings(&sandbox_settings_path(dir), settings).unwrap();
+    }
+
+    fn load_sandbox_settings(dir: &Path) -> NativeSettings {
+        load_settings(&sandbox_settings_path(dir)).unwrap()
+    }
+
+    fn seed_builtin_active(dir: &Path) {
+        let mut settings = NativeSettings::default();
+        settings.add_provider(builtin_vexzy_provider()).unwrap();
+        settings
+            .set_active_provider(&ProviderId::new(BUILTIN_VEXZY_PROVIDER_ID.to_owned()).unwrap())
+            .unwrap();
+        seed_settings(dir, &settings);
+    }
+
+    fn profile(
+        id: &str,
+        name: &str,
+        protocol: Protocol,
+        base_url: &str,
+        credential: CredentialRef,
+        allowlist: &[&str],
+    ) -> ProviderConfig {
+        ProviderConfig {
+            id: ProviderId::new(id.to_owned()).unwrap(),
+            name: name.to_owned(),
+            protocol,
+            base_url: base_url.to_owned(),
+            credential,
+            allowlist: allowlist
+                .iter()
+                .map(|model| ModelId::new(model.to_string()).unwrap())
+                .collect(),
+            active: false,
+        }
+    }
 
     #[test]
     fn validates_vexzy_key_shape_without_accepting_whitespace() {
@@ -517,11 +1286,16 @@ mod tests {
         assert!(help.contains("mindcode"));
         assert!(help.contains("daemon"));
         assert!(help.contains("setup-token"));
+        assert!(help.contains("provider"));
+        assert!(help.contains("settings"));
         assert!(help.contains("VEXZY"));
     }
 
     #[test]
     fn daemon_defaults_match_mindcoded_defaults() {
+        // Reads HOME via `DaemonConfig::default_socket`, so it must share
+        // the env lock with the sandboxed tests that mutate HOME.
+        let _guard = ENV_LOCK.lock();
         let args = DaemonArgs::try_parse_from(["mindcode"]).unwrap();
         assert_eq!(args.idle_seconds, 1_800);
         assert_eq!(args.handshake_timeout_seconds, 5);
@@ -532,15 +1306,822 @@ mod tests {
 
     #[test]
     fn auth_status_json_never_contains_the_secret() {
-        let output = json!({
-            "loggedIn": true,
-            "authMethod": "vexzy_api_key",
-            "apiProvider": "vexzy",
-            "apiKeySource": API_KEY_ENV,
-        })
-        .to_string();
+        let provider = builtin_vexzy_provider();
+        let output = auth_status_value(&provider, true).to_string();
         assert!(!output.contains("forge-"));
         assert!(output.contains("VEXZY_API_KEY"));
+        assert_eq!(
+            auth_status_value(&provider, true)["credential"],
+            "configured"
+        );
+        assert_eq!(
+            auth_status_value(&provider, false)["credential"],
+            "not configured"
+        );
+    }
+
+    #[test]
+    fn provider_and_settings_parsers_accept_the_documented_subcommands() {
+        let provider = ProviderArgs::try_parse_from([
+            "mindcode provider",
+            "add",
+            "--id",
+            "p1",
+            "--name",
+            "P1",
+            "--protocol",
+            "openai-compatible",
+            "--base-url",
+            "https://p1.example/v1",
+            "--credential-env",
+            "K1",
+            "--allowlist",
+            "a,b",
+        ])
+        .unwrap();
+        assert!(matches!(provider.command, ProviderCommand::Add(_)));
+        let settings =
+            SettingsArgs::try_parse_from(["mindcode settings", "effort", "lock", "off"]).unwrap();
+        assert!(matches!(settings.command, SettingsCommand::Effort(_)));
+        assert!(
+            SettingsArgs::try_parse_from(["mindcode settings", "effort", "lock", "auto",]).is_ok()
+        );
+        assert!(ProviderArgs::try_parse_from([
+            "mindcode provider",
+            "add",
+            "--id",
+            "p1",
+            "--name",
+            "P1",
+            "--protocol",
+            "openai-compatible",
+            "--base-url",
+            "https://p1.example/v1",
+            "--credential-env",
+            "K1",
+            "--credential-store",
+            "s1",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn scan_provider_option_extracts_both_spellings_and_keeps_the_rest() {
+        let (selected, remaining) = scan_provider_option(&[
+            OsString::from("--provider"),
+            OsString::from("vexzy"),
+            OsString::from("auth"),
+            OsString::from("status"),
+        ])
+        .unwrap();
+        assert_eq!(selected.as_deref(), Some("vexzy"));
+        assert_eq!(
+            remaining,
+            vec![OsString::from("auth"), OsString::from("status")]
+        );
+
+        let (selected, remaining) =
+            scan_provider_option(&[OsString::from("--provider=vexzy"), OsString::from("list")])
+                .unwrap();
+        assert_eq!(selected.as_deref(), Some("vexzy"));
+        assert_eq!(remaining, vec![OsString::from("list")]);
+
+        assert!(scan_provider_option(&[OsString::from("--provider")]).is_err());
+        let (selected, remaining) =
+            scan_provider_option(&[OsString::from("provider"), OsString::from("list")]).unwrap();
+        assert!(selected.is_none());
+        assert_eq!(remaining.len(), 2);
+    }
+
+    #[test]
+    fn provider_list_shows_all_profiles_secret_free_with_active_marker() {
+        with_sandbox_env(|dir| {
+            let mut settings = NativeSettings::default();
+            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            settings
+                .add_provider(profile(
+                    "custom-a",
+                    "Custom A",
+                    Protocol::AnthropicCompatible,
+                    "https://custom.example/v1",
+                    CredentialRef::Store("custom-a".to_owned()),
+                    &["model-a", "model-b"],
+                ))
+                .unwrap();
+            settings
+                .set_active_provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+                .unwrap();
+            seed_settings(dir, &settings);
+
+            let code = run_dispatch_exit(vec![OsString::from("provider"), OsString::from("list")]);
+            assert_eq!(code, 0);
+
+            let loaded = load_sandbox_settings(dir);
+            let value = providers_list_value(&loaded, effective_active(&loaded, None));
+            let text = serde_json::to_string(&value).unwrap();
+            assert!(text.contains("\"id\":\"vexzy\""));
+            assert!(text.contains("\"credential\":\"env:VEXZY_API_KEY\""));
+            assert!(text.contains("\"credential\":\"store:custom-a\""));
+            assert!(text.contains("\"allowlist\":[\"model-a\",\"model-b\"]"));
+            assert!(text.contains("\"active\":true"));
+            assert_eq!(value[0]["active"], json!(true));
+            assert_eq!(value[1]["active"], json!(false));
+            assert!(!text.contains("secret"));
+            assert!(!text.contains("forge-"));
+        });
+    }
+
+    #[test]
+    fn provider_list_marks_the_run_selected_provider_as_active_without_persisting() {
+        with_sandbox_env(|dir| {
+            let mut settings = NativeSettings::default();
+            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            settings
+                .add_provider(profile(
+                    "custom-a",
+                    "Custom A",
+                    Protocol::OpenAiCompatible,
+                    "https://custom.example/v1",
+                    CredentialRef::Env("CUSTOM_API_KEY".to_owned()),
+                    &[],
+                ))
+                .unwrap();
+            settings
+                .set_active_provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+                .unwrap();
+            seed_settings(dir, &settings);
+
+            let code = run_dispatch_exit(vec![
+                OsString::from("--provider"),
+                OsString::from("custom-a"),
+                OsString::from("provider"),
+                OsString::from("list"),
+            ]);
+            assert_eq!(code, 0);
+            let loaded = load_sandbox_settings(dir);
+            let custom = ProviderId::new("custom-a".to_owned()).unwrap();
+            let value = providers_list_value(&loaded, Some(&custom));
+            assert_eq!(value[0]["active"], json!(false));
+            assert_eq!(value[1]["active"], json!(true));
+            assert_eq!(
+                loaded.active_provider.as_ref().map(ProviderId::as_str),
+                Some("vexzy")
+            );
+        });
+    }
+
+    #[test]
+    fn provider_use_persists_the_active_provider() {
+        with_sandbox_env(|dir| {
+            let mut settings = NativeSettings::default();
+            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            settings
+                .add_provider(profile(
+                    "custom-a",
+                    "Custom A",
+                    Protocol::OpenAiCompatible,
+                    "https://custom.example/v1",
+                    CredentialRef::Env("CUSTOM_API_KEY".to_owned()),
+                    &[],
+                ))
+                .unwrap();
+            seed_settings(dir, &settings);
+
+            let code = run_dispatch_exit(vec![
+                OsString::from("provider"),
+                OsString::from("use"),
+                OsString::from("custom-a"),
+            ]);
+            assert_eq!(code, 0);
+            let loaded = load_sandbox_settings(dir);
+            assert_eq!(
+                loaded.active_provider.as_ref().map(ProviderId::as_str),
+                Some("custom-a")
+            );
+            let custom = loaded
+                .provider(&ProviderId::new("custom-a".to_owned()).unwrap())
+                .unwrap();
+            assert!(custom.active);
+            assert!(
+                !loaded
+                    .provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+                    .unwrap()
+                    .active
+            );
+        });
+    }
+
+    #[test]
+    fn provider_use_unknown_id_fails_closed_without_changing_state() {
+        with_sandbox_env(|dir| {
+            let mut settings = NativeSettings::default();
+            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            settings
+                .set_active_provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+                .unwrap();
+            seed_settings(dir, &settings);
+
+            let code = run_dispatch_exit(vec![
+                OsString::from("provider"),
+                OsString::from("use"),
+                OsString::from("ghost"),
+            ]);
+            assert_eq!(code, 1);
+            let loaded = load_sandbox_settings(dir);
+            assert_eq!(
+                loaded.active_provider.as_ref().map(ProviderId::as_str),
+                Some("vexzy")
+            );
+        });
+    }
+
+    #[test]
+    fn provider_add_persists_and_duplicate_fails_closed_without_state_change() {
+        with_sandbox_env(|dir| {
+            let mut settings = NativeSettings::default();
+            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            seed_settings(dir, &settings);
+
+            let code = run_dispatch_exit(vec![
+                OsString::from("provider"),
+                OsString::from("add"),
+                OsString::from("--id"),
+                OsString::from("custom-a"),
+                OsString::from("--name"),
+                OsString::from("Custom A"),
+                OsString::from("--protocol"),
+                OsString::from("anthropic-compatible"),
+                OsString::from("--base-url"),
+                OsString::from("https://custom.example/v1"),
+                OsString::from("--credential-store"),
+                OsString::from("custom-a"),
+                OsString::from("--allowlist"),
+                OsString::from("model-a,model-b"),
+            ]);
+            assert_eq!(code, 0);
+            let loaded = load_sandbox_settings(dir);
+            assert_eq!(loaded.providers().len(), 2);
+            let added = loaded
+                .provider(&ProviderId::new("custom-a".to_owned()).unwrap())
+                .unwrap();
+            assert_eq!(added.protocol, Protocol::AnthropicCompatible);
+            assert_eq!(
+                added.credential,
+                CredentialRef::Store("custom-a".to_owned())
+            );
+            assert_eq!(added.base_url, "https://custom.example/v1");
+
+            let duplicate = run_dispatch_exit(vec![
+                OsString::from("provider"),
+                OsString::from("add"),
+                OsString::from("--id"),
+                OsString::from("custom-a"),
+                OsString::from("--name"),
+                OsString::from("Other"),
+                OsString::from("--protocol"),
+                OsString::from("openai-compatible"),
+                OsString::from("--base-url"),
+                OsString::from("https://other.example/v1"),
+                OsString::from("--credential-env"),
+                OsString::from("OTHER_KEY"),
+            ]);
+            assert_eq!(duplicate, 1);
+            let after = load_sandbox_settings(dir);
+            assert_eq!(after.providers().len(), 2);
+            let added = after
+                .provider(&ProviderId::new("custom-a".to_owned()).unwrap())
+                .unwrap();
+            assert_eq!(added.name, "Custom A");
+        });
+    }
+
+    #[test]
+    fn provider_add_rejects_invalid_protocol_and_base_url_without_state_change() {
+        with_sandbox_env(|dir| {
+            let mut settings = NativeSettings::default();
+            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            seed_settings(dir, &settings);
+            let before = fs::read_to_string(sandbox_settings_path(dir)).unwrap();
+
+            for (protocol, base_url) in [
+                ("openai", "https://x.example/v1"),
+                ("openai-compatible", "not-a-url"),
+                ("openai-compatible", "ftp://x.example/v1"),
+                ("openai-compatible", "https://"),
+            ] {
+                let code = run_dispatch_exit(vec![
+                    OsString::from("provider"),
+                    OsString::from("add"),
+                    OsString::from("--id"),
+                    OsString::from("custom-b"),
+                    OsString::from("--name"),
+                    OsString::from("Custom B"),
+                    OsString::from("--protocol"),
+                    OsString::from(protocol),
+                    OsString::from("--base-url"),
+                    OsString::from(base_url),
+                    OsString::from("--credential-env"),
+                    OsString::from("CUSTOM_API_KEY"),
+                ]);
+                assert_eq!(code, 1, "{protocol} / {base_url}");
+            }
+            let after = fs::read_to_string(sandbox_settings_path(dir)).unwrap();
+            assert_eq!(after, before);
+            assert_eq!(load_sandbox_settings(dir).providers().len(), 1);
+        });
+    }
+
+    #[test]
+    fn provider_remove_persists_and_removing_the_active_profile_clears_it() {
+        with_sandbox_env(|dir| {
+            let mut settings = NativeSettings::default();
+            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            settings
+                .add_provider(profile(
+                    "custom-a",
+                    "Custom A",
+                    Protocol::OpenAiCompatible,
+                    "https://custom.example/v1",
+                    CredentialRef::Env("CUSTOM_API_KEY".to_owned()),
+                    &[],
+                ))
+                .unwrap();
+            settings
+                .set_active_provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+                .unwrap();
+            seed_settings(dir, &settings);
+
+            let code = run_dispatch_exit(vec![
+                OsString::from("provider"),
+                OsString::from("remove"),
+                OsString::from("vexzy"),
+            ]);
+            assert_eq!(code, 0);
+            let loaded = load_sandbox_settings(dir);
+            assert_eq!(loaded.active_provider, None);
+            assert!(loaded.providers().iter().all(|provider| !provider.active));
+            assert_eq!(loaded.providers().len(), 1);
+
+            let missing = run_dispatch_exit(vec![
+                OsString::from("provider"),
+                OsString::from("remove"),
+                OsString::from("ghost"),
+            ]);
+            assert_eq!(missing, 1);
+        });
+    }
+
+    #[test]
+    fn provider_edit_updates_points_only_and_keeps_the_id() {
+        with_sandbox_env(|dir| {
+            let mut settings = NativeSettings::default();
+            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            settings
+                .set_active_provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+                .unwrap();
+            seed_settings(dir, &settings);
+
+            let code = run_dispatch_exit(vec![
+                OsString::from("provider"),
+                OsString::from("edit"),
+                OsString::from("vexzy"),
+                OsString::from("--name"),
+                OsString::from("VEXZY Edited"),
+                OsString::from("--protocol"),
+                OsString::from("anthropic-compatible"),
+                OsString::from("--base-url"),
+                OsString::from("https://edited.example/v1"),
+                OsString::from("--allowlist"),
+                OsString::from("gpt-5.6-luna"),
+            ]);
+            assert_eq!(code, 0);
+            let loaded = load_sandbox_settings(dir);
+            let vexzy = loaded
+                .provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+                .unwrap();
+            assert_eq!(vexzy.name, "VEXZY Edited");
+            assert_eq!(vexzy.protocol, Protocol::AnthropicCompatible);
+            assert_eq!(vexzy.base_url, "https://edited.example/v1");
+            assert_eq!(
+                vexzy
+                    .allowlist
+                    .iter()
+                    .map(ModelId::as_str)
+                    .collect::<Vec<_>>(),
+                ["gpt-5.6-luna"]
+            );
+            assert!(vexzy.active);
+            assert_eq!(
+                loaded.active_provider.as_ref().map(ProviderId::as_str),
+                Some("vexzy")
+            );
+
+            let invalid = run_dispatch_exit(vec![
+                OsString::from("provider"),
+                OsString::from("edit"),
+                OsString::from("vexzy"),
+                OsString::from("--base-url"),
+                OsString::from("nonsense"),
+            ]);
+            assert_eq!(invalid, 1);
+            let after = load_sandbox_settings(dir);
+            let vexzy = after
+                .provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+                .unwrap();
+            assert_eq!(vexzy.base_url, "https://edited.example/v1");
+        });
+    }
+
+    #[test]
+    fn settings_key_from_env_writes_only_the_store_and_prints_only_configured() {
+        with_sandbox_env(|dir| {
+            seed_builtin_active(dir);
+            let secret = "forge-native-test-secret";
+            with_env_var("MINDCODE_TEST_KEY", secret, || {
+                let code = run_dispatch_exit(vec![
+                    OsString::from("settings"),
+                    OsString::from("key"),
+                    OsString::from("vexzy"),
+                    OsString::from("--from-env"),
+                    OsString::from("MINDCODE_TEST_KEY"),
+                ]);
+                assert_eq!(code, 0);
+            });
+            let raw_store = fs::read_to_string(sandbox_store_path(dir)).unwrap();
+            assert!(raw_store.contains(secret));
+            let raw_settings = fs::read_to_string(sandbox_settings_path(dir)).unwrap();
+            assert!(!raw_settings.contains(secret));
+            assert_eq!(SETTINGS_KEY_CONFIRMATION, "configured");
+            assert!(!SETTINGS_KEY_CONFIRMATION.contains(secret));
+            assert!(!SETTINGS_KEY_CONFIRMATION.contains("credentials.json"));
+        });
+    }
+
+    #[test]
+    fn settings_key_rejects_missing_and_empty_env_values() {
+        with_sandbox_env(|dir| {
+            seed_builtin_active(dir);
+            let missing = run_dispatch_exit(vec![
+                OsString::from("settings"),
+                OsString::from("key"),
+                OsString::from("vexzy"),
+                OsString::from("--from-env"),
+                OsString::from("MINDCODE_ABSENT_KEY"),
+            ]);
+            assert_eq!(missing, 1);
+            assert!(!sandbox_store_path(dir).exists());
+
+            without_env_var("MINDCODE_EMPTY_KEY", || {
+                env::set_var("MINDCODE_EMPTY_KEY", "");
+                let empty = run_dispatch_exit(vec![
+                    OsString::from("settings"),
+                    OsString::from("key"),
+                    OsString::from("vexzy"),
+                    OsString::from("--from-env"),
+                    OsString::from("MINDCODE_EMPTY_KEY"),
+                ]);
+                assert_eq!(empty, 1);
+            });
+            assert!(!sandbox_store_path(dir).exists());
+
+            let invalid_id = run_dispatch_exit(vec![
+                OsString::from("settings"),
+                OsString::from("key"),
+                OsString::from("bad id"),
+                OsString::from("--from-env"),
+                OsString::from("MINDCODE_TEST_KEY"),
+            ]);
+            assert_eq!(invalid_id, 1);
+            assert!(!sandbox_store_path(dir).exists());
+        });
+    }
+
+    #[test]
+    fn read_credential_line_consumes_exactly_one_line_without_the_newline() {
+        let mut input = Cursor::new("forge-stdin-secret\nignored");
+        assert_eq!(
+            read_credential_line(&mut input).unwrap(),
+            "forge-stdin-secret"
+        );
+        let mut empty = Cursor::new("\n");
+        assert_eq!(read_credential_line(&mut empty).unwrap(), "");
+    }
+
+    #[test]
+    fn settings_allowlist_persists_and_unknown_provider_fails_closed() {
+        with_sandbox_env(|dir| {
+            let mut settings = NativeSettings::default();
+            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            seed_settings(dir, &settings);
+
+            let code = run_dispatch_exit(vec![
+                OsString::from("settings"),
+                OsString::from("allowlist"),
+                OsString::from("vexzy"),
+                OsString::from("gpt-5.6-luna,model-b"),
+            ]);
+            assert_eq!(code, 0);
+            let loaded = load_sandbox_settings(dir);
+            let vexzy = loaded
+                .provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+                .unwrap();
+            assert_eq!(
+                vexzy
+                    .allowlist
+                    .iter()
+                    .map(ModelId::as_str)
+                    .collect::<Vec<_>>(),
+                ["gpt-5.6-luna", "model-b"]
+            );
+
+            let missing = run_dispatch_exit(vec![
+                OsString::from("settings"),
+                OsString::from("allowlist"),
+                OsString::from("ghost"),
+                OsString::from("model-a"),
+            ]);
+            assert_eq!(missing, 1);
+            let after = load_sandbox_settings(dir);
+            let vexzy = after
+                .provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+                .unwrap();
+            assert_eq!(
+                vexzy
+                    .allowlist
+                    .iter()
+                    .map(ModelId::as_str)
+                    .collect::<Vec<_>>(),
+                ["gpt-5.6-luna", "model-b"]
+            );
+        });
+    }
+
+    #[test]
+    fn settings_model_persists_and_rejects_invalid_ids() {
+        with_sandbox_env(|dir| {
+            seed_builtin_active(dir);
+            let code = run_dispatch_exit(vec![
+                OsString::from("settings"),
+                OsString::from("model"),
+                OsString::from("gpt-5.6-luna"),
+            ]);
+            assert_eq!(code, 0);
+            assert_eq!(
+                load_sandbox_settings(dir).global_worker_model.as_deref(),
+                Some("gpt-5.6-luna")
+            );
+
+            let invalid = run_dispatch_exit(vec![
+                OsString::from("settings"),
+                OsString::from("model"),
+                OsString::from("bad model"),
+            ]);
+            assert_eq!(invalid, 1);
+            assert_eq!(
+                load_sandbox_settings(dir).global_worker_model.as_deref(),
+                Some("gpt-5.6-luna")
+            );
+        });
+    }
+
+    #[test]
+    fn settings_effort_lock_sets_unsets_and_rejects_invalid_values() {
+        with_sandbox_env(|dir| {
+            seed_builtin_active(dir);
+            let set = run_dispatch_exit(vec![
+                OsString::from("settings"),
+                OsString::from("effort"),
+                OsString::from("lock"),
+                OsString::from("high"),
+            ]);
+            assert_eq!(set, 0);
+            assert_eq!(
+                load_sandbox_settings(dir).worker_effort_lock,
+                Some(WorkerEffort::High)
+            );
+
+            let off = run_dispatch_exit(vec![
+                OsString::from("settings"),
+                OsString::from("effort"),
+                OsString::from("lock"),
+                OsString::from("off"),
+            ]);
+            assert_eq!(off, 0);
+            assert_eq!(load_sandbox_settings(dir).worker_effort_lock, None);
+
+            let invalid = run_dispatch_exit(vec![
+                OsString::from("settings"),
+                OsString::from("effort"),
+                OsString::from("lock"),
+                OsString::from("auto"),
+            ]);
+            assert_eq!(invalid, 1);
+            assert_eq!(load_sandbox_settings(dir).worker_effort_lock, None);
+        });
+    }
+
+    #[test]
+    fn settings_show_dump_is_secret_free() {
+        with_sandbox_env(|dir| {
+            let mut settings = NativeSettings {
+                global_worker_model: Some("gpt-5.6-luna".to_owned()),
+                worker_effort_lock: Some(WorkerEffort::Max),
+                ..Default::default()
+            };
+            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            settings
+                .add_provider(profile(
+                    "custom-a",
+                    "Custom A",
+                    Protocol::OpenAiCompatible,
+                    "https://custom.example/v1",
+                    CredentialRef::Store("custom-a".to_owned()),
+                    &[],
+                ))
+                .unwrap();
+            settings
+                .set_active_provider(&ProviderId::new("custom-a".to_owned()).unwrap())
+                .unwrap();
+            seed_settings(dir, &settings);
+            let mut store = SecretStore::new();
+            store.write(
+                ProviderId::new("custom-a".to_owned()).unwrap(),
+                SecretKey::new("forge-store-secret".to_owned()),
+            );
+            save_store(&sandbox_store_path(dir), &store).unwrap();
+
+            let code = run_dispatch_exit(vec![OsString::from("settings"), OsString::from("show")]);
+            assert_eq!(code, 0);
+            let loaded = load_sandbox_settings(dir);
+            let value = settings_show_value(&loaded, effective_active(&loaded, None));
+            let text = serde_json::to_string(&value).unwrap();
+            assert!(text.contains("\"active_provider\":\"custom-a\""));
+            assert!(text.contains("\"global_worker_model\":\"gpt-5.6-luna\""));
+            assert!(text.contains("\"worker_effort_lock\":\"max\""));
+            assert!(text.contains("\"credential\":\"store:custom-a\""));
+            assert!(text.contains("\"protocol\":\"openai-compatible\""));
+            assert!(!text.contains("forge-store-secret"));
+        });
+    }
+
+    #[test]
+    fn provider_flag_selects_the_run_provider_without_persisting() {
+        with_sandbox_env(|dir| {
+            let mut settings = NativeSettings::default();
+            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            settings
+                .add_provider(profile(
+                    "custom-a",
+                    "Custom A",
+                    Protocol::OpenAiCompatible,
+                    "https://custom.example/v1",
+                    CredentialRef::Env("CUSTOM_API_KEY".to_owned()),
+                    &[],
+                ))
+                .unwrap();
+            settings
+                .set_active_provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+                .unwrap();
+            seed_settings(dir, &settings);
+
+            with_env_var("CUSTOM_API_KEY", "forge-custom-env-secret", || {
+                let code = run_dispatch_exit(vec![
+                    OsString::from("--provider"),
+                    OsString::from("custom-a"),
+                    OsString::from("auth"),
+                    OsString::from("status"),
+                ]);
+                assert_eq!(code, 0);
+            });
+            let loaded = load_sandbox_settings(dir);
+            assert_eq!(
+                loaded.active_provider.as_ref().map(ProviderId::as_str),
+                Some("vexzy")
+            );
+        });
+    }
+
+    #[test]
+    fn provider_flag_unknown_id_fails_closed() {
+        with_sandbox_env(|dir| {
+            seed_builtin_active(dir);
+            let code = run_dispatch_exit(vec![
+                OsString::from("--provider"),
+                OsString::from("ghost"),
+                OsString::from("auth"),
+                OsString::from("status"),
+            ]);
+            assert_eq!(code, 1);
+            let code = run_dispatch_exit(vec![
+                OsString::from("auth"),
+                OsString::from("status"),
+                OsString::from("--provider=ghost"),
+            ]);
+            assert_eq!(code, 1);
+        });
+    }
+
+    #[test]
+    fn provider_flag_missing_value_fails_closed() {
+        with_sandbox_env(|dir| {
+            seed_builtin_active(dir);
+            let code = run_dispatch_exit(vec![OsString::from("--provider")]);
+            assert_eq!(code, 1);
+            let code =
+                run_dispatch_exit(vec![OsString::from("--provider="), OsString::from("auth")]);
+            assert_eq!(code, 1);
+        });
+    }
+
+    #[test]
+    fn auth_status_with_env_credential_is_configured_and_secret_free() {
+        with_sandbox_env(|dir| {
+            seed_builtin_active(dir);
+            let secret = "forge-auth-env-secret";
+            without_env_var(API_KEY_ENV, || {
+                with_env_var(API_KEY_ENV, secret, || {
+                    let code =
+                        run_dispatch_exit(vec![OsString::from("auth"), OsString::from("status")]);
+                    assert_eq!(code, 0);
+                });
+            });
+            let settings = load_sandbox_settings(dir);
+            let provider = settings.active_provider_config().unwrap();
+            let value = auth_status_value(provider, true);
+            let text = serde_json::to_string(&value).unwrap();
+            assert!(text.contains("\"credential\":\"configured\""));
+            assert!(text.contains("\"authMethod\":\"provider_credential\""));
+            assert!(text.contains("\"apiProvider\":\"vexzy\""));
+            assert!(text.contains("\"id\":\"vexzy\""));
+            assert!(text.contains("\"protocol\":\"openai-compatible\""));
+            assert!(text.contains("\"credential\":\"env:VEXZY_API_KEY\""));
+            assert!(!text.contains(secret));
+            assert!(!text.contains("forge-"));
+        });
+    }
+
+    #[test]
+    fn auth_status_resolves_store_credentials() {
+        with_sandbox_env(|dir| {
+            let mut settings = NativeSettings::default();
+            settings
+                .add_provider(profile(
+                    "custom-a",
+                    "Custom A",
+                    Protocol::AnthropicCompatible,
+                    "https://custom.example/v1",
+                    CredentialRef::Store("custom-a".to_owned()),
+                    &[],
+                ))
+                .unwrap();
+            settings
+                .set_active_provider(&ProviderId::new("custom-a".to_owned()).unwrap())
+                .unwrap();
+            seed_settings(dir, &settings);
+            let mut store = SecretStore::new();
+            store.write(
+                ProviderId::new("custom-a".to_owned()).unwrap(),
+                SecretKey::new("forge-store-auth-secret".to_owned()),
+            );
+            save_store(&sandbox_store_path(dir), &store).unwrap();
+
+            let code = run_dispatch_exit(vec![OsString::from("auth"), OsString::from("status")]);
+            assert_eq!(code, 0);
+            let settings = load_sandbox_settings(dir);
+            let value = auth_status_value(settings.active_provider_config().unwrap(), true);
+            let text = value.to_string();
+            assert!(text.contains("\"apiProvider\":\"custom-a\""));
+            assert!(text.contains("\"protocol\":\"anthropic-compatible\""));
+            assert!(text.contains("\"credential\":\"store:custom-a\""));
+            assert!(!text.contains("forge-store-auth-secret"));
+        });
+    }
+
+    #[test]
+    fn auth_status_missing_credential_fails_closed() {
+        with_sandbox_env(|dir| {
+            seed_builtin_active(dir);
+            without_env_var(API_KEY_ENV, || {
+                let code =
+                    run_dispatch_exit(vec![OsString::from("auth"), OsString::from("status")]);
+                assert_eq!(code, 1);
+            });
+            let settings = load_sandbox_settings(dir);
+            let value = auth_status_value(settings.active_provider_config().unwrap(), false);
+            assert_eq!(value["credential"], "not configured");
+            assert_eq!(value["authMethod"], "none");
+            assert_eq!(value["loggedIn"], false);
+        });
+    }
+
+    #[test]
+    fn auth_status_without_any_active_provider_fails_closed() {
+        with_sandbox_env(|_dir| {
+            let code = run_dispatch_exit(vec![OsString::from("auth"), OsString::from("status")]);
+            assert_eq!(code, 1);
+            let code = run_dispatch_exit(vec![OsString::from("hello")]);
+            assert_eq!(code, 1);
+        });
     }
 
     fn catalog_fixture() -> String {
