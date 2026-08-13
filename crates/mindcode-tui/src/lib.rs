@@ -2188,6 +2188,11 @@ mod unix_runtime {
                     }
                     if !consumed {
                         app.apply_input(&event);
+                        // Local edits (typing, backspace, cursor moves) mutate
+                        // the composer buffer without a server reply, so they
+                        // must repaint immediately; otherwise the screen only
+                        // refreshes on the next mouse event or snapshot.
+                        needs_redraw = true;
                         if send_input(
                             &mut connection,
                             &mut input_sequence,
