@@ -18,7 +18,7 @@ use mindcode_transport::{ChatCompletionsRequest, ChatMessage, MessagesRequest, T
 use mindcode_tui::TuiConfig;
 use mindcode_tui_server::{
     ConnectionInput, ControlServer, ControlServerConfig, InputHandler, ProjectionInput,
-    ProviderInput, StatusInput, TelemetryInput,
+    ProviderInput, StatusInput, TelemetryInput, TranscriptInput,
 };
 use mindcode_vexzy::{
     eligible_worker_models, parse_vexzy_model_catalog, VexzyModel, VexzyModelCatalog, WorkerEffort,
@@ -1121,10 +1121,32 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
 
     let processor_server = server.clone();
     let processor = tokio::spawn(async move {
+        let mut transcript = TuiTranscript::default();
         while let Some(action) = action_rx.recv().await {
+            if action.action == "composer_submit" {
+                let Some(text) = action.value else { continue };
+                let outcome = dispatch_tui_input(&text, &mut transcript).await;
+                match outcome {
+                    Ok(true) => {
+                        let _ = processor_server
+                            .publish(&tui_snapshot(&transcript.entries))
+                            .await;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        transcript.push("system", format!("error: {error:#}"));
+                        let _ = processor_server
+                            .publish(&tui_snapshot(&transcript.entries))
+                            .await;
+                    }
+                }
+                continue;
+            }
             match apply_tui_action(&action) {
                 Ok(true) => {
-                    let _ = processor_server.publish(&tui_initial_input()).await;
+                    let _ = processor_server
+                        .publish(&tui_snapshot(&transcript.entries))
+                        .await;
                 }
                 Ok(false) => {}
                 Err(error) => eprintln!("mindcode: {error:#}"),
@@ -1150,6 +1172,188 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
             Ok(1)
         }
     }
+}
+
+/// In-memory TUI conversation state: the transcript republished on every turn.
+#[derive(Default)]
+struct TuiTranscript {
+    entries: Vec<TranscriptInput>,
+    next_sequence: u64,
+}
+
+impl TuiTranscript {
+    fn push(&mut self, role: &str, text: impl Into<String>) {
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.entries.push(TranscriptInput::Entry {
+            sequence,
+            role: role.to_owned(),
+            text: text.into(),
+        });
+    }
+}
+
+/// Build a republish snapshot from a fresh settings read (so `/model`,
+/// `/effort` and `/provider use` changes surface immediately) carrying the
+/// current conversation transcript.
+fn tui_snapshot(transcript: &[TranscriptInput]) -> ProjectionInput {
+    let mut input = tui_initial_input();
+    input.transcript = transcript.to_vec();
+    input
+}
+
+const TUI_HELP: &str = "\
+Commands (type and press Enter):
+  <text>                chat with the active provider
+  /chat <text>          same as typing text directly
+  /model [<id>]         show or set the global Worker model
+  /effort [<level>|off] show or set the effort lock (none|low|medium|high|xhigh|max)
+  /provider             list provider profiles (* = active)
+  /provider use <id>    switch the active provider
+  /help                 show this help
+  Ctrl+P                provider setup screen (add / remove / switch)";
+
+/// Route one composer submission.  A leading `/` is a slash command, anything
+/// else is a live chat turn through the active provider.  Returns `Ok(true)`
+/// when the snapshot must be republished (a transcript entry was added or
+/// settings changed); the credential value never enters the transcript.
+async fn dispatch_tui_input(text: &str, transcript: &mut TuiTranscript) -> Result<bool> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(false);
+    }
+    let Some(rest) = trimmed.strip_prefix('/') else {
+        chat_tui_turn(trimmed, transcript).await?;
+        return Ok(true);
+    };
+    let mut tokens = rest.splitn(2, char::is_whitespace);
+    let command = tokens.next().unwrap_or("").trim();
+    let argument = tokens.next().map(str::trim).unwrap_or("");
+    match command {
+        "help" => {
+            transcript.push("system", TUI_HELP);
+            Ok(true)
+        }
+        "model" => {
+            let mut settings = load_native_settings()?;
+            let message = if argument.is_empty() {
+                match &settings.global_worker_model {
+                    Some(model) => format!("worker model: {model}"),
+                    None => "worker model: not set (first allowlist entry is used)".to_owned(),
+                }
+            } else {
+                settings.global_worker_model = Some(argument.to_owned());
+                save_native_settings(&settings)?;
+                format!("worker model set to {argument}")
+            };
+            transcript.push("system", message);
+            Ok(true)
+        }
+        "effort" => {
+            let mut settings = load_native_settings()?;
+            let message = if argument.is_empty() {
+                match settings.worker_effort_lock {
+                    Some(effort) => format!("worker effort lock: {}", effort.as_str()),
+                    None => "worker effort lock: off".to_owned(),
+                }
+            } else if argument == "off" {
+                settings.worker_effort_lock = None;
+                save_native_settings(&settings)?;
+                "worker effort lock cleared".to_owned()
+            } else {
+                let effort: WorkerEffort = argument.parse().map_err(|_| {
+                    anyhow!(
+                        "invalid effort level '{argument}'; expected none|low|medium|high|xhigh|max"
+                    )
+                })?;
+                settings.worker_effort_lock = Some(effort);
+                save_native_settings(&settings)?;
+                format!("worker effort lock set to {}", effort.as_str())
+            };
+            transcript.push("system", message);
+            Ok(true)
+        }
+        "provider" => {
+            let mut sub_tokens = argument.splitn(2, char::is_whitespace);
+            let sub = sub_tokens.next().unwrap_or("").trim();
+            match sub {
+                "use" => {
+                    let id = sub_tokens.next().map(str::trim).unwrap_or("");
+                    if id.is_empty() {
+                        return Err(anyhow!("usage: /provider use <id>"));
+                    }
+                    let mut settings = load_native_settings()?;
+                    let provider_id = ProviderId::new(id.to_owned()).map_err(anyhow::Error::msg)?;
+                    settings
+                        .set_active_provider(&provider_id)
+                        .map_err(anyhow::Error::msg)?;
+                    save_native_settings(&settings)?;
+                    transcript.push("system", format!("active provider: {id}"));
+                }
+                "" => {
+                    let settings = load_native_settings()?;
+                    let mut lines = Vec::new();
+                    for provider in settings.providers() {
+                        let marker = if settings.active_provider.as_ref() == Some(&provider.id) {
+                            "*"
+                        } else {
+                            " "
+                        };
+                        lines.push(format!(
+                            "{marker} {} ({}) — {}",
+                            provider.id, provider.protocol, provider.name
+                        ));
+                    }
+                    transcript.push(
+                        "system",
+                        if lines.is_empty() {
+                            "no providers configured".to_owned()
+                        } else {
+                            lines.join("\n")
+                        },
+                    );
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "unknown provider subcommand '{sub}'; try /provider or /provider use <id>"
+                    ));
+                }
+            }
+            Ok(true)
+        }
+        "chat" => {
+            if argument.is_empty() {
+                return Err(anyhow!("usage: /chat <text>"));
+            }
+            chat_tui_turn(argument, transcript).await?;
+            Ok(true)
+        }
+        _ => {
+            transcript.push(
+                "system",
+                format!("unknown command /{command}; type /help for the command list"),
+            );
+            Ok(true)
+        }
+    }
+}
+
+/// Append the user prompt, stream a completion through the active provider and
+/// append the assistant reply (or a secret-free error line) to the transcript.
+async fn chat_tui_turn(prompt: &str, transcript: &mut TuiTranscript) -> Result<()> {
+    transcript.push("user", prompt);
+    match chat_completion_text(prompt, None, None).await {
+        Ok(text) => {
+            let text = text.trim();
+            if text.is_empty() {
+                transcript.push("system", "(empty response)");
+            } else {
+                transcript.push("assistant", text);
+            }
+        }
+        Err(error) => transcript.push("system", format!("chat failed: {error:#}")),
+    }
+    Ok(())
 }
 
 /// The provider-add payload sent by the renderer as a JSON action value.
@@ -1321,33 +1525,32 @@ async fn run_chat(
 }
 
 /// Resolve the active provider, its credential (env -> store -> fail-closed)
-/// and model, then stream one chat completion over the matching protocol.
-/// Resolution failures return exit code 1 with a secret-free diagnostic; the
-/// credential value never reaches output.
-async fn stream_chat_response(
+/// and model, then stream one chat completion over the matching protocol,
+/// accumulating the assistant text into a single string.  The credential value
+/// never reaches output.
+async fn chat_completion_text(
     prompt: &str,
     model_override: Option<&str>,
     run_active: Option<&ProviderId>,
-) -> Result<i32> {
+) -> Result<String> {
     let settings = load_native_settings()?;
     let Some(provider) = run_active_provider_config(&settings, run_active) else {
-        eprintln!("mindcode: no active provider is configured");
-        return Ok(1);
+        return Err(anyhow!("no active provider is configured"));
     };
     let store = load_store(&native_store_path()?).map_err(anyhow::Error::msg)?;
     let key = match store.resolve(&provider.credential, |name| env::var(name).ok()) {
         Ok(key) => key,
         Err(_) => {
-            eprintln!(
-                "mindcode: credential for provider '{}' is not configured ({})",
+            return Err(anyhow!(
+                "credential for provider '{}' is not configured ({})",
                 provider.id,
                 credential_ref_kind(provider)
-            );
-            return Ok(1);
+            ));
         }
     };
     let model = select_chat_model(&settings, provider, model_override)?;
     let transport = Transport::new(&provider.base_url).map_err(anyhow::Error::msg)?;
+    let mut output = String::new();
 
     match provider.protocol {
         Protocol::OpenAiCompatible => {
@@ -1368,7 +1571,7 @@ async fn stream_chat_response(
                 let chunk = item.map_err(anyhow::Error::msg)?;
                 for choice in chunk.choices {
                     if let Some(content) = choice.delta.content {
-                        print!("{content}");
+                        output.push_str(&content);
                     }
                 }
             }
@@ -1392,19 +1595,38 @@ async fn stream_chat_response(
                 let chunk = item.map_err(anyhow::Error::msg)?;
                 if let Some(delta) = chunk.delta {
                     if let Some(text) = delta.text {
-                        print!("{text}");
+                        output.push_str(&text);
                     }
                 }
                 if let Some(block) = chunk.content_block {
                     if let Some(text) = block.text {
-                        print!("{text}");
+                        output.push_str(&text);
                     }
                 }
             }
         }
     }
-    println!();
-    Ok(0)
+    Ok(output)
+}
+
+/// CLI wrapper around [`chat_completion_text`]: stream a completion to stdout,
+/// printing a secret-free diagnostic on resolution failure.
+async fn stream_chat_response(
+    prompt: &str,
+    model_override: Option<&str>,
+    run_active: Option<&ProviderId>,
+) -> Result<i32> {
+    match chat_completion_text(prompt, model_override, run_active).await {
+        Ok(text) => {
+            print!("{text}");
+            println!();
+            Ok(0)
+        }
+        Err(error) => {
+            eprintln!("mindcode: {error:#}");
+            Ok(1)
+        }
+    }
 }
 
 /// A bare prompt (`mindcode hello world`) behaves like `mindcode chat`:
@@ -2883,6 +3105,129 @@ mod tests {
                 tui_socket_path("abc"),
                 dir.join(".mindcode/run/native-tui-abc.sock")
             );
+        });
+    }
+
+    #[test]
+    fn tui_transcript_sequences_entries_in_order() {
+        let mut transcript = TuiTranscript::default();
+        transcript.push("user", "hi");
+        transcript.push("assistant", "hello");
+        assert_eq!(transcript.entries.len(), 2);
+        let TranscriptInput::Entry {
+            sequence,
+            role,
+            text,
+        } = &transcript.entries[0]
+        else {
+            panic!("expected entry");
+        };
+        assert_eq!(*sequence, 0);
+        assert_eq!(role, "user");
+        assert_eq!(text, "hi");
+        let TranscriptInput::Entry { sequence, role, .. } = &transcript.entries[1] else {
+            panic!("expected entry");
+        };
+        assert_eq!(*sequence, 1);
+        assert_eq!(role, "assistant");
+    }
+
+    #[test]
+    fn tui_slash_model_and_effort_persist_and_report() {
+        with_sandbox_env(|dir| {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                seed_builtin_active(dir);
+                let mut transcript = TuiTranscript::default();
+
+                assert!(dispatch_tui_input("/model gpt-5.6-luna", &mut transcript)
+                    .await
+                    .unwrap());
+                assert_eq!(
+                    load_sandbox_settings(dir).global_worker_model.as_deref(),
+                    Some("gpt-5.6-luna")
+                );
+                let TranscriptInput::Entry { text, .. } = transcript.entries.last().unwrap() else {
+                    panic!("expected entry");
+                };
+                assert!(text.contains("gpt-5.6-luna"));
+
+                assert!(dispatch_tui_input("/effort max", &mut transcript)
+                    .await
+                    .unwrap());
+                assert_eq!(
+                    load_sandbox_settings(dir).worker_effort_lock,
+                    Some(WorkerEffort::Max)
+                );
+                assert!(dispatch_tui_input("/effort off", &mut transcript)
+                    .await
+                    .unwrap());
+                assert_eq!(load_sandbox_settings(dir).worker_effort_lock, None);
+
+                // An invalid effort level is a secret-free error, not a state change.
+                assert!(dispatch_tui_input("/effort nope", &mut transcript)
+                    .await
+                    .is_err());
+                assert_eq!(load_sandbox_settings(dir).worker_effort_lock, None);
+            });
+        });
+    }
+
+    #[test]
+    fn tui_slash_provider_use_switches_active_profile() {
+        with_sandbox_env(|dir| {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                seed_builtin_active(dir);
+                let mut settings = load_sandbox_settings(dir);
+                settings
+                    .add_provider(profile(
+                        "custom",
+                        "Custom",
+                        Protocol::OpenAiCompatible,
+                        "http://127.0.0.1:1/v1",
+                        CredentialRef::env("CUSTOM_KEY"),
+                        &["m1"],
+                    ))
+                    .unwrap();
+                seed_settings(dir, &settings);
+
+                let mut transcript = TuiTranscript::default();
+                assert!(dispatch_tui_input("/provider use custom", &mut transcript)
+                    .await
+                    .unwrap());
+                assert_eq!(
+                    load_sandbox_settings(dir)
+                        .active_provider
+                        .as_ref()
+                        .map(ProviderId::as_str),
+                    Some("custom")
+                );
+                let TranscriptInput::Entry { text, .. } = transcript.entries.last().unwrap() else {
+                    panic!("expected entry");
+                };
+                assert!(text.contains("custom"));
+            });
+        });
+    }
+
+    #[test]
+    fn tui_slash_help_and_unknown_are_transcript_lines() {
+        with_sandbox_env(|dir| {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                seed_builtin_active(dir);
+                let mut transcript = TuiTranscript::default();
+                assert!(dispatch_tui_input("/help", &mut transcript).await.unwrap());
+                assert!(dispatch_tui_input("/nope", &mut transcript).await.unwrap());
+                assert!(!dispatch_tui_input("   ", &mut transcript).await.unwrap());
+                assert_eq!(transcript.entries.len(), 2);
+                let TranscriptInput::Entry { text, .. } = &transcript.entries[0] else {
+                    panic!("expected entry");
+                };
+                assert!(text.contains("Commands"));
+                let TranscriptInput::Entry { text, .. } = &transcript.entries[1] else {
+                    panic!("expected entry");
+                };
+                assert!(text.contains("unknown command"));
+            });
         });
     }
 

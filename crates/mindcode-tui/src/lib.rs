@@ -1063,6 +1063,22 @@ impl App {
                 self.suppress_input = true;
                 true
             }
+            UiInputEventKind::Submit if self.overlay == OverlayView::None && !self.show_welcome => {
+                // The composer is the main interface: hand the typed buffer to
+                // the control server as a `composer_submit` action so it can be
+                // routed to a slash command or a live chat turn.
+                let text = std::mem::take(&mut self.input_buffer);
+                self.input_cursor = 0;
+                self.preferred_column = None;
+                if !text.trim().is_empty() {
+                    *event = UiInputEventKind::Action(provider_action(
+                        "composer_submit",
+                        None,
+                        Some(text),
+                    ));
+                }
+                true
+            }
             UiInputEventKind::Cancel
                 if self.overlay == OverlayView::Providers && self.provider_form.is_some() =>
             {
@@ -2772,6 +2788,50 @@ mod tests {
             }
             other => panic!("expected provider_add action, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn composer_submit_emits_composer_submit_action_with_buffer_text() {
+        let mut app = App {
+            show_welcome: false,
+            ..Default::default()
+        };
+        app.push_input("/model gpt-5.6-luna");
+
+        let mut submit = submit_message();
+        assert!(app.contextualize_input(&mut submit));
+        match submit {
+            UiMessage::InputEvent {
+                event: UiInputEventKind::Action(action),
+                ..
+            } => {
+                assert_eq!(action.action, "composer_submit");
+                assert_eq!(action.value.as_deref(), Some("/model gpt-5.6-luna"));
+            }
+            other => panic!("expected composer_submit action, got {other:?}"),
+        }
+        assert!(app.input_buffer.is_empty());
+    }
+
+    #[test]
+    fn composer_submit_drops_whitespace_only_buffer() {
+        let mut app = App {
+            show_welcome: false,
+            ..Default::default()
+        };
+        app.push_input("   ");
+
+        let mut submit = submit_message();
+        assert!(app.contextualize_input(&mut submit));
+        // Whitespace-only input is dropped: the event stays a bare Submit.
+        assert!(matches!(
+            submit,
+            UiMessage::InputEvent {
+                event: UiInputEventKind::Submit,
+                ..
+            }
+        ));
+        assert!(app.input_buffer.is_empty());
     }
 
     #[test]
