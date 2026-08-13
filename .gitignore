@@ -1,11 +1,8 @@
 .DS_Store
-node_modules/
 .mindcode-cache/
 .mindcode-test-tmp/
 target/
 crates/*/Cargo.lock
-!crates/mindcode-tui/Cargo.lock
-.npm-cache/
 .mindcode/
 .codex-backups/
 .claude/
@@ -18,9 +15,7 @@ coverage/
 *.db-shm
 *.db-wal
 *.log
-npm-debug.log*
 .env
 .env.*
 !.env.example
 *.local.json
-*.bun-build
