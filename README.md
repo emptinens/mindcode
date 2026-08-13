@@ -27,7 +27,7 @@ multi-provider chat, Rust TUI, Worker settings и public CLI parity пока
   не будет скрытым fallback для core.
 - **Multi-provider (amendment `2026-08-13`):** два протокола —
   `openai-compatible` (`/models`, `/chat/completions`) и `anthropic-compatible`
-  (`/v1/messages`). Пресетов провайдеров нет: пользователь вводит `name`,
+  (`/v1/models`, `/v1/messages`). Пресетов провайдеров нет: пользователь вводит `name`,
   `base_url`, `protocol` и ключ. VEXZY — built-in `openai-compatible` profile
   (`https://api.echogate.one/v1`, ключ `VEXZY_API_KEY`), редактируемый и
   удаляемый.
@@ -70,7 +70,7 @@ multi-provider chat, Rust TUI, Worker settings и public CLI parity пока
   "providers": {
     "protocols": {
       "openai-compatible": ["/models", "/chat/completions"],
-      "anthropic-compatible": ["/v1/messages"]
+      "anthropic-compatible": ["/v1/models", "/v1/messages"]
     },
     "presets": false,
     "builtin": {
@@ -121,13 +121,35 @@ multi-provider chat, Rust TUI, Worker settings и public CLI parity пока
     "fail_closed": true
   },
   "commands": {
-    "model": {"status": "public", "sets_global_worker_model": true},
-    "provider": {"status": "public", "switches_active_provider": true},
+    "auth": {
+      "status": "public",
+      "subcommands": ["status"],
+      "credential_status": ["configured", "not configured"],
+      "resolution": ["env", "store", "fail-closed"],
+      "exit_on_missing_credential": 1
+    },
+    "model": {
+      "status": "public",
+      "sets_global_worker_model": true,
+      "subcommands": ["eligible"]
+    },
+    "provider": {
+      "status": "public",
+      "switches_active_provider": true,
+      "subcommands": ["list", "use", "add", "remove", "edit"],
+      "key_value_never_accepted": true
+    },
     "settings": {
       "status": "public",
-      "manages": ["provider", "key", "allowlist", "prefs"]
+      "manages": ["provider", "key", "allowlist", "prefs"],
+      "subcommands": ["show", "key", "allowlist", "model", "effort"],
+      "key_command_output": "configured"
     },
-    "effort": {"status": "public", "sets_leader_effort": true},
+    "effort": {
+      "status": "public",
+      "sets_leader_effort": true,
+      "subcommands": ["worker"]
+    },
     "config": {"status": "removed", "error": "unknown_command"},
     "submodel": {"status": "removed", "error": "unknown_command"}
   },

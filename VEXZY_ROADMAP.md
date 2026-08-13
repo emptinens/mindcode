@@ -28,7 +28,7 @@
 ### Provider boundary
 
 1. Two protocols: `openai-compatible` (`/models`, `/chat/completions`) and
-   `anthropic-compatible` (`/v1/messages`).  No provider presets: custom
+   `anthropic-compatible` (`/v1/models`, `/v1/messages`).  No provider presets: custom
    profiles require user-supplied `name`, `base_url`, `protocol` and key.
 2. VEXZY is the built-in `openai-compatible` profile at
    `https://api.echogate.one/v1` with env credential `VEXZY_API_KEY`; it is

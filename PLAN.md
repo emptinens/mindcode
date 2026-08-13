@@ -21,7 +21,7 @@ Amendment `2026-08-13`: владелец утвердил multi-provider contrac
 | Целевая версия | `0.1.3`, approved migration (multi-provider amendment `2026-08-13`) |
 | Целевая архитектура | Rust-first single executable with in-process daemon and Rust TUI |
 | Поддерживаемая ОС/архитектура | Linux x86_64 |
-| Model API | Multi-provider: `openai-compatible` (`/models`, `/chat/completions`) и `anthropic-compatible` (`/v1/messages`) |
+| Model API | Multi-provider: `openai-compatible` (`/models`, `/chat/completions`) и `anthropic-compatible` (`/v1/models`, `/v1/messages`) |
 | Built-in provider | VEXZY: `openai-compatible`, base `https://api.echogate.one/v1`, env credential `VEXZY_API_KEY`; редактируемый/удаляемый |
 | Custom providers | без пресетов: пользователь вводит `name`, `base_url`, `protocol`, ключ |
 | Credential | env → on-disk secret store `~/.config/mindcode/credentials.json` (0600/0700) → fail-closed |
@@ -83,7 +83,7 @@ fallback во время обычного запуска, daemon work, TUI ил�
 ### 3.0 Providers и protocols
 
 - Два supported protocols: `openai-compatible` (`/models`, `/chat/completions`)
-  и `anthropic-compatible` (`/v1/messages`).  Других protocols нет.
+  и `anthropic-compatible` (`/v1/models`, `/v1/messages`).  Других protocols нет.
 - Пресетов провайдеров нет: для каждого custom profile пользователь вводит
   `name`, `base_url`, `protocol` и ключ.
 - VEXZY — built-in `openai-compatible` profile: base
@@ -160,7 +160,7 @@ fixture (его canonical vectors публикуются в README и теста
   "providers": {
     "protocols": {
       "openai-compatible": ["/models", "/chat/completions"],
-      "anthropic-compatible": ["/v1/messages"]
+      "anthropic-compatible": ["/v1/models", "/v1/messages"]
     },
     "presets": false,
     "builtin": {
@@ -211,13 +211,35 @@ fixture (его canonical vectors публикуются в README и теста
     "fail_closed": true
   },
   "commands": {
-    "model": {"status": "public", "sets_global_worker_model": true},
-    "provider": {"status": "public", "switches_active_provider": true},
+    "auth": {
+      "status": "public",
+      "subcommands": ["status"],
+      "credential_status": ["configured", "not configured"],
+      "resolution": ["env", "store", "fail-closed"],
+      "exit_on_missing_credential": 1
+    },
+    "model": {
+      "status": "public",
+      "sets_global_worker_model": true,
+      "subcommands": ["eligible"]
+    },
+    "provider": {
+      "status": "public",
+      "switches_active_provider": true,
+      "subcommands": ["list", "use", "add", "remove", "edit"],
+      "key_value_never_accepted": true
+    },
     "settings": {
       "status": "public",
-      "manages": ["provider", "key", "allowlist", "prefs"]
+      "manages": ["provider", "key", "allowlist", "prefs"],
+      "subcommands": ["show", "key", "allowlist", "model", "effort"],
+      "key_command_output": "configured"
     },
-    "effort": {"status": "public", "sets_leader_effort": true},
+    "effort": {
+      "status": "public",
+      "sets_leader_effort": true,
+      "subcommands": ["worker"]
+    },
     "config": {"status": "removed", "error": "unknown_command"},
     "submodel": {"status": "removed", "error": "unknown_command"}
   },
@@ -319,7 +341,7 @@ small and reviewable.
 
 - **Что изменено:** `0.1.3` переведён с VEXZY-only на multi-provider.  Два
   protocols (`openai-compatible` через `/models` + `/chat/completions`,
-  `anthropic-compatible` через `/v1/messages`); пресеты провайдеров не
+  `anthropic-compatible` через `/v1/models` + `/v1/messages`); пресеты провайдеров не
   добавляются.  VEXZY стал built-in `openai-compatible` profile
   (`https://api.echogate.one/v1`, `VEXZY_API_KEY`), редактируемым/удаляемым.
   Ключи переехали в on-disk secret store `~/.config/mindcode/credentials.json`

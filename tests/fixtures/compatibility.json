@@ -4,7 +4,7 @@
   "providers": {
     "protocols": {
       "openai-compatible": ["/models", "/chat/completions"],
-      "anthropic-compatible": ["/v1/messages"]
+      "anthropic-compatible": ["/v1/models", "/v1/messages"]
     },
     "presets": false,
     "builtin": {
@@ -55,13 +55,35 @@
     "fail_closed": true
   },
   "commands": {
-    "model": {"status": "public", "sets_global_worker_model": true},
-    "provider": {"status": "public", "switches_active_provider": true},
+    "auth": {
+      "status": "public",
+      "subcommands": ["status"],
+      "credential_status": ["configured", "not configured"],
+      "resolution": ["env", "store", "fail-closed"],
+      "exit_on_missing_credential": 1
+    },
+    "model": {
+      "status": "public",
+      "sets_global_worker_model": true,
+      "subcommands": ["eligible"]
+    },
+    "provider": {
+      "status": "public",
+      "switches_active_provider": true,
+      "subcommands": ["list", "use", "add", "remove", "edit"],
+      "key_value_never_accepted": true
+    },
     "settings": {
       "status": "public",
-      "manages": ["provider", "key", "allowlist", "prefs"]
+      "manages": ["provider", "key", "allowlist", "prefs"],
+      "subcommands": ["show", "key", "allowlist", "model", "effort"],
+      "key_command_output": "configured"
     },
-    "effort": {"status": "public", "sets_leader_effort": true},
+    "effort": {
+      "status": "public",
+      "sets_leader_effort": true,
+      "subcommands": ["worker"]
+    },
     "config": {"status": "removed", "error": "unknown_command"},
     "submodel": {"status": "removed", "error": "unknown_command"}
   },

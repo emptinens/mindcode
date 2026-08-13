@@ -28,7 +28,7 @@ it from the checkpointed, but untagged, `0.1.2`.
   or hook.  Never use Bun/Node as a silent core fallback.
 - `0.1.3` is multi-provider (amendment `2026-08-13`).  Two protocols are
   supported: `openai-compatible` (`/models`, `/chat/completions`) and
-  `anthropic-compatible` (`/v1/messages`).  There are no provider presets: the
+  `anthropic-compatible` (`/v1/models`, `/v1/messages`).  There are no provider presets: the
   user supplies `name`, `base_url`, `protocol`, and key for each custom
   profile.  VEXZY is the built-in `openai-compatible` profile at
   `https://api.echogate.one/v1` with the environment credential
