@@ -9,17 +9,19 @@ use std::fmt;
 
 use mindcode_protocol::ui::{
     UiActivitySnapshot, UiAgentSnapshot, UiChangeSnapshot, UiCodeBlock, UiConnectionSnapshot,
-    UiErrorBlock, UiMarkdownBlock, UiPermissionRequest, UiRenderSnapshot, UiReportBlock,
-    UiSessionSnapshot, UiStatusSnapshot, UiTaskMetadata, UiTaskSnapshot, UiTelemetrySnapshot,
-    UiThinkingBlock, UiToolBlock, UiTranscriptBlock, UiTranscriptWindow, UiWorkspaceSnapshot,
-    UiWriterState, UI_MAX_ACTIVITY, UI_MAX_ACTIVITY_ID_BYTES, UI_MAX_ACTIVITY_MESSAGE_BYTES,
-    UI_MAX_AGENTS, UI_MAX_AGENT_ID_BYTES, UI_MAX_AGENT_NAME_BYTES, UI_MAX_CODE_BYTES,
-    UI_MAX_CONNECTION_BYTES, UI_MAX_DEPENDENCIES, UI_MAX_DIFF_BYTES, UI_MAX_EFFORT_BYTES,
-    UI_MAX_FILES, UI_MAX_FILE_PATH_BYTES, UI_MAX_ID_BYTES, UI_MAX_LANGUAGE_BYTES,
-    UI_MAX_MESSAGE_BYTES, UI_MAX_MODEL_BYTES, UI_MAX_PERMISSIONS, UI_MAX_PERMISSION_ID_BYTES,
-    UI_MAX_PERMISSION_TEXT_BYTES, UI_MAX_REPORT_EVIDENCE, UI_MAX_REPORT_EVIDENCE_BYTES,
-    UI_MAX_SESSIONS, UI_MAX_SESSION_NAME_BYTES, UI_MAX_SNAPSHOT_BYTES, UI_MAX_STATUS_BYTES,
-    UI_MAX_TASKS, UI_MAX_TASK_ID_BYTES, UI_MAX_TASK_TITLE_BYTES, UI_MAX_TOOL_ARGUMENTS_BYTES,
+    UiErrorBlock, UiMarkdownBlock, UiPermissionRequest, UiProviderSnapshot, UiRenderSnapshot,
+    UiReportBlock, UiSessionSnapshot, UiStatusSnapshot, UiTaskMetadata, UiTaskSnapshot,
+    UiTelemetrySnapshot, UiThinkingBlock, UiToolBlock, UiTranscriptBlock, UiTranscriptWindow,
+    UiWorkspaceSnapshot, UiWriterState, UI_MAX_ACTIVITY, UI_MAX_ACTIVITY_ID_BYTES,
+    UI_MAX_ACTIVITY_MESSAGE_BYTES, UI_MAX_AGENTS, UI_MAX_AGENT_ID_BYTES, UI_MAX_AGENT_NAME_BYTES,
+    UI_MAX_CODE_BYTES, UI_MAX_CONNECTION_BYTES, UI_MAX_DEPENDENCIES, UI_MAX_DIFF_BYTES,
+    UI_MAX_EFFORT_BYTES, UI_MAX_FILES, UI_MAX_FILE_PATH_BYTES, UI_MAX_ID_BYTES,
+    UI_MAX_LANGUAGE_BYTES, UI_MAX_MESSAGE_BYTES, UI_MAX_MODEL_BYTES, UI_MAX_PERMISSIONS,
+    UI_MAX_PERMISSION_ID_BYTES, UI_MAX_PERMISSION_TEXT_BYTES, UI_MAX_PROVIDERS,
+    UI_MAX_PROVIDER_ID_BYTES, UI_MAX_PROVIDER_NAME_BYTES, UI_MAX_PROVIDER_URL_BYTES,
+    UI_MAX_REPORT_EVIDENCE, UI_MAX_REPORT_EVIDENCE_BYTES, UI_MAX_SESSIONS,
+    UI_MAX_SESSION_NAME_BYTES, UI_MAX_SNAPSHOT_BYTES, UI_MAX_STATUS_BYTES, UI_MAX_TASKS,
+    UI_MAX_TASK_ID_BYTES, UI_MAX_TASK_TITLE_BYTES, UI_MAX_TOOL_ARGUMENTS_BYTES,
     UI_MAX_TOOL_NAME_BYTES, UI_MAX_TOOL_OUTPUT_BYTES, UI_MAX_TRANSCRIPT_BLOCKS,
     UI_MAX_TRANSCRIPT_ID_BYTES, UI_MAX_TRANSCRIPT_ROLE_BYTES, UI_MAX_TRANSCRIPT_TEXT_BYTES,
     UI_MAX_WORKSPACES, UI_MAX_WORKSPACE_BYTES, UI_PROTOCOL_VERSION,
@@ -257,6 +259,18 @@ pub struct WriterInput {
     pub observers: Option<Vec<String>>,
 }
 
+/// One provider profile for the setup screen.  `credential` is the
+/// secret-free reference (`env:<NAME>` or `store`), never the value.
+#[derive(Debug, Clone, Default)]
+pub struct ProviderInput {
+    pub id: String,
+    pub name: String,
+    pub protocol: String,
+    pub base_url: String,
+    pub active: Option<bool>,
+    pub credential: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ProjectionInput {
     pub status: StatusInput,
@@ -271,6 +285,7 @@ pub struct ProjectionInput {
     pub changes: Vec<ChangeInput>,
     pub activity: Vec<ActivityInput>,
     pub permissions: Vec<PermissionInput>,
+    pub providers: Vec<ProviderInput>,
     pub writer: WriterInput,
 }
 
@@ -560,6 +575,60 @@ pub fn project_sessions(
                 unread: input.unread.unwrap_or(0),
                 created_at_ms: input.created_at_ms.unwrap_or(0),
                 updated_at_ms: input.updated_at_ms.unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+pub fn project_providers(
+    inputs: &[ProviderInput],
+) -> Result<Vec<UiProviderSnapshot>, ProjectionError> {
+    if inputs.len() > UI_MAX_PROVIDERS {
+        return Err(projection("providers exceeds its maximum size"));
+    }
+    inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            let context = format!("providers[{index}]");
+            Ok(UiProviderSnapshot {
+                id: text(
+                    &input.id,
+                    &format!("{context}.id"),
+                    UI_MAX_PROVIDER_ID_BYTES,
+                    false,
+                )?,
+                name: text(
+                    &input.name,
+                    &format!("{context}.name"),
+                    UI_MAX_PROVIDER_NAME_BYTES,
+                    false,
+                )?,
+                protocol: text(
+                    &input.protocol,
+                    &format!("{context}.protocol"),
+                    UI_MAX_CODE_BYTES,
+                    false,
+                )?,
+                base_url: text(
+                    &input.base_url,
+                    &format!("{context}.base_url"),
+                    UI_MAX_PROVIDER_URL_BYTES,
+                    false,
+                )?,
+                active: input.active.unwrap_or(false),
+                credential: input
+                    .credential
+                    .as_deref()
+                    .map(|value| {
+                        text(
+                            value,
+                            &format!("{context}.credential"),
+                            UI_MAX_PROVIDER_ID_BYTES,
+                            false,
+                        )
+                    })
+                    .transpose()?,
             })
         })
         .collect()
@@ -1642,6 +1711,7 @@ pub fn project_render_snapshot(
         changes: project_changes(&input.changes)?,
         activity: project_activity(&input.activity)?,
         permissions: project_permissions(&input.permissions)?,
+        providers: project_providers(&input.providers)?,
         writer: project_writer(&input.writer)?,
     };
     enforce_snapshot_byte_budget(snapshot)

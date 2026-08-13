@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use mindcode_protocol::ui::{
-    encode_ui_frame, UiInputEventKind, UiKeyInput, UiMessage, UiRenderSnapshot, UI_MAX_FRAME_SIZE,
-    UI_MAX_INPUT_BYTES, UI_PROTOCOL_VERSION,
+    encode_ui_frame, UiActionInput, UiInputEventKind, UiKeyInput, UiMessage, UiRenderSnapshot,
+    UI_MAX_FRAME_SIZE, UI_MAX_INPUT_BYTES, UI_PROTOCOL_VERSION,
 };
 use mindcode_protocol::ProtocolError;
 use ratatui::layout::Rect;
@@ -78,6 +78,106 @@ fn validate_handshake_response(message: &UiMessage, session_id: &str) -> Result<
         ));
     }
     Ok(())
+}
+
+/// Which field of the add-provider form currently has focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderFormField {
+    Id,
+    Name,
+    Protocol,
+    BaseUrl,
+    CredentialEnv,
+    Allowlist,
+}
+
+impl ProviderFormField {
+    pub const ALL: [Self; 6] = [
+        Self::Id,
+        Self::Name,
+        Self::Protocol,
+        Self::BaseUrl,
+        Self::CredentialEnv,
+        Self::Allowlist,
+    ];
+
+    pub fn next(self) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|field| *field == self)
+            .unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+}
+
+/// Renderer-local state for the add-provider form.  The credential is only
+/// ever an environment-variable *name*; a value never passes through here.
+#[derive(Debug, Clone)]
+pub struct ProviderForm {
+    pub field: ProviderFormField,
+    pub id: String,
+    pub name: String,
+    pub protocol: usize,
+    pub base_url: String,
+    pub credential_env: String,
+    pub allowlist: String,
+}
+
+impl Default for ProviderForm {
+    fn default() -> Self {
+        Self {
+            field: ProviderFormField::Id,
+            id: String::new(),
+            name: String::new(),
+            protocol: 0,
+            base_url: String::new(),
+            credential_env: String::new(),
+            allowlist: String::new(),
+        }
+    }
+}
+
+impl ProviderForm {
+    pub const PROTOCOLS: [&'static str; 2] = ["openai-compatible", "anthropic-compatible"];
+
+    pub fn protocol_name(&self) -> &'static str {
+        Self::PROTOCOLS[self.protocol % Self::PROTOCOLS.len()]
+    }
+
+    pub fn cycle_protocol(&mut self) {
+        self.protocol = (self.protocol + 1) % Self::PROTOCOLS.len();
+    }
+
+    fn field_value_mut(&mut self, field: ProviderFormField) -> &mut String {
+        match field {
+            ProviderFormField::Id => &mut self.id,
+            ProviderFormField::Name => &mut self.name,
+            ProviderFormField::BaseUrl => &mut self.base_url,
+            ProviderFormField::CredentialEnv => &mut self.credential_env,
+            ProviderFormField::Allowlist => &mut self.allowlist,
+            // The protocol field is a fixed cycle, not free text.
+            ProviderFormField::Protocol => &mut self.name,
+        }
+    }
+
+    /// The JSON payload consumed by the native `provider_add` action handler.
+    fn to_payload(&self) -> String {
+        let allowlist = self
+            .allowlist
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "id": self.id,
+            "name": self.name,
+            "protocol": self.protocol_name(),
+            "base_url": self.base_url,
+            "credential_env": self.credential_env,
+            "allowlist": allowlist,
+        })
+        .to_string()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +311,8 @@ pub struct App {
     changes_scroll: usize,
     selected_task: Option<usize>,
     selected_change: Option<usize>,
+    provider_selection: usize,
+    provider_form: Option<ProviderForm>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,6 +382,8 @@ impl App {
             changes_scroll: 0,
             selected_task: None,
             selected_change: None,
+            provider_selection: 0,
+            provider_form: None,
         }
     }
 
@@ -365,6 +469,26 @@ impl App {
         self.pointer_press = None;
     }
 
+    fn open_providers(&mut self) {
+        if self.overlay == OverlayView::None {
+            self.set_overlay(OverlayView::Providers);
+        }
+        self.provider_form = None;
+        self.clamp_provider_selection();
+    }
+
+    fn clamp_provider_selection(&mut self) {
+        let len = self
+            .latest_snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.providers.len());
+        self.provider_selection = if len == 0 {
+            0
+        } else {
+            self.provider_selection.min(len - 1)
+        };
+    }
+
     fn select_workspace(&mut self, workspace: String) {
         if workspace == self.workspace_id {
             return;
@@ -406,6 +530,7 @@ impl App {
             changes,
             activity,
             permissions,
+            providers,
             writer,
         } = message
         {
@@ -430,6 +555,7 @@ impl App {
                     changes,
                     activity,
                     permissions,
+                    providers,
                     writer,
                 };
                 self.update_workspace_from_snapshot(&snapshot);
@@ -458,6 +584,7 @@ impl App {
                     .selected_change
                     .filter(|index| *index < snapshot.changes.len());
                 self.latest_snapshot = Some(snapshot);
+                self.clamp_provider_selection();
                 return true;
             }
         }
@@ -485,6 +612,8 @@ impl App {
                 changes_scroll: self.changes_scroll,
                 selected_task: self.selected_task,
                 selected_change: self.selected_change,
+                provider_selection: self.provider_selection,
+                provider_form: self.provider_form.as_ref(),
             },
         );
     }
@@ -866,6 +995,23 @@ impl App {
                     }
                 }
 
+                if exact_modifiers(modifiers, &["ctrl"]) && key == "p" {
+                    self.open_providers();
+                    self.suppress_input = true;
+                    return true;
+                }
+
+                if self.overlay == OverlayView::Providers {
+                    self.suppress_input = true;
+                    let key = key.clone();
+                    let modifiers = modifiers.clone();
+                    return if self.provider_form.is_some() {
+                        self.handle_provider_form_key(&key, &modifiers, event)
+                    } else {
+                        self.handle_providers_list_key(&key, &modifiers, event)
+                    };
+                }
+
                 if self.overlay != OverlayView::None {
                     // Every key not explicitly handled above belongs to the
                     // modal focus scope and must not leak into the session.
@@ -912,11 +1058,130 @@ impl App {
                 false
             }
             UiInputEventKind::Mouse(_) => false,
+            UiInputEventKind::Submit if self.overlay == OverlayView::Providers => {
+                self.handle_provider_submit(event);
+                self.suppress_input = true;
+                true
+            }
+            UiInputEventKind::Cancel
+                if self.overlay == OverlayView::Providers && self.provider_form.is_some() =>
+            {
+                self.provider_form = None;
+                self.suppress_input = true;
+                true
+            }
             _ if self.overlay != OverlayView::None => {
                 self.suppress_input = true;
                 true
             }
             _ => false,
+        }
+    }
+
+    fn selected_provider_id(&self) -> Option<String> {
+        self.latest_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.providers.get(self.provider_selection))
+            .map(|provider| provider.id.clone())
+    }
+
+    /// Provider-list overlay keys: navigate, switch, remove, or open the add
+    /// form.  Every key is consumed locally; the active provider id is carried
+    /// only as an action target, never as a credential.
+    fn handle_providers_list_key(
+        &mut self,
+        key: &str,
+        modifiers: &[String],
+        event: &mut UiInputEventKind,
+    ) -> bool {
+        if !modifiers.is_empty() {
+            return true;
+        }
+        let len = self
+            .latest_snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.providers.len());
+        match key {
+            "up" => {
+                self.provider_selection = self.provider_selection.saturating_sub(1);
+            }
+            "down" if len > 0 => {
+                self.provider_selection = (self.provider_selection + 1).min(len - 1);
+            }
+            "a" => {
+                self.provider_form = Some(ProviderForm::default());
+            }
+            "d" => {
+                if let Some(id) = self.selected_provider_id() {
+                    *event = UiInputEventKind::Action(provider_action(
+                        "provider_remove",
+                        Some(id),
+                        None,
+                    ));
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    /// Add-provider form keys: text entry, backspace, and protocol cycling.
+    fn handle_provider_form_key(
+        &mut self,
+        key: &str,
+        modifiers: &[String],
+        _event: &mut UiInputEventKind,
+    ) -> bool {
+        if !modifiers.is_empty() {
+            return true;
+        }
+        match key {
+            "backspace" => {
+                if let Some(form) = &mut self.provider_form {
+                    if form.field != ProviderFormField::Protocol {
+                        form.field_value_mut(form.field).pop();
+                    }
+                }
+            }
+            "tab" | "back_tab" | "left" | "right" | "up" | "down" | " " => {
+                if let Some(form) = &mut self.provider_form {
+                    if form.field == ProviderFormField::Protocol {
+                        form.cycle_protocol();
+                    } else if matches!(key, "tab" | "back_tab") {
+                        form.field = form.field.next();
+                    }
+                }
+            }
+            key if key.chars().count() == 1 => {
+                if let Some(form) = &mut self.provider_form {
+                    if form.field != ProviderFormField::Protocol {
+                        let character = key.chars().next().expect("single-char key");
+                        let value = form.field_value_mut(form.field);
+                        if value.len().saturating_add(character.len_utf8()) <= UI_MAX_INPUT_BYTES {
+                            value.push_str(key);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    /// Submit in the providers overlay: advance the add form, emit the final
+    /// `provider_add`, or switch to the selected provider.
+    fn handle_provider_submit(&mut self, event: &mut UiInputEventKind) {
+        if let Some(form) = &mut self.provider_form {
+            if form.field == ProviderFormField::Allowlist {
+                let payload = form.to_payload();
+                self.provider_form = None;
+                *event =
+                    UiInputEventKind::Action(provider_action("provider_add", None, Some(payload)));
+            } else {
+                form.field = form.field.next();
+            }
+        } else if let Some(id) = self.selected_provider_id() {
+            *event = UiInputEventKind::Action(provider_action("provider_switch", Some(id), None));
         }
     }
 
@@ -1406,6 +1671,8 @@ pub fn render_snapshot(frame: &mut Frame<'_>, snapshot: Option<&UiRenderSnapshot
             changes_scroll: 0,
             selected_task: None,
             selected_change: None,
+            provider_selection: 0,
+            provider_form: None,
         },
     );
 }
@@ -1518,6 +1785,25 @@ fn transport_passthrough(app: &App, message: &UiMessage) -> bool {
                 ..
             } if action.action == "transcript_page"
         )
+        || matches!(
+            message,
+            UiMessage::InputEvent {
+                event: UiInputEventKind::Action(action),
+                ..
+            } if app.overlay == OverlayView::Providers
+                && matches!(
+                    action.action.as_str(),
+                    "provider_switch" | "provider_remove" | "provider_add"
+                )
+        )
+}
+
+fn provider_action(action: &str, target: Option<String>, value: Option<String>) -> UiActionInput {
+    UiActionInput {
+        action: action.to_owned(),
+        target,
+        value,
+    }
 }
 
 fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
@@ -2323,6 +2609,7 @@ mod tests {
             changes: Vec::new(),
             activity: Vec::new(),
             permissions: Vec::new(),
+            providers: Vec::new(),
             writer: UiWriterState {
                 mode: "writer".into(),
                 writer_id: Some("client-1".into()),
@@ -2350,6 +2637,7 @@ mod tests {
             changes: snapshot.changes,
             activity: snapshot.activity,
             permissions: snapshot.permissions,
+            providers: snapshot.providers,
             writer: snapshot.writer,
         }
     }
@@ -2367,6 +2655,142 @@ mod tests {
                     .collect(),
             }),
         }
+    }
+
+    fn submit_message() -> UiMessage {
+        UiMessage::InputEvent {
+            version: UI_PROTOCOL_VERSION,
+            id: "test-input".into(),
+            sequence: 1,
+            event: UiInputEventKind::Submit,
+        }
+    }
+
+    fn cancel_message() -> UiMessage {
+        UiMessage::InputEvent {
+            version: UI_PROTOCOL_VERSION,
+            id: "test-input".into(),
+            sequence: 1,
+            event: UiInputEventKind::Cancel,
+        }
+    }
+
+    fn app_with_providers() -> App {
+        use mindcode_protocol::ui::UiProviderSnapshot;
+        let mut current = snapshot(1);
+        current.providers = vec![
+            UiProviderSnapshot {
+                id: "vexzy".into(),
+                name: "VEXZY".into(),
+                protocol: "openai-compatible".into(),
+                base_url: "https://api.echogate.one/v1".into(),
+                active: true,
+                credential: Some("env:VEXZY_API_KEY".into()),
+            },
+            UiProviderSnapshot {
+                id: "custom-a".into(),
+                name: "Custom A".into(),
+                protocol: "openai-compatible".into(),
+                base_url: "https://custom.example/v1".into(),
+                active: false,
+                credential: Some("env:CUSTOM_KEY".into()),
+            },
+        ];
+        let mut app = App::default();
+        app.apply_message(render_message(current, "providers"));
+        app
+    }
+
+    #[test]
+    fn providers_overlay_switch_emits_action_for_selected_provider() {
+        let mut app = app_with_providers();
+        let mut ctrl_p = key_message("p", &["ctrl"]);
+        assert!(app.contextualize_input(&mut ctrl_p));
+        assert_eq!(app.overlay, OverlayView::Providers);
+
+        let mut down = key_message("down", &[]);
+        assert!(app.contextualize_input(&mut down));
+        assert_eq!(app.provider_selection, 1);
+
+        let mut enter = submit_message();
+        assert!(app.contextualize_input(&mut enter));
+        match enter {
+            UiMessage::InputEvent {
+                event: UiInputEventKind::Action(action),
+                ..
+            } => {
+                assert_eq!(action.action, "provider_switch");
+                assert_eq!(action.target.as_deref(), Some("custom-a"));
+            }
+            other => panic!("expected provider_switch action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn providers_overlay_escape_cancels_form_before_overlay() {
+        let mut app = app_with_providers();
+        app.open_providers();
+        let mut a = key_message("a", &[]);
+        assert!(app.contextualize_input(&mut a));
+        assert!(app.provider_form.is_some());
+
+        let mut esc = cancel_message();
+        assert!(app.contextualize_input(&mut esc));
+        assert!(app.provider_form.is_none());
+        assert_eq!(app.overlay, OverlayView::Providers);
+    }
+
+    #[test]
+    fn providers_overlay_add_submit_emits_provider_add_action() {
+        let mut app = app_with_providers();
+        app.open_providers();
+        let mut a = key_message("a", &[]);
+        assert!(app.contextualize_input(&mut a));
+
+        let form = app.provider_form.as_mut().unwrap();
+        form.id = "my-api".into();
+        form.name = "My API".into();
+        form.base_url = "https://my.example/v1".into();
+        form.credential_env = "MY_KEY".into();
+        form.allowlist = "model-a, model-b".into();
+        form.field = ProviderFormField::Allowlist;
+
+        let mut submit = submit_message();
+        assert!(app.contextualize_input(&mut submit));
+        assert!(app.provider_form.is_none());
+        match submit {
+            UiMessage::InputEvent {
+                event: UiInputEventKind::Action(action),
+                ..
+            } => {
+                assert_eq!(action.action, "provider_add");
+                let value: serde_json::Value =
+                    serde_json::from_str(action.value.as_deref().unwrap()).unwrap();
+                assert_eq!(value["id"], "my-api");
+                assert_eq!(value["protocol"], "openai-compatible");
+                assert_eq!(value["allowlist"][1], "model-b");
+            }
+            other => panic!("expected provider_add action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provider_form_payload_is_valid_json_without_a_credential_value() {
+        let form = ProviderForm {
+            field: ProviderFormField::Id,
+            id: "my-api".into(),
+            name: "My API".into(),
+            protocol: 0,
+            base_url: "https://my.example/v1".into(),
+            credential_env: "MY_KEY".into(),
+            allowlist: "model-a, model-b".into(),
+        };
+        let payload = form.to_payload();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value["id"], "my-api");
+        assert_eq!(value["protocol"], "openai-compatible");
+        assert_eq!(value["allowlist"][1], "model-b");
+        assert!(!payload.contains("sk-") && !payload.contains("forge-"));
     }
 
     #[test]

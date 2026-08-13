@@ -58,6 +58,10 @@ pub const UI_MAX_PERMISSIONS: usize = 256;
 pub const UI_MAX_PERMISSION_ID_BYTES: usize = 256;
 pub const UI_MAX_PERMISSION_TEXT_BYTES: usize = 4 * 1024;
 pub const UI_MAX_WRITERS: usize = 64;
+pub const UI_MAX_PROVIDERS: usize = 64;
+pub const UI_MAX_PROVIDER_ID_BYTES: usize = 128;
+pub const UI_MAX_PROVIDER_NAME_BYTES: usize = 256;
+pub const UI_MAX_PROVIDER_URL_BYTES: usize = 2_048;
 pub const UI_MAX_ACTION_BYTES: usize = 128;
 pub const UI_MAX_ACTION_VALUE_BYTES: usize = 64 * 1024;
 
@@ -487,6 +491,22 @@ pub struct UiPermissionRequest {
     pub agent_id: Option<String>,
 }
 
+/// One provider profile, projected secret-free for the setup screen.  Only
+/// the credential *reference* (`env:<NAME>` or `store`) is carried; a
+/// credential value never enters a snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UiProviderSnapshot {
+    pub id: String,
+    pub name: String,
+    pub protocol: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UiWriterState {
@@ -531,6 +551,12 @@ pub struct UiRenderSnapshot {
     pub activity: Vec<UiActivitySnapshot>,
     #[serde(deserialize_with = "deserialize_permissions")]
     pub permissions: Vec<UiPermissionRequest>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_providers",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub providers: Vec<UiProviderSnapshot>,
     pub writer: UiWriterState,
 }
 
@@ -617,6 +643,12 @@ pub enum UiMessage {
         activity: Vec<UiActivitySnapshot>,
         #[serde(deserialize_with = "deserialize_permissions")]
         permissions: Vec<UiPermissionRequest>,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_providers",
+            skip_serializing_if = "Vec::is_empty"
+        )]
+        providers: Vec<UiProviderSnapshot>,
         writer: UiWriterState,
     },
     Ack {
@@ -749,6 +781,7 @@ impl From<StrictUiMessage> for UiMessage {
                 changes: value.changes,
                 activity: value.activity,
                 permissions: value.permissions,
+                providers: value.providers,
                 writer: value.writer,
             },
             StrictUiMessage::Ack(value) => Self::Ack {
@@ -860,6 +893,7 @@ impl UiMessage {
                 changes,
                 activity,
                 permissions,
+                providers,
                 writer,
             } => {
                 validate_render_snapshot(
@@ -877,6 +911,7 @@ impl UiMessage {
                     changes,
                     activity,
                     permissions,
+                    providers,
                     writer,
                 )?;
             }
@@ -932,6 +967,7 @@ impl UiRenderSnapshot {
             &self.changes,
             &self.activity,
             &self.permissions,
+            &self.providers,
             &self.writer,
         )
     }
@@ -992,6 +1028,7 @@ fn validate_render_snapshot(
     changes: &[UiChangeSnapshot],
     activity: &[UiActivitySnapshot],
     permissions: &[UiPermissionRequest],
+    providers: &[UiProviderSnapshot],
     writer: &UiWriterState,
 ) -> Result<(), UiValidationError> {
     validate_version(version)?;
@@ -1012,6 +1049,7 @@ fn validate_render_snapshot(
     validate_changes(changes)?;
     validate_activity(activity)?;
     validate_permissions(permissions)?;
+    validate_providers(providers)?;
     validate_writer(writer)?;
     validate_snapshot_budget(
         id,
@@ -1027,6 +1065,7 @@ fn validate_render_snapshot(
         changes,
         activity,
         permissions,
+        providers,
         writer,
     )
 }
@@ -1422,6 +1461,23 @@ fn validate_permissions(values: &[UiPermissionRequest]) -> Result<(), UiValidati
     }
     Ok(())
 }
+fn validate_providers(values: &[UiProviderSnapshot]) -> Result<(), UiValidationError> {
+    validate_count(values.len(), UI_MAX_PROVIDERS, "providers")?;
+    for value in values {
+        validate_non_empty_text(&value.id, UI_MAX_PROVIDER_ID_BYTES, "provider id")?;
+        validate_non_empty_text(&value.name, UI_MAX_PROVIDER_NAME_BYTES, "provider name")?;
+        validate_non_empty_text(&value.protocol, UI_MAX_CODE_BYTES, "provider protocol")?;
+        validate_non_empty_text(
+            &value.base_url,
+            UI_MAX_PROVIDER_URL_BYTES,
+            "provider base url",
+        )?;
+        if let Some(reference) = &value.credential {
+            validate_non_empty_text(reference, UI_MAX_PROVIDER_ID_BYTES, "provider credential")?;
+        }
+    }
+    Ok(())
+}
 fn validate_writer(value: &UiWriterState) -> Result<(), UiValidationError> {
     validate_non_empty_text(&value.mode, UI_MAX_CONNECTION_BYTES, "writer mode")?;
     if let Some(text) = &value.writer_id {
@@ -1450,6 +1506,7 @@ fn validate_snapshot_budget(
     changes: &[UiChangeSnapshot],
     activity: &[UiActivitySnapshot],
     permissions: &[UiPermissionRequest],
+    providers: &[UiProviderSnapshot],
     writer: &UiWriterState,
 ) -> Result<(), UiValidationError> {
     let mut total = 0usize;
@@ -1531,6 +1588,12 @@ fn validate_snapshot_budget(
         }
         add_optional_bytes(&mut total, value.task_id.as_deref())?;
         add_optional_bytes(&mut total, value.agent_id.as_deref())?;
+    }
+    for value in providers {
+        for text in [&value.id, &value.name, &value.protocol, &value.base_url] {
+            add_bytes(&mut total, text)?;
+        }
+        add_optional_bytes(&mut total, value.credential.as_deref())?;
     }
     add_bytes(&mut total, &writer.mode)?;
     add_optional_bytes(&mut total, writer.writer_id.as_deref())?;
@@ -1718,6 +1781,11 @@ fn deserialize_permissions<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<Vec<UiPermissionRequest>, D::Error> {
     deserialize_bounded_vec(d, UI_MAX_PERMISSIONS)
+}
+fn deserialize_providers<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<UiProviderSnapshot>, D::Error> {
+    deserialize_bounded_vec(d, UI_MAX_PROVIDERS)
 }
 fn deserialize_dependencies<'de, D: serde::Deserializer<'de>>(
     d: D,
@@ -1912,6 +1980,14 @@ mod tests {
                 expires_at_ms: None,
                 task_id: Some("task-1".into()),
                 agent_id: Some("agent-luna".into()),
+            }],
+            providers: vec![UiProviderSnapshot {
+                id: "vexzy".into(),
+                name: "VEXZY".into(),
+                protocol: "openai-compatible".into(),
+                base_url: "https://api.echogate.one/v1".into(),
+                active: true,
+                credential: Some("env:VEXZY_API_KEY".into()),
             }],
             writer: UiWriterState {
                 mode: "writer".into(),

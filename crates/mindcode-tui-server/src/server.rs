@@ -391,6 +391,7 @@ impl ClientHandle {
             changes: snapshot.changes.clone(),
             activity: snapshot.activity.clone(),
             permissions: snapshot.permissions.clone(),
+            providers: snapshot.providers.clone(),
             writer: snapshot.writer.clone(),
         })?;
         self.enqueue(OutboundEntry {

@@ -8,6 +8,7 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{error::ErrorKind, Parser, Subcommand};
 use futures_util::StreamExt;
+use mindcode_protocol::ui::{UiActionInput, UiInputEventKind, UiMessage};
 use mindcode_provider::{
     default_store_path, load_store, save_store, CredentialRef, ModelId, Protocol, ProviderConfig,
     ProviderId, SecretKey,
@@ -16,15 +17,17 @@ use mindcode_settings::{default_settings_path, load_settings, save_settings, Nat
 use mindcode_transport::{ChatCompletionsRequest, ChatMessage, MessagesRequest, Transport};
 use mindcode_tui::TuiConfig;
 use mindcode_tui_server::{
-    ConnectionInput, ControlServer, ControlServerConfig, ProjectionInput, StatusInput,
-    TelemetryInput,
+    ConnectionInput, ControlServer, ControlServerConfig, InputHandler, ProjectionInput,
+    ProviderInput, StatusInput, TelemetryInput,
 };
 use mindcode_vexzy::{
     eligible_worker_models, parse_vexzy_model_catalog, VexzyModel, VexzyModelCatalog, WorkerEffort,
 };
 use mindcoded::{Daemon, DaemonConfig};
 use serde_json::{json, Value};
-use std::{env, ffi::OsString, fs, io, io::BufRead, path::PathBuf, process, time::Duration};
+use std::{
+    env, ffi::OsString, fs, io, io::BufRead, path::PathBuf, process, sync::Arc, time::Duration,
+};
 
 const VERSION: &str = "0.1.3";
 const API_KEY_ENV: &str = "VEXZY_API_KEY";
@@ -1029,6 +1032,24 @@ fn tui_socket_path(session_id: &str) -> PathBuf {
     tui_runtime_dir().join(format!("native-tui-{session_id}.sock"))
 }
 
+/// Map the persisted profiles to a secret-free provider snapshot: the
+/// credential is represented only by its reference kind, never its value.
+fn providers_input(settings: &NativeSettings) -> Vec<ProviderInput> {
+    let active = settings.active_provider.as_ref();
+    settings
+        .providers()
+        .iter()
+        .map(|provider| ProviderInput {
+            id: provider.id.to_string(),
+            name: provider.name.clone(),
+            protocol: provider.protocol.to_string(),
+            base_url: provider.base_url.clone(),
+            active: Some(active == Some(&provider.id)),
+            credential: Some(credential_ref_kind(provider)),
+        })
+        .collect()
+}
+
 /// Secret-free initial snapshot published once on start so the renderer has
 /// state to show before any live session data exists.
 fn tui_initial_input() -> ProjectionInput {
@@ -1052,6 +1073,7 @@ fn tui_initial_input() -> ProjectionInput {
             },
             ..Default::default()
         },
+        providers: settings.as_ref().map(providers_input).unwrap_or_default(),
         ..Default::default()
     }
 }
@@ -1074,13 +1096,41 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
         ));
     }
     let socket_path = tui_socket_path(&session_id);
+
+    // The renderer is a dumb client: provider setup actions arrive as input
+    // events, this channel hands them to a task that mutates settings and
+    // republishes a fresh snapshot.
+    let (action_tx, mut action_rx) = tokio::sync::mpsc::unbounded_channel::<UiActionInput>();
+    let handler: InputHandler = Arc::new(move |message| {
+        if let UiMessage::InputEvent {
+            event: UiInputEventKind::Action(action),
+            ..
+        } = message
+        {
+            let _ = action_tx.send(action);
+        }
+    });
+
     let server = ControlServer::new(
         ControlServerConfig::new(session_id.clone(), &socket_path),
-        None,
+        Some(handler),
     )
     .map_err(anyhow::Error::msg)?;
     server.start().await.map_err(anyhow::Error::msg)?;
     let _ = server.publish(&tui_initial_input()).await;
+
+    let processor_server = server.clone();
+    let processor = tokio::spawn(async move {
+        while let Some(action) = action_rx.recv().await {
+            match apply_tui_action(&action) {
+                Ok(true) => {
+                    let _ = processor_server.publish(&tui_initial_input()).await;
+                }
+                Ok(false) => {}
+                Err(error) => eprintln!("mindcode: {error:#}"),
+            }
+        }
+    });
 
     let tui_config = TuiConfig {
         control_socket: socket_path,
@@ -1088,6 +1138,7 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
     };
     let outcome = tokio::task::spawn_blocking(move || mindcode_tui::run(tui_config)).await;
     server.close().await;
+    processor.abort();
     match outcome {
         Ok(Ok(())) => Ok(0),
         Ok(Err(error)) => {
@@ -1099,6 +1150,131 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
             Ok(1)
         }
     }
+}
+
+/// The provider-add payload sent by the renderer as a JSON action value.
+#[derive(Debug)]
+struct TuiProviderAdd {
+    id: String,
+    name: String,
+    protocol: String,
+    base_url: String,
+    credential_env: String,
+    allowlist: Vec<String>,
+}
+
+fn parse_tui_provider_add(value: &str) -> Result<TuiProviderAdd> {
+    let parsed: Value = serde_json::from_str(value)
+        .map_err(|_| anyhow!("provider add action is not valid JSON"))?;
+    let field = |name: &str| -> Result<String> {
+        parsed
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!("provider add requires a {name}"))
+    };
+    let allowlist = parsed
+        .get("allowlist")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(TuiProviderAdd {
+        id: field("id")?,
+        name: field("name")?,
+        protocol: field("protocol")?,
+        base_url: field("base_url")?,
+        credential_env: field("credential_env")?,
+        allowlist,
+    })
+}
+
+/// Apply one provider setup action to the persisted settings.  Returns
+/// `Ok(true)` when the settings changed (the caller republishes), `Ok(false)`
+/// for unknown or malformed actions, and `Err` for a failed mutation.  No
+/// credential value ever enters settings or the republished snapshot.
+fn apply_tui_action(action: &UiActionInput) -> Result<bool> {
+    let mut settings = load_native_settings()?;
+    let changed = match action.action.as_str() {
+        "provider_switch" => {
+            let id = ProviderId::new(
+                action
+                    .target
+                    .clone()
+                    .ok_or_else(|| anyhow!("provider_switch requires a target"))?,
+            )
+            .map_err(anyhow::Error::msg)?;
+            settings
+                .set_active_provider(&id)
+                .map_err(anyhow::Error::msg)?;
+            true
+        }
+        "provider_remove" => {
+            let id = ProviderId::new(
+                action
+                    .target
+                    .clone()
+                    .ok_or_else(|| anyhow!("provider_remove requires a target"))?,
+            )
+            .map_err(anyhow::Error::msg)?;
+            settings.remove_provider(&id).map_err(anyhow::Error::msg)?;
+            true
+        }
+        "provider_add" => {
+            let value = action
+                .value
+                .clone()
+                .ok_or_else(|| anyhow!("provider_add requires a value"))?;
+            let payload = parse_tui_provider_add(&value)?;
+            let id = parse_provider_id(&payload.id)?;
+            if payload.name.trim().is_empty() {
+                return Err(anyhow!("provider name must not be empty"));
+            }
+            let protocol = payload
+                .protocol
+                .parse::<Protocol>()
+                .map_err(anyhow::Error::msg)?;
+            validate_base_url(&payload.base_url)?;
+            let credential_env = payload.credential_env;
+            if credential_env.trim().is_empty() || credential_env.chars().any(char::is_whitespace) {
+                return Err(anyhow!(
+                    "credential environment variable name must be a non-empty string without whitespace"
+                ));
+            }
+            let allowlist = payload
+                .allowlist
+                .into_iter()
+                .map(|entry| ModelId::new(entry).map_err(anyhow::Error::msg))
+                .collect::<Result<Vec<_>>>()?;
+            settings
+                .add_provider(ProviderConfig {
+                    id: id.clone(),
+                    name: payload.name,
+                    protocol,
+                    base_url: payload.base_url,
+                    credential: CredentialRef::env(credential_env),
+                    allowlist,
+                    active: false,
+                })
+                .map_err(anyhow::Error::msg)?;
+            // Adding a profile switches to it, matching the first-run setup
+            // expectation ("add and use").
+            settings
+                .set_active_provider(&id)
+                .map_err(anyhow::Error::msg)?;
+            true
+        }
+        _ => false,
+    };
+    if changed {
+        save_native_settings(&settings)?;
+    }
+    Ok(changed)
 }
 
 /// Resolve the model id for a chat request: the `--model` override wins, then
@@ -1992,6 +2168,114 @@ mod tests {
                 OsString::from("ghost"),
             ]);
             assert_eq!(missing, 1);
+        });
+    }
+
+    #[test]
+    fn apply_tui_action_add_switch_and_remove_providers() {
+        with_sandbox_env(|dir| {
+            seed_builtin_active(dir);
+            let add = UiActionInput {
+                action: "provider_add".into(),
+                target: None,
+                value: Some(
+                    json!({
+                        "id": "custom-a",
+                        "name": "Custom A",
+                        "protocol": "openai-compatible",
+                        "base_url": "https://custom.example/v1",
+                        "credential_env": "CUSTOM_KEY",
+                        "allowlist": ["model-a"],
+                    })
+                    .to_string(),
+                ),
+            };
+            assert!(apply_tui_action(&add).unwrap());
+            let settings = load_sandbox_settings(dir);
+            assert_eq!(
+                settings.active_provider.as_ref().map(ProviderId::to_string),
+                Some("custom-a".to_owned())
+            );
+            assert_eq!(settings.providers().len(), 2);
+            let custom = settings
+                .provider(&ProviderId::new("custom-a".to_owned()).unwrap())
+                .unwrap();
+            assert_eq!(custom.allowlist.len(), 1);
+            assert!(
+                matches!(custom.credential, CredentialRef::Env(ref name) if name == "CUSTOM_KEY")
+            );
+
+            let switch = UiActionInput {
+                action: "provider_switch".into(),
+                target: Some("vexzy".into()),
+                value: None,
+            };
+            assert!(apply_tui_action(&switch).unwrap());
+            assert_eq!(
+                load_sandbox_settings(dir)
+                    .active_provider
+                    .as_ref()
+                    .map(ProviderId::to_string),
+                Some("vexzy".to_owned())
+            );
+
+            let remove = UiActionInput {
+                action: "provider_remove".into(),
+                target: Some("custom-a".into()),
+                value: None,
+            };
+            assert!(apply_tui_action(&remove).unwrap());
+            let settings = load_sandbox_settings(dir);
+            assert_eq!(settings.providers().len(), 1);
+            assert!(settings
+                .provider(&ProviderId::new("custom-a".to_owned()).unwrap())
+                .is_none());
+
+            let unknown = UiActionInput {
+                action: "bogus".into(),
+                target: None,
+                value: None,
+            };
+            assert!(!apply_tui_action(&unknown).unwrap());
+        });
+    }
+
+    #[test]
+    fn parse_tui_provider_add_requires_all_fields_and_valid_json() {
+        assert!(parse_tui_provider_add("not json").is_err());
+        assert!(parse_tui_provider_add("{}").is_err());
+        let parsed = parse_tui_provider_add(
+            &json!({
+                "id": "x",
+                "name": "X",
+                "protocol": "openai-compatible",
+                "base_url": "https://x/v1",
+                "credential_env": "X_KEY",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(parsed.id, "x");
+        assert_eq!(parsed.protocol, "openai-compatible");
+        assert_eq!(parsed.credential_env, "X_KEY");
+        assert!(parsed.allowlist.is_empty());
+    }
+
+    #[test]
+    fn providers_input_projects_only_credential_references() {
+        with_sandbox_env(|dir| {
+            seed_builtin_active(dir);
+            let inputs = providers_input(&load_sandbox_settings(dir));
+            assert_eq!(inputs.len(), 1);
+            assert_eq!(inputs[0].id, "vexzy");
+            assert_eq!(inputs[0].credential.as_deref(), Some("env:VEXZY_API_KEY"));
+            assert!(inputs.iter().all(|input| {
+                !input.base_url.contains("forge-")
+                    && input
+                        .credential
+                        .as_deref()
+                        .is_none_or(|credential| !credential.contains("forge-"))
+            }));
         });
     }
 

@@ -5,8 +5,8 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use mindcode_protocol::ui::{
-    UiActivitySnapshot, UiChangeSnapshot, UiRenderSnapshot, UiTaskSnapshot, UiTranscriptBlock,
-    UiTranscriptWindow,
+    UiActivitySnapshot, UiChangeSnapshot, UiProviderSnapshot, UiRenderSnapshot, UiTaskSnapshot,
+    UiTranscriptBlock, UiTranscriptWindow,
 };
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style};
@@ -20,6 +20,7 @@ use crate::ui::{
     calculate_layout_with_composer, Breakpoint, ColorToken, LayoutRects, MotionMode, PaneRatios,
     SakuraPetalField, Theme,
 };
+use crate::ProviderForm;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NavigationView {
@@ -80,6 +81,7 @@ pub enum OverlayView {
     Palette,
     Help,
     Permission,
+    Providers,
     Reconnect,
 }
 
@@ -100,6 +102,8 @@ pub struct RenderState<'a> {
     pub changes_scroll: usize,
     pub selected_task: Option<usize>,
     pub selected_change: Option<usize>,
+    pub provider_selection: usize,
+    pub provider_form: Option<&'a ProviderForm>,
 }
 
 struct TranscriptView<'a> {
@@ -1072,6 +1076,7 @@ fn render_overlay(frame: &mut Frame<'_>, state: &RenderState<'_>) {
             state,
         ),
         OverlayView::Permission => render_permission_overlay(frame, state),
+        OverlayView::Providers => render_providers_overlay(frame, state),
         OverlayView::Reconnect => render_text_modal(
             frame,
             "Connection lost",
@@ -1083,6 +1088,160 @@ fn render_overlay(frame: &mut Frame<'_>, state: &RenderState<'_>) {
             state,
         ),
     }
+}
+
+fn render_providers_overlay(frame: &mut Frame<'_>, state: &RenderState<'_>) {
+    let area = centered_rect(
+        frame.area().width.min(84),
+        frame.area().height.saturating_sub(4).min(34),
+        frame.area(),
+    );
+    frame.render_widget(Clear, area);
+    let theme = state.theme;
+    let block = panel_block(
+        if state.provider_form.is_some() {
+            "Add provider"
+        } else {
+            "Providers"
+        },
+        true,
+        theme,
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if let Some(form) = state.provider_form {
+        render_provider_form(frame, inner, form, theme);
+        return;
+    }
+
+    let Some(snapshot) = state.snapshot else {
+        render_provider_modal_lines(
+            frame,
+            inner,
+            theme,
+            &[
+                "No provider data available.",
+                "[a] Add provider   [Esc] Close",
+            ],
+        );
+        return;
+    };
+    if snapshot.providers.is_empty() {
+        render_provider_modal_lines(
+            frame,
+            inner,
+            theme,
+            &["No providers configured.", "[a] Add provider   [Esc] Close"],
+        );
+        return;
+    }
+
+    let mut lines = Vec::new();
+    for (index, provider) in snapshot.providers.iter().enumerate() {
+        lines.extend(provider_list_lines(
+            provider,
+            index == state.provider_selection,
+            theme,
+        ));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "[Enter] switch   [a] add   [d] remove   [Esc] close",
+        theme.style(ColorToken::Muted),
+    )));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn provider_list_lines<'a>(
+    provider: &'a UiProviderSnapshot,
+    selected: bool,
+    theme: Theme,
+) -> Vec<Line<'a>> {
+    let marker = if selected { "▸" } else { " " };
+    let active = if provider.active { "●" } else { " " };
+    let title = format!(
+        "{marker} {active} {:<14} {} ({})",
+        provider.id, provider.name, provider.protocol
+    );
+    let title_style = if selected {
+        theme.style(ColorToken::Accent)
+    } else {
+        theme.style(ColorToken::Text)
+    };
+    let mut lines = vec![Line::from(Span::styled(title, title_style))];
+    lines.push(Line::from(Span::styled(
+        format!("       {}", provider.base_url),
+        theme.style(ColorToken::Muted),
+    )));
+    if let Some(credential) = &provider.credential {
+        lines.push(Line::from(Span::styled(
+            format!("       key: {credential}"),
+            theme.style(ColorToken::Muted),
+        )));
+    }
+    lines
+}
+
+fn render_provider_form(frame: &mut Frame<'_>, area: Rect, form: &ProviderForm, theme: Theme) {
+    let fields: [(&str, String, bool); 6] = [
+        (
+            "Id",
+            form.id.clone(),
+            form.field == crate::ProviderFormField::Id,
+        ),
+        (
+            "Name",
+            form.name.clone(),
+            form.field == crate::ProviderFormField::Name,
+        ),
+        (
+            "Protocol",
+            form.protocol_name().to_owned(),
+            form.field == crate::ProviderFormField::Protocol,
+        ),
+        (
+            "Base URL",
+            form.base_url.clone(),
+            form.field == crate::ProviderFormField::BaseUrl,
+        ),
+        (
+            "Key env",
+            form.credential_env.clone(),
+            form.field == crate::ProviderFormField::CredentialEnv,
+        ),
+        (
+            "Allowlist",
+            form.allowlist.clone(),
+            form.field == crate::ProviderFormField::Allowlist,
+        ),
+    ];
+    let mut lines = Vec::new();
+    for (label, value, active) in fields {
+        let prefix = if active { "▸" } else { " " };
+        let cursor = if active { "▏" } else { "" };
+        let text = format!("{prefix} {label:<9} {value}{cursor}");
+        let style = if active {
+            theme.style(ColorToken::Accent)
+        } else {
+            theme.style(ColorToken::Text)
+        };
+        lines.push(Line::from(Span::styled(text, style)));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "[Enter] next/save   [Tab] cycle protocol   [Esc] cancel",
+        theme.style(ColorToken::Muted),
+    )));
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_provider_modal_lines(frame: &mut Frame<'_>, area: Rect, theme: Theme, body: &[&str]) {
+    let lines = body
+        .iter()
+        .map(|value| Line::from(Span::styled(*value, theme.style(ColorToken::Text))))
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_activity_overlay(frame: &mut Frame<'_>, state: &RenderState<'_>) {

@@ -1052,6 +1052,7 @@ dependencies = [
  "crossterm",
  "mindcode-protocol",
  "ratatui",
+ "serde_json",
 ]
 
 [[package]]

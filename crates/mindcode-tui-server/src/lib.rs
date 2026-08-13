@@ -14,8 +14,8 @@ pub mod server;
 
 pub use projection::{
     ActivityInput, AgentInput, ChangeInput, ConnectionInput, PermissionInput, ProjectionError,
-    ProjectionInput, ProjectionStore, RevisionClock, SessionInput, StatusInput, TaskInput,
-    TaskMetadataInput, TelemetryInput, TranscriptInput, TranscriptWindowInput, WorkspaceInput,
-    WriterInput,
+    ProjectionInput, ProjectionStore, ProviderInput, RevisionClock, SessionInput, StatusInput,
+    TaskInput, TaskMetadataInput, TelemetryInput, TranscriptInput, TranscriptWindowInput,
+    WorkspaceInput, WriterInput,
 };
-pub use server::{ControlServer, ControlServerConfig, ControlServerError};
+pub use server::{ControlServer, ControlServerConfig, ControlServerError, InputHandler};

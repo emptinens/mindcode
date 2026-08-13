@@ -352,6 +352,7 @@ async fn snapshot_round_trips_through_the_wire() {
         changes: value.changes.clone(),
         activity: value.activity.clone(),
         permissions: value.permissions.clone(),
+        providers: value.providers.clone(),
         writer: value.writer.clone(),
     })
     .unwrap();
