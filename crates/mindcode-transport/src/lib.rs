@@ -223,6 +223,10 @@ pub struct ChatChunk {
     #[serde(default)]
     pub error: Option<Value>,
     pub choices: Vec<ChatChoice>,
+    /// Final-chunk token usage (`prompt_tokens`/`completion_tokens`) when the
+    /// gateway reports it (§10.3).
+    #[serde(default)]
+    pub usage: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -286,6 +290,37 @@ pub struct MessageStart {
     pub stop_reason: Option<String>,
     #[serde(default)]
     pub content: Vec<Value>,
+    /// `message_start.message.usage`: `{"input_tokens":…,"output_tokens":…}`.
+    #[serde(default)]
+    pub usage: Option<Value>,
+}
+
+/// Token usage reported by a provider for one request (§10.3).  All fields
+/// default to zero when a provider does not report usage.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChatUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+impl ChatUsage {
+    /// Parse a usage object tolerant of both wire dialects: OpenAI reports
+    /// `prompt_tokens`/`completion_tokens`, Anthropic reports
+    /// `input_tokens`/`output_tokens`.  Missing or non-numeric fields are
+    /// treated as zero so a partial report never poisons the counters.
+    pub fn parse(value: Option<&Value>) -> Option<ChatUsage> {
+        let object = value?.as_object()?;
+        let number = |keys: &[&str]| -> u64 {
+            keys.iter()
+                .find_map(|key| object.get(*key))
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0)
+        };
+        Some(ChatUsage {
+            input_tokens: number(&["input_tokens", "prompt_tokens"]),
+            output_tokens: number(&["output_tokens", "completion_tokens"]),
+        })
+    }
 }
 
 /// Fail-closed HTTP transport bound to one provider `base_url`.
@@ -817,5 +852,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn chat_usage_parses_both_wire_dialects() {
+        // OpenAI final chunk dialect.
+        let openai = serde_json::json!({
+            "prompt_tokens": 12,
+            "completion_tokens": 3,
+            "total_tokens": 15,
+        });
+        let parsed = ChatUsage::parse(Some(&openai)).unwrap();
+        assert_eq!(parsed.input_tokens, 12);
+        assert_eq!(parsed.output_tokens, 3);
+
+        // Anthropic dialect.
+        let anthropic = serde_json::json!({
+            "input_tokens": 40,
+            "output_tokens": 9,
+        });
+        let parsed = ChatUsage::parse(Some(&anthropic)).unwrap();
+        assert_eq!(parsed.input_tokens, 40);
+        assert_eq!(parsed.output_tokens, 9);
+
+        // Partial reports never poison the counters.
+        let partial = serde_json::json!({ "output_tokens": 7 });
+        let parsed = ChatUsage::parse(Some(&partial)).unwrap();
+        assert_eq!(parsed.input_tokens, 0);
+        assert_eq!(parsed.output_tokens, 7);
+
+        // Absent usage reports nothing; callers keep their defaults.
+        assert_eq!(ChatUsage::parse(None), None);
     }
 }

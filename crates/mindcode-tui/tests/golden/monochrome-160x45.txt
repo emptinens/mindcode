@@ -1,5 +1,5 @@
 size 160x45
-style a9ac91f59f3d9bbd
+style d47c531f80255b39
 | ❀ MindCode                                                                                                             VEXZY · gpt-5.6-luna · high · connected |
 |                                                                                                                                                                |
 |────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────|
@@ -44,4 +44,4 @@ style a9ac91f59f3d9bbd
 |╭ Composer · Enter send · Shift+Enter newline ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮|
 |│> Type a prompt or / command…                                                                                                                                 │|
 |╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯|
-| Enter send · Shift+Enter newline · Ctrl+P providers · /help commands                                                                                     VEXZY |
+| Enter send · Shift+Enter newline · Ctrl+P providers · /help commands                                                                          Σ $4.42 ·  VEXZY |

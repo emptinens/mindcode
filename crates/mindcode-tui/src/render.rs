@@ -1034,18 +1034,52 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &RenderState<'_>) {
         );
         return;
     };
-    // The native runtime has no agents, queue, credits or permission grants,
-    // so the telemetry footer was all zeros.  A chat-first shell shows the
-    // keystrokes the user actually needs, with the active provider on the
-    // right.
-    let hints = " Enter send · Shift+Enter newline · Ctrl+P providers · /help commands ";
+    // A chat-first shell shows the keystrokes the user needs, with live
+    // token/cost counters for the last request and the whole session on the
+    // right (§10.3).  The active provider is always shown; counters are
+    // dropped (session sum first) when the hints + counters would overflow.
+    let hints = if area.width < 90 {
+        " Enter send · Ctrl+P providers · /help "
+    } else {
+        " Enter send · Shift+Enter newline · Ctrl+P providers · /help commands "
+    };
     let provider = snapshot
         .providers
         .iter()
         .find(|provider| provider.active)
         .map(|provider| provider.name.as_str())
         .unwrap_or("no provider");
-    let right = format!(" {provider} ");
+    let telemetry = &snapshot.telemetry;
+    let mut counters: Vec<String> = Vec::new();
+    if telemetry.last_input_tokens > 0 || telemetry.last_output_tokens > 0 {
+        counters.push(format!(
+            "↑{} ↓{}",
+            format_tokens(telemetry.last_input_tokens),
+            format_tokens(telemetry.last_output_tokens)
+        ));
+    }
+    if telemetry.last_cost > 0.0 {
+        counters.push(format!("~{}", format_cost(telemetry.last_cost)));
+    }
+    if telemetry.credits > 0.0 {
+        counters.push(format!("Σ {}", format_cost(telemetry.credits)));
+    }
+    let mut right = String::new();
+    loop {
+        right.clear();
+        let counters_text = counters.join(" · ");
+        if !counters_text.is_empty() {
+            right.push_str(&counters_text);
+            right.push_str(" · ");
+        }
+        right.push_str(&format!(" {provider} "));
+        if hints.chars().count() + right.chars().count() <= area.width as usize
+            || counters.is_empty()
+        {
+            break;
+        }
+        counters.pop();
+    }
     let [hints_area, provider_area] = Layout::horizontal([
         Constraint::Fill(1),
         Constraint::Length(right.chars().count().min(area.width as usize) as u16),
@@ -1061,6 +1095,26 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &RenderState<'_>) {
             .style(theme.style(ColorToken::AccentSoft)),
         provider_area,
     );
+}
+
+/// Compact token formatting: 1234 becomes `1.2K`, 567 stays `567`.
+fn format_tokens(value: u64) -> String {
+    if value >= 1000 {
+        format!("{:.1}K", value as f64 / 1000.0)
+    } else {
+        value.to_string()
+    }
+}
+
+/// Compact USD formatting that keeps meaningful digits at any magnitude.
+fn format_cost(value: f64) -> String {
+    if value >= 1.0 {
+        format!("${value:.2}")
+    } else if value >= 0.01 {
+        format!("${value:.3}")
+    } else {
+        format!("${value:.4}")
+    }
 }
 
 fn render_overlay(frame: &mut Frame<'_>, state: &RenderState<'_>) {

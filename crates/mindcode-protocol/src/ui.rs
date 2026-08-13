@@ -194,6 +194,14 @@ pub struct UiTelemetrySnapshot {
     pub context_limit_tokens: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Token usage of the most recent request, for per-turn counters (§10.3).
+    #[serde(default)]
+    pub last_input_tokens: u64,
+    #[serde(default)]
+    pub last_output_tokens: u64,
+    /// Estimated USD cost of the most recent request (§10.3).
+    #[serde(default)]
+    pub last_cost: f64,
     pub cached_tokens: u64,
     pub reasoning_tokens: u64,
     pub credits: f64,
@@ -1834,6 +1842,9 @@ mod tests {
             context_limit_tokens: 1_100_000,
             input_tokens: 1,
             output_tokens: 1,
+            last_input_tokens: 0,
+            last_output_tokens: 0,
+            last_cost: 0.0,
             cached_tokens: 0,
             reasoning_tokens: 0,
             credits: 4.419,

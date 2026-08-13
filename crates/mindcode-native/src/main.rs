@@ -14,7 +14,9 @@ use mindcode_provider::{
     ProviderId, SecretKey,
 };
 use mindcode_settings::{default_settings_path, load_settings, save_settings, NativeSettings};
-use mindcode_transport::{ChatCompletionsRequest, ChatMessage, MessagesRequest, Transport};
+use mindcode_transport::{
+    ChatCompletionsRequest, ChatMessage, ChatUsage, MessagesRequest, Transport,
+};
 use mindcode_tui::TuiConfig;
 use mindcode_tui_server::{
     ConnectionInput, ControlServer, ControlServerConfig, InputHandler, ProjectionInput,
@@ -1156,12 +1158,19 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
     .map_err(anyhow::Error::msg)?;
     server.start().await.map_err(anyhow::Error::msg)?;
     // Resume the conversation from disk if a session file exists (§10.1);
-    // an empty conversation falls back to the start hint.
-    let mut transcript = load_session(&session_id);
-    let _ = server.publish(&tui_snapshot(&transcript.entries)).await;
+    // an empty conversation falls back to the start hint.  Token/cost
+    // counters resume too (§10.3) and are shared between the processor and
+    // the mid-stream republish closure.
+    let (mut transcript, loaded_stats) = load_session(&session_id);
+    let stats = Arc::new(std::sync::Mutex::new(loaded_stats));
+    let initial_stats = *stats.lock().unwrap();
+    let _ = server
+        .publish(&tui_snapshot(&transcript.entries, initial_stats))
+        .await;
 
     let processor_server = server.clone();
     let processor_session_id = session_id.clone();
+    let processor_stats = stats.clone();
     let processor = tokio::spawn(async move {
         while let Some(action) = action_rx.recv().await {
             if action.action == "composer_submit" {
@@ -1171,6 +1180,7 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
                 // flooded on every delta.
                 let republish = {
                     let server = processor_server.clone();
+                    let stats = processor_stats.clone();
                     let mut last_publish = Instant::now() - STREAM_REPUBLISH_INTERVAL;
                     move |transcript: &TuiTranscript| {
                         let now = Instant::now();
@@ -1179,7 +1189,8 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
                             // Fire-and-forget: the projection revision is
                             // monotonic, so the client drops any intermediate
                             // snapshot that lands after the final one.
-                            let snapshot = tui_streaming_snapshot(&transcript.entries);
+                            let current = *stats.lock().unwrap();
+                            let snapshot = tui_streaming_snapshot(&transcript.entries, current);
                             let server = server.clone();
                             tokio::spawn(async move {
                                 let _ = server.publish(&snapshot).await;
@@ -1189,27 +1200,38 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
                 };
                 let outcome = dispatch_tui_input_streaming(&text, &mut transcript, republish).await;
                 match outcome {
-                    Ok(true) => {
+                    Ok((true, Some(turn))) => {
+                        processor_stats.lock().unwrap().record(&turn);
+                        let current = *processor_stats.lock().unwrap();
                         let _ = processor_server
-                            .publish(&tui_snapshot(&transcript.entries))
+                            .publish(&tui_snapshot(&transcript.entries, current))
                             .await;
-                        let _ = save_session(&processor_session_id, &transcript);
+                        let _ = save_session(&processor_session_id, &transcript, current);
                     }
-                    Ok(false) => {}
+                    Ok((true, None)) => {
+                        let current = *processor_stats.lock().unwrap();
+                        let _ = processor_server
+                            .publish(&tui_snapshot(&transcript.entries, current))
+                            .await;
+                        let _ = save_session(&processor_session_id, &transcript, current);
+                    }
+                    Ok((false, _)) => {}
                     Err(error) => {
                         transcript.push("system", format!("error: {error:#}"));
+                        let current = *processor_stats.lock().unwrap();
                         let _ = processor_server
-                            .publish(&tui_snapshot(&transcript.entries))
+                            .publish(&tui_snapshot(&transcript.entries, current))
                             .await;
-                        let _ = save_session(&processor_session_id, &transcript);
+                        let _ = save_session(&processor_session_id, &transcript, current);
                     }
                 }
                 continue;
             }
             match apply_tui_action(&action) {
                 Ok(true) => {
+                    let current = *processor_stats.lock().unwrap();
                     let _ = processor_server
-                        .publish(&tui_snapshot(&transcript.entries))
+                        .publish(&tui_snapshot(&transcript.entries, current))
                         .await;
                 }
                 Ok(false) => {}
@@ -1297,20 +1319,26 @@ fn tui_hint() -> TranscriptInput {
 /// `/effort` and `/provider use` changes surface immediately) carrying the
 /// current conversation transcript.  An empty conversation keeps the start
 /// hint so the dashboard never opens blank.
-fn tui_snapshot(transcript: &[TranscriptInput]) -> ProjectionInput {
+fn tui_snapshot(transcript: &[TranscriptInput], stats: SessionStats) -> ProjectionInput {
     let mut input = tui_initial_input();
     input.transcript = if transcript.is_empty() {
         vec![tui_hint()]
     } else {
         transcript.to_vec()
     };
+    input.telemetry.input_tokens = Some(stats.input_tokens);
+    input.telemetry.output_tokens = Some(stats.output_tokens);
+    input.telemetry.credits = Some(stats.cost);
+    input.telemetry.last_input_tokens = Some(stats.last_input_tokens);
+    input.telemetry.last_output_tokens = Some(stats.last_output_tokens);
+    input.telemetry.last_cost = Some(stats.last_cost);
     input
 }
 
 /// A snapshot published mid-stream: the last assistant turn is marked
 /// `streaming` so the renderer shows the shimmer + cursor (§10.2).
-fn tui_streaming_snapshot(transcript: &[TranscriptInput]) -> ProjectionInput {
-    let mut input = tui_snapshot(transcript);
+fn tui_streaming_snapshot(transcript: &[TranscriptInput], stats: SessionStats) -> ProjectionInput {
+    let mut input = tui_snapshot(transcript, stats);
     input.streaming = true;
     input
 }
@@ -1331,7 +1359,11 @@ fn session_path(session_id: &str) -> Result<PathBuf, anyhow::Error> {
 /// Persist the dialog (user/assistant turns only, secret-free) for one TUI
 /// session id (§10.1).  Never writes a credential; the file is plain
 /// conversation text.
-fn save_session(session_id: &str, transcript: &TuiTranscript) -> Result<(), anyhow::Error> {
+fn save_session(
+    session_id: &str,
+    transcript: &TuiTranscript,
+    stats: SessionStats,
+) -> Result<(), anyhow::Error> {
     let path = session_path(session_id)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -1356,27 +1388,50 @@ fn save_session(session_id: &str, transcript: &TuiTranscript) -> Result<(), anyh
         "id": session_id,
         "updated_at": updated_at,
         "messages": messages,
+        // Secret-free counters so a resumed session keeps its running totals
+        // (§10.3); the per-turn `last_*` values are transient and not stored.
+        "usage": {
+            "input_tokens": stats.input_tokens,
+            "output_tokens": stats.output_tokens,
+            "cost": stats.cost,
+        },
     });
     fs::write(&path, serde_json::to_vec_pretty(&value)?)?;
     Ok(())
 }
 
-/// Load a persisted TUI conversation; an absent or malformed file yields an
-/// empty transcript (fail open for display; credentials never involved).
-fn load_session(session_id: &str) -> TuiTranscript {
+/// Load a persisted TUI conversation and its token/cost counters; an absent
+/// or malformed file yields an empty transcript and zeroed counters (fail
+/// open for display; credentials never involved).
+fn load_session(session_id: &str) -> (TuiTranscript, SessionStats) {
     let mut transcript = TuiTranscript::default();
+    let mut stats = SessionStats::default();
     let Ok(path) = session_path(session_id) else {
-        return transcript;
+        return (transcript, stats);
     };
     let Ok(raw) = fs::read(&path) else {
-        return transcript;
+        return (transcript, stats);
     };
     let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(&raw)
     else {
-        return transcript;
+        return (transcript, stats);
     };
+    if let Some(serde_json::Value::Object(usage)) = map.get("usage") {
+        stats.input_tokens = usage
+            .get("input_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        stats.output_tokens = usage
+            .get("output_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        stats.cost = usage
+            .get("cost")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+    }
     let Some(serde_json::Value::Array(messages)) = map.get("messages") else {
-        return transcript;
+        return (transcript, stats);
     };
     for message in messages {
         let (Some(serde_json::Value::String(role)), Some(serde_json::Value::String(text))) =
@@ -1388,7 +1443,7 @@ fn load_session(session_id: &str) -> TuiTranscript {
             transcript.push(role, text);
         }
     }
-    transcript
+    (transcript, stats)
 }
 
 const TUI_HELP: &str = "\
@@ -1416,23 +1471,27 @@ Commands (type and press Enter):
 /// settings changed); the credential value never enters the transcript.
 #[cfg(test)]
 async fn dispatch_tui_input(text: &str, transcript: &mut TuiTranscript) -> Result<bool> {
-    dispatch_tui_input_streaming(text, transcript, |_| {}).await
+    dispatch_tui_input_streaming(text, transcript, |_| {})
+        .await
+        .map(|(republish, _)| republish)
 }
 
 /// Like [`dispatch_tui_input`], but republishes through `on_progress` while a
 /// live chat turn streams, so the renderer can show tokens as they arrive.
+/// Returns `(republish, outcome)`: the outcome is present only for a
+/// successful live chat turn so the caller can record token usage (§10.3).
 async fn dispatch_tui_input_streaming(
     text: &str,
     transcript: &mut TuiTranscript,
     mut on_progress: impl FnMut(&TuiTranscript),
-) -> Result<bool> {
+) -> Result<(bool, Option<ChatOutcome>)> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        return Ok(false);
+        return Ok((false, None));
     }
     let Some(rest) = trimmed.strip_prefix('/') else {
-        chat_tui_turn(trimmed, transcript, &mut on_progress).await?;
-        return Ok(true);
+        let outcome = chat_tui_turn(trimmed, transcript, &mut on_progress).await?;
+        return Ok((true, outcome));
     };
     let mut tokens = rest.splitn(2, char::is_whitespace);
     let command = tokens.next().unwrap_or("").trim();
@@ -1440,7 +1499,7 @@ async fn dispatch_tui_input_streaming(
     match command {
         "help" => {
             transcript.push("system", TUI_HELP);
-            Ok(true)
+            Ok((true, None))
         }
         "model" => {
             let mut settings = load_native_settings()?;
@@ -1455,7 +1514,7 @@ async fn dispatch_tui_input_streaming(
                 format!("worker model set to {argument}")
             };
             transcript.push("system", message);
-            Ok(true)
+            Ok((true, None))
         }
         "effort" => {
             let mut settings = load_native_settings()?;
@@ -1479,7 +1538,7 @@ async fn dispatch_tui_input_streaming(
                 format!("worker effort lock set to {}", effort.as_str())
             };
             transcript.push("system", message);
-            Ok(true)
+            Ok((true, None))
         }
         "provider" => {
             let mut sub_tokens = argument.splitn(2, char::is_whitespace);
@@ -1540,14 +1599,14 @@ async fn dispatch_tui_input_streaming(
                     ));
                 }
             }
-            Ok(true)
+            Ok((true, None))
         }
         "chat" => {
             if argument.is_empty() {
                 return Err(anyhow!("usage: /chat <text>"));
             }
             chat_tui_turn(argument, transcript, &mut on_progress).await?;
-            Ok(true)
+            Ok((true, None))
         }
         "allowlist" => {
             let mut tokens = argument.splitn(2, char::is_whitespace);
@@ -1576,39 +1635,39 @@ async fn dispatch_tui_input_streaming(
                     format!("allowlist for {id}: {models}")
                 },
             );
-            Ok(true)
+            Ok((true, None))
         }
         "settings" => {
             let settings = load_native_settings()?;
             transcript.push("system", settings_summary_text(&settings));
-            Ok(true)
+            Ok((true, None))
         }
         "auth" => {
             transcript.push("system", auth_status_text()?);
-            Ok(true)
+            Ok((true, None))
         }
         "eligible" => {
             transcript.push("system", eligible_text()?);
-            Ok(true)
+            Ok((true, None))
         }
         "doctor" => {
             transcript.push("system", doctor_text());
-            Ok(true)
+            Ok((true, None))
         }
         "setup-token" => {
             transcript.push("system", setup_token_text());
-            Ok(true)
+            Ok((true, None))
         }
         "update" => {
             transcript.push("system", update_text());
-            Ok(true)
+            Ok((true, None))
         }
         _ => {
             transcript.push(
                 "system",
                 format!("unknown command /{command}; type /help for the command list"),
             );
-            Ok(true)
+            Ok((true, None))
         }
     }
 }
@@ -1616,12 +1675,15 @@ async fn dispatch_tui_input_streaming(
 /// Append the user prompt, stream a completion through the active provider and
 /// append the assistant reply (or a secret-free error line) to the transcript.
 /// Each text delta is appended to the in-progress assistant entry and handed to
-/// `on_progress` so the renderer can repaint tokens as they arrive.
+/// `on_progress` so the renderer can repaint tokens as they arrive.  Returns
+/// the completed outcome (text + token usage) for the caller to record into
+/// the session counters; `None` means the turn produced no billable usage
+/// (empty response or a failed request).
 async fn chat_tui_turn(
     prompt: &str,
     transcript: &mut TuiTranscript,
     mut on_progress: impl FnMut(&TuiTranscript),
-) -> Result<()> {
+) -> Result<Option<ChatOutcome>> {
     transcript.push("user", prompt);
     transcript.push("assistant", String::new());
     // Send the dialog history (trimmed to the token budget) so the model
@@ -1633,17 +1695,21 @@ async fn chat_tui_turn(
     })
     .await;
     match outcome {
-        Ok(text) => {
-            let text = text.trim();
+        Ok(outcome) => {
+            let text = outcome.text.trim();
             if text.is_empty() {
                 transcript.finish_last("system", "(empty response)");
+                Ok(None)
             } else {
                 transcript.finish_last("assistant", text);
+                Ok(Some(outcome))
             }
         }
-        Err(error) => transcript.finish_last("system", format!("chat failed: {error:#}")),
+        Err(error) => {
+            transcript.finish_last("system", format!("chat failed: {error:#}"));
+            Ok(None)
+        }
     }
-    Ok(())
 }
 
 /// The dialog history sent to the provider: only completed user/assistant
@@ -1971,7 +2037,95 @@ async fn chat_completion_text(
         role: "user".to_owned(),
         content: prompt.to_owned(),
     }];
-    chat_completion_with_chunks(&messages, model_override, run_active, |_| {}).await
+    chat_completion_with_chunks(&messages, model_override, run_active, |_| {})
+        .await
+        .map(|outcome| outcome.text)
+}
+
+/// The outcome of one chat request: the streamed text plus the token usage
+/// the provider reported (zeroed when it reports none) and the model that
+/// actually served the request (§10.3).
+#[derive(Clone, Debug, Default)]
+struct ChatOutcome {
+    text: String,
+    usage: ChatUsage,
+    model: String,
+}
+
+/// Running token/cost counters for the current TUI session (§10.3).  The
+/// `last_*` fields hold the most recent request (shown per-turn in the
+/// footer), the others accumulate over the session.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct SessionStats {
+    input_tokens: u64,
+    output_tokens: u64,
+    cost: f64,
+    last_input_tokens: u64,
+    last_output_tokens: u64,
+    last_cost: f64,
+}
+
+impl SessionStats {
+    fn record(&mut self, outcome: &ChatOutcome) {
+        let turn_cost = estimate_turn_cost(outcome);
+        self.input_tokens = self.input_tokens.saturating_add(outcome.usage.input_tokens);
+        self.output_tokens = self
+            .output_tokens
+            .saturating_add(outcome.usage.output_tokens);
+        self.cost += turn_cost;
+        self.last_input_tokens = outcome.usage.input_tokens;
+        self.last_output_tokens = outcome.usage.output_tokens;
+        self.last_cost = turn_cost;
+    }
+}
+
+/// Estimated per-1K-token price (input, output) in USD.  The optional
+/// `pricing.json` in the config dir overrides the built-in table
+/// (`{"gpt-x": [0.001, 0.002]}` for $/1K input/output); unknown models fall
+/// back to a conservative default so the footer can always estimate (§10.7).
+fn model_price_per_1k(model: &str) -> (f64, f64) {
+    if let Some(override_table) = load_pricing_override() {
+        if let Some(price) = override_table.get(model) {
+            return *price;
+        }
+    }
+    match model {
+        "gpt-5.6-luna" => (0.0010, 0.0020),
+        "moonshotai/Kimi-K3" | "kimi-k3" => (0.0006, 0.0024),
+        "opencode-go" => (0.0002, 0.0006),
+        _ => (0.0005, 0.0015),
+    }
+}
+
+/// The `pricing.json` override: `{"model-id": [input_per_1k, output_per_1k]}`.
+/// Secret-free by contract; a missing or malformed file yields no overrides.
+fn load_pricing_override() -> Option<std::collections::HashMap<String, (f64, f64)>> {
+    let dir = native_settings_path().ok()?.parent()?.to_path_buf();
+    let raw = fs::read(dir.join("pricing.json")).ok()?;
+    let serde_json::Value::Object(map) = serde_json::from_slice::<serde_json::Value>(&raw).ok()?
+    else {
+        return None;
+    };
+    let mut out = std::collections::HashMap::new();
+    for (model, value) in map {
+        let Some(pair) = value.as_array() else {
+            continue;
+        };
+        let (Some(input), Some(output)) = (
+            pair.first().and_then(serde_json::Value::as_f64),
+            pair.get(1).and_then(serde_json::Value::as_f64),
+        ) else {
+            continue;
+        };
+        out.insert(model, (input, output));
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn estimate_turn_cost(outcome: &ChatOutcome) -> f64 {
+    let (input_per_1k, output_per_1k) = model_price_per_1k(&outcome.model);
+    outcome.usage.input_tokens as f64 / 1000.0 * input_per_1k
+        + outcome.usage.output_tokens as f64 / 1000.0 * output_per_1k
 }
 
 /// Like [`chat_completion_text`], but sends a full message history (so the
@@ -1982,7 +2136,7 @@ async fn chat_completion_with_chunks(
     model_override: Option<&str>,
     run_active: Option<&ProviderId>,
     mut on_chunk: impl FnMut(&str),
-) -> Result<String> {
+) -> Result<ChatOutcome> {
     let settings = load_native_settings()?;
     let Some(provider) = run_active_provider_config(&settings, run_active) else {
         return Err(anyhow!("no active provider is configured"));
@@ -2001,11 +2155,12 @@ async fn chat_completion_with_chunks(
     let model = select_chat_model(&settings, provider, model_override)?;
     let transport = Transport::new(&provider.base_url).map_err(anyhow::Error::msg)?;
     let mut output = String::new();
+    let mut usage = ChatUsage::default();
 
     match provider.protocol {
         Protocol::OpenAiCompatible => {
             let request = ChatCompletionsRequest {
-                model,
+                model: model.clone(),
                 messages: messages.to_vec(),
                 max_tokens: None,
                 temperature: None,
@@ -2016,6 +2171,13 @@ async fn chat_completion_with_chunks(
             futures_util::pin_mut!(stream);
             while let Some(item) = stream.next().await {
                 let chunk = item.map_err(anyhow::Error::msg)?;
+                // OpenAI-compatible gateways report usage on the final chunk
+                // (`prompt_tokens`/`completion_tokens`); take the last report.
+                if let Some(reported) = ChatUsage::parse(chunk.usage.as_ref()) {
+                    if reported.input_tokens > 0 || reported.output_tokens > 0 {
+                        usage = reported;
+                    }
+                }
                 for choice in chunk.choices {
                     if let Some(content) = choice.delta.content {
                         output.push_str(&content);
@@ -2026,7 +2188,7 @@ async fn chat_completion_with_chunks(
         }
         Protocol::AnthropicCompatible => {
             let request = MessagesRequest {
-                model,
+                model: model.clone(),
                 max_tokens: 1024,
                 messages: messages.to_vec(),
                 system: None,
@@ -2038,6 +2200,21 @@ async fn chat_completion_with_chunks(
             futures_util::pin_mut!(stream);
             while let Some(item) = stream.next().await {
                 let chunk = item.map_err(anyhow::Error::msg)?;
+                // Anthropic reports input tokens on `message_start.message.usage`
+                // and the cumulative output total on `message_delta.usage`.
+                if let Some(start) = &chunk.message {
+                    if let Some(reported) = ChatUsage::parse(start.usage.as_ref()) {
+                        usage.input_tokens = reported.input_tokens;
+                        if reported.output_tokens > usage.output_tokens {
+                            usage.output_tokens = reported.output_tokens;
+                        }
+                    }
+                }
+                if let Some(reported) = ChatUsage::parse(chunk.usage.as_ref()) {
+                    if reported.output_tokens > usage.output_tokens {
+                        usage.output_tokens = reported.output_tokens;
+                    }
+                }
                 if let Some(delta) = chunk.delta {
                     if let Some(text) = delta.text {
                         output.push_str(&text);
@@ -2053,7 +2230,11 @@ async fn chat_completion_with_chunks(
             }
         }
     }
-    Ok(output)
+    Ok(ChatOutcome {
+        text: output,
+        usage,
+        model: model.to_owned(),
+    })
 }
 
 /// CLI wrapper around [`chat_completion_text`]: stream a completion to stdout,
@@ -3001,6 +3182,7 @@ mod tests {
                     r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"model-alpha","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}"#,
                     r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"model-alpha","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}"#,
                     r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"model-alpha","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+                    r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"model-alpha","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":2,"total_tokens":14}}"#,
                     "[DONE]",
                 ])
                 .await;
@@ -3038,7 +3220,9 @@ mod tests {
                     None => env::remove_var("MOCK_KEY"),
                 }
 
-                assert_eq!(text, "Hello world");
+                assert_eq!(text.text, "Hello world");
+                assert_eq!(text.usage.input_tokens, 12);
+                assert_eq!(text.usage.output_tokens, 2);
                 assert_eq!(deltas, ["Hello".to_owned(), " world".to_owned()]);
                 server.await.unwrap();
             });
@@ -3132,9 +3316,10 @@ mod tests {
             transcript.push("user", "hello");
             transcript.push("assistant", "hi");
             transcript.push("system", "ui line — never persisted");
-            save_session("roundtrip", &transcript).unwrap();
+            save_session("roundtrip", &transcript, SessionStats::default()).unwrap();
 
-            let loaded = load_session("roundtrip");
+            let (loaded, stats) = load_session("roundtrip");
+            assert_eq!(stats, SessionStats::default());
             assert_eq!(loaded.entries.len(), 2);
             let TranscriptInput::Entry { role, text, .. } = &loaded.entries[0] else {
                 panic!("expected entry");
@@ -3151,6 +3336,78 @@ mod tests {
             let raw = fs::read_to_string(session_path("roundtrip").unwrap()).unwrap();
             assert!(!raw.contains("ui line"));
             assert!(dir.join("mindcode/sessions/roundtrip.json").exists());
+        });
+    }
+
+    #[test]
+    fn session_save_load_round_trips_usage_counters() {
+        with_sandbox_env(|_dir| {
+            let transcript = TuiTranscript::default();
+            let mut stats = SessionStats::default();
+            stats.record(&ChatOutcome {
+                text: "hi".into(),
+                usage: ChatUsage {
+                    input_tokens: 10,
+                    output_tokens: 4,
+                },
+                model: "gpt-5.6-luna".into(),
+            });
+            assert_eq!(stats.input_tokens, 10);
+            assert_eq!(stats.output_tokens, 4);
+            assert!(stats.cost > 0.0);
+            assert_eq!(stats.last_input_tokens, 10);
+            assert_eq!(stats.last_output_tokens, 4);
+
+            save_session("usage", &transcript, stats).unwrap();
+            let (loaded, restored) = load_session("usage");
+            assert_eq!(loaded.entries.len(), 0);
+            assert_eq!(restored.input_tokens, 10);
+            assert_eq!(restored.output_tokens, 4);
+            // Cost is stored too; the last_* fields are transient.
+            assert_eq!(restored.cost, stats.cost);
+            assert_eq!(restored.last_input_tokens, 0);
+        });
+    }
+
+    #[test]
+    fn session_stats_record_accumulates_across_turns() {
+        let mut stats = SessionStats::default();
+        for (input, output) in [(100, 20), (150, 35)] {
+            stats.record(&ChatOutcome {
+                text: String::new(),
+                usage: ChatUsage {
+                    input_tokens: input,
+                    output_tokens: output,
+                },
+                model: "gpt-5.6-luna".into(),
+            });
+        }
+        assert_eq!(stats.input_tokens, 250);
+        assert_eq!(stats.output_tokens, 55);
+        // Per-turn counters reflect only the last request.
+        assert_eq!(stats.last_input_tokens, 150);
+        assert_eq!(stats.last_output_tokens, 35);
+        assert!(stats.cost > 0.0);
+    }
+
+    #[test]
+    fn pricing_override_json_wins_over_the_builtin_table() {
+        with_sandbox_env(|dir| {
+            // with_sandbox_env points the config home at dir/mindcode; write
+            // pricing.json next to settings.json.
+            let config_dir = dir.join("mindcode");
+            fs::create_dir_all(&config_dir).unwrap();
+            fs::write(
+                config_dir.join("pricing.json"),
+                r#"{"gpt-5.6-luna": [9.0, 18.0], "kimi": [0.1, 0.2]}"#,
+            )
+            .unwrap();
+            let (input, output) = model_price_per_1k("gpt-5.6-luna");
+            assert_eq!(input, 9.0);
+            assert_eq!(output, 18.0);
+            // Unknown models still fall back to the conservative default.
+            let (input, output) = model_price_per_1k("model-alpha");
+            assert!(input > 0.0 && output > 0.0);
         });
     }
 
@@ -3765,7 +4022,7 @@ mod tests {
     fn tui_snapshot_keeps_hint_until_first_turn() {
         with_sandbox_env(|dir| {
             seed_builtin_active(dir);
-            let empty = tui_snapshot(&[]);
+            let empty = tui_snapshot(&[], SessionStats::default());
             assert_eq!(empty.transcript.len(), 1);
             let TranscriptInput::Entry { role, text, .. } = &empty.transcript[0] else {
                 panic!("expected hint entry");
@@ -3776,7 +4033,7 @@ mod tests {
 
             let mut transcript = TuiTranscript::default();
             transcript.push("user", "hi");
-            let populated = tui_snapshot(&transcript.entries);
+            let populated = tui_snapshot(&transcript.entries, SessionStats::default());
             assert_eq!(populated.transcript.len(), 1);
         });
     }
@@ -3788,7 +4045,13 @@ mod tests {
             // The projection defaults to `observer` when the mode is omitted;
             // the native TUI is always the writer, otherwise the composer is
             // rendered read-only and input is rejected.
-            assert_eq!(tui_snapshot(&[]).writer.mode.as_deref(), Some("writer"));
+            assert_eq!(
+                tui_snapshot(&[], SessionStats::default())
+                    .writer
+                    .mode
+                    .as_deref(),
+                Some("writer")
+            );
         });
     }
 
@@ -4131,7 +4394,9 @@ mod tests {
                 )
                 .unwrap();
                 server.start().await.unwrap();
-                let _ = server.publish(&tui_snapshot(&[])).await;
+                let _ = server
+                    .publish(&tui_snapshot(&[], SessionStats::default()))
+                    .await;
 
                 let processor_server = server.clone();
                 let processor = tokio::spawn(async move {
@@ -4141,7 +4406,10 @@ mod tests {
                             let Some(text) = action.value else { continue };
                             let _ = dispatch_tui_input(&text, &mut transcript).await;
                             let _ = processor_server
-                                .publish(&tui_snapshot(&transcript.entries))
+                                .publish(&tui_snapshot(
+                                    &transcript.entries,
+                                    SessionStats::default(),
+                                ))
                                 .await;
                         }
                     }
