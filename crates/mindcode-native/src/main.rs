@@ -7,11 +7,13 @@
 
 use anyhow::{anyhow, Context, Result};
 use clap::{error::ErrorKind, Parser, Subcommand};
+use futures_util::StreamExt;
 use mindcode_provider::{
     default_store_path, load_store, save_store, CredentialRef, ModelId, Protocol, ProviderConfig,
     ProviderId, SecretKey,
 };
 use mindcode_settings::{default_settings_path, load_settings, save_settings, NativeSettings};
+use mindcode_transport::{ChatCompletionsRequest, ChatMessage, MessagesRequest, Transport};
 use mindcode_tui::TuiConfig;
 use mindcode_tui_server::{
     ConnectionInput, ControlServer, ControlServerConfig, ProjectionInput, StatusInput,
@@ -36,7 +38,7 @@ const SETTINGS_KEY_CONFIRMATION: &str = "configured";
     name = "mindcode",
     version = VERSION,
     about = "MindCode native Rust foundation (multi-provider)",
-    after_help = "Commands:\n  auth status       Show active provider authentication status\n  model eligible    Inspect eligible Worker models in a supplied VEXZY catalog\n  effort worker     Validate a Worker model and optional effort lock in a supplied catalog\n  provider          Manage provider profiles (list, use, add, remove, edit)\n  settings          Manage settings (show, key, allowlist, model, effort lock)\n  setup-token       Show VEXZY_API_KEY setup instructions\n  doctor            Check native/VEXZY foundation health\n  update            Show local checkout update instructions\n  daemon            Run the native mindcoded daemon in-process\n  tui               Run the native terminal interface"
+    after_help = "Commands:\n  auth status       Show active provider authentication status\n  model eligible    Inspect eligible Worker models in a supplied VEXZY catalog\n  effort worker     Validate a Worker model and optional effort lock in a supplied catalog\n  provider          Manage provider profiles (list, use, add, remove, edit)\n  settings          Manage settings (show, key, allowlist, model, effort lock)\n  setup-token       Show VEXZY_API_KEY setup instructions\n  doctor            Check native/VEXZY foundation health\n  update            Show local checkout update instructions\n  daemon            Run the native mindcoded daemon in-process\n  tui               Run the native terminal interface\n  chat              Complete a chat request through the active provider"
 )]
 struct RootArgs {
     #[arg(
@@ -44,6 +46,19 @@ struct RootArgs {
         trailing_var_arg = true,
         help = "Regular prompt (chat runtime is not migrated yet)"
     )]
+    prompt: Vec<String>,
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "mindcode chat",
+    version = VERSION,
+    about = "Complete a chat request through the active provider"
+)]
+struct ChatArgs {
+    #[arg(long, value_name = "MODEL_ID", help = "Model id override")]
+    model: Option<String>,
+    #[arg(value_name = "PROMPT", required = true)]
     prompt: Vec<String>,
 }
 
@@ -407,6 +422,7 @@ async fn dispatch(arguments: Vec<OsString>) -> Result<i32> {
         "update" | "upgrade" => run_update(arguments),
         "daemon" => run_daemon(arguments).await,
         "tui" => run_tui(arguments).await,
+        "chat" => run_chat(arguments, run_active.as_ref()).await,
         "-h" | "--help" | "-V" | "--version" => run_root_parser(arguments, run_active.as_ref()),
         value if value.starts_with('-') => run_root_parser(arguments, run_active.as_ref()),
         // Removed TUI commands surface as a stable unknown-command error
@@ -1022,6 +1038,113 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
             Ok(1)
         }
     }
+}
+
+/// Resolve the model id for a chat request: the `--model` override wins, then
+/// the global Worker model, then the first custom allowlist entry; VEXZY falls
+/// back to the documented Worker model and custom profiles fail closed on an
+/// empty allowlist.
+fn select_chat_model(
+    settings: &NativeSettings,
+    provider: &ProviderConfig,
+    override_model: Option<&str>,
+) -> Result<String> {
+    if let Some(model) = override_model {
+        return Ok(model.to_owned());
+    }
+    if let Some(model) = &settings.global_worker_model {
+        return Ok(model.clone());
+    }
+    if provider.id.as_str() == mindcode_settings::BUILTIN_VEXZY_PROVIDER_ID {
+        return Ok("gpt-5.6-luna".to_owned());
+    }
+    provider
+        .allowlist
+        .first()
+        .map(ModelId::to_string)
+        .ok_or_else(|| anyhow!("active provider has an empty model allowlist (fail closed)"))
+}
+
+async fn run_chat(arguments: Vec<OsString>, run_active: Option<&ProviderId>) -> Result<i32> {
+    let args = match ChatArgs::try_parse_from(with_command_program_name(arguments, "mindcode chat"))
+    {
+        Ok(args) => args,
+        Err(error) => return Ok(print_clap_error(error)),
+    };
+    let prompt = args.prompt.join(" ");
+    let settings = load_native_settings()?;
+    let Some(provider) = run_active_provider_config(&settings, run_active) else {
+        return Err(anyhow!("no active provider is configured"));
+    };
+    let store = load_store(&native_store_path()?).map_err(anyhow::Error::msg)?;
+    let key = store
+        .resolve(&provider.credential, |name| env::var(name).ok())
+        .map_err(|_| {
+            anyhow!(
+                "credential for provider '{}' is not configured ({})",
+                provider.id,
+                credential_ref_kind(provider)
+            )
+        })?;
+    let model = select_chat_model(&settings, provider, args.model.as_deref())?;
+    let transport = Transport::new(&provider.base_url).map_err(anyhow::Error::msg)?;
+
+    match provider.protocol {
+        Protocol::OpenAiCompatible => {
+            let request = ChatCompletionsRequest {
+                model,
+                messages: vec![ChatMessage {
+                    role: "user".to_owned(),
+                    content: prompt,
+                }],
+                max_tokens: None,
+                temperature: None,
+            };
+            let stream = transport
+                .chat_completions(&key, &request)
+                .map_err(anyhow::Error::msg)?;
+            futures_util::pin_mut!(stream);
+            while let Some(item) = stream.next().await {
+                let chunk = item.map_err(anyhow::Error::msg)?;
+                for choice in chunk.choices {
+                    if let Some(content) = choice.delta.content {
+                        print!("{content}");
+                    }
+                }
+            }
+        }
+        Protocol::AnthropicCompatible => {
+            let request = MessagesRequest {
+                model,
+                max_tokens: 1024,
+                messages: vec![ChatMessage {
+                    role: "user".to_owned(),
+                    content: prompt,
+                }],
+                system: None,
+                temperature: None,
+            };
+            let stream = transport
+                .messages(&key, &request)
+                .map_err(anyhow::Error::msg)?;
+            futures_util::pin_mut!(stream);
+            while let Some(item) = stream.next().await {
+                let chunk = item.map_err(anyhow::Error::msg)?;
+                if let Some(delta) = chunk.delta {
+                    if let Some(text) = delta.text {
+                        print!("{text}");
+                    }
+                }
+                if let Some(block) = chunk.content_block {
+                    if let Some(text) = block.text {
+                        print!("{text}");
+                    }
+                }
+            }
+        }
+    }
+    println!();
+    Ok(0)
 }
 
 fn run_regular_prompt(_prompt: Option<&str>, run_active: Option<&ProviderId>) -> Result<i32> {
@@ -2458,5 +2581,53 @@ mod tests {
             .any(|message| matches!(message, UiMessage::RenderSnapshot { .. })));
 
         server.close().await;
+    }
+
+    #[test]
+    fn chat_args_parse_prompt_and_model() {
+        let args =
+            ChatArgs::try_parse_from(["mindcode chat", "--model", "m1", "hello", "world"]).unwrap();
+        assert_eq!(args.model.as_deref(), Some("m1"));
+        assert_eq!(args.prompt, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn select_chat_model_precedence_and_fail_closed() {
+        let mut settings = NativeSettings::default();
+        let custom = profile(
+            "custom-a",
+            "Custom",
+            Protocol::AnthropicCompatible,
+            "https://c.example/v1",
+            CredentialRef::Store("custom-a".to_owned()),
+            &["model-a", "model-b"],
+        );
+        assert_eq!(
+            select_chat_model(&settings, &custom, Some("override")).unwrap(),
+            "override"
+        );
+        assert_eq!(
+            select_chat_model(&settings, &custom, None).unwrap(),
+            "model-a"
+        );
+        settings.global_worker_model = Some("global-model".to_owned());
+        assert_eq!(
+            select_chat_model(&settings, &custom, None).unwrap(),
+            "global-model"
+        );
+        let vexzy = builtin_vexzy_provider();
+        assert_eq!(
+            select_chat_model(&NativeSettings::default(), &vexzy, None).unwrap(),
+            "gpt-5.6-luna"
+        );
+        let empty = profile(
+            "empty",
+            "Empty",
+            Protocol::OpenAiCompatible,
+            "https://e.example/v1",
+            CredentialRef::Env("E".to_owned()),
+            &[],
+        );
+        assert!(select_chat_model(&NativeSettings::default(), &empty, None).is_err());
     }
 }

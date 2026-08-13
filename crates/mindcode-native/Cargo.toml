@@ -13,10 +13,12 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }
+futures-util = "0.3"
 mindcoded = { path = "../mindcoded" }
 mindcode-provider = { path = "../mindcode-provider" }
 mindcode-settings = { path = "../mindcode-settings" }
 mindcode-tui = { path = "../mindcode-tui" }
+mindcode-transport = { path = "../mindcode-transport" }
 mindcode-tui-server = { path = "../mindcode-tui-server" }
 mindcode-vexzy = { path = "../mindcode-vexzy" }
 serde_json = "1"
