@@ -24,6 +24,7 @@ coverage/
 PLAN.md
 STATUS.md
 VEXZY_ROADMAP.md
+AGENTS.md
 
 # Local agent/tooling state (Freebuff/Codex task DBs and leftovers).
 .freebuff/
