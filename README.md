@@ -1,30 +1,27 @@
 # MindCode
 
-MindCode `0.1.3` — approved Rust-first Linux x64 migration с multi-provider
+MindCode `0.1.3` — Rust-first Linux x64 single executable с multi-provider
 contract (amendment `2026-08-13`): **VEXZY** — built-in profile, custom
-providers — через два протокола. Версия `0.1.2` уже checkpointed в локальной
-истории, но ещё не tagged; этот документ описывает target contract, а не
-готовый релиз.
+providers — через два протокола. Версия `0.1.2` checkpointed в локальной
+истории, но ещё не tagged.
 
-### Текущий foundation
+### Текущее состояние
 
-В репозитории уже есть начальный Rust binary `mindcode`: `--help`, `--version`,
-`auth status`, `setup-token`, `doctor`, `update|upgrade` и in-process entrypoint
-`daemon`. Он валидирует только env-only `VEXZY_API_KEY` и намеренно сообщает
-`native chat runtime is not migrated yet` для обычного prompt. Полный
-multi-provider chat, Rust TUI, Worker settings и public CLI parity пока
-находятся в migration work packages из `PLAN.md`.
+Репозиторий — Rust workspace; единый бинарник `mindcode` реализует
+`auth status`, `model`, `effort`, `provider`, `settings`, `setup-token`,
+`doctor`, `update|upgrade`, `daemon` (in-process), `tui` и `chat`. Bare prompt
+(`mindcode hello`) и `mindcode chat` стримят completion через активный
+провайдер. TypeScript и Bun-пайплайн удалены полностью.
 
 ## Архитектура
 
-- **Цель — один executable:** финальный `mindcode` будет единым Rust-first
-  Linux x86_64 бинарником. Daemon и Rust TUI будут работать in-process;
-  отдельный `mindcoded` или обязательный sidecar не нужен. Текущий foundation
-  уже запускает daemon in-process, но Rust TUI ещё не перенесён.
-- **Без обязательного JavaScript (цель):** финальные core CLI, daemon, TUI и
-  обычный model request не будут требовать Bun или Node. JS plugins/hooks будут
-  запускаться только при явном выборе: сначала Bun, затем Node. Ни один runtime
-  не будет скрытым fallback для core.
+- **Один executable:** `mindcode` — единый Rust-first Linux x86_64 бинарник.
+  Daemon и Rust TUI работают in-process; отдельный `mindcoded` или
+  обязательный sidecar не нужен.
+- **Без обязательного JavaScript:** core CLI, daemon, TUI и model requests
+  не требуют Bun или Node. JS plugins/hooks запускаются только при явном
+  выборе: сначала Bun, затем Node; ни один runtime не является скрытым
+  fallback для core.
 - **Multi-provider (amendment `2026-08-13`):** два протокола —
   `openai-compatible` (`/models`, `/chat/completions`) и `anthropic-compatible`
   (`/v1/models`, `/v1/messages`). Пресетов провайдеров нет: пользователь вводит `name`,
@@ -176,21 +173,27 @@ transport rules, eligibility, missing-runtime plugin error и exit status.
 
 ## Установка и запуск
 
-Текущий Rust foundation собирается обычным Rust toolchain; Bun и Node для него
-не требуются. Финальный `0.1.3` core также не будет требовать Bun/Node; они
-останутся нужны только выбранным JS plugins/hooks.
-
-Перед запуском:
+Репозиторий собирается обычным Rust toolchain; Bun и Node не требуются ни
+для сборки, ни для запуска core. Release-бинарник без JS-runtime собирается
+и smoke-тестируется так:
 
 ```bash
-export VEXZY_API_KEY="forge-..."
-cargo build -p mindcode-native --locked
-./target/debug/mindcode --help
+./scripts/build-native-release.sh   # dist/mindcode-linux-x64
+./scripts/smoke-native-release.sh
 ```
 
-Для built-in VEXZY profile ключ читается из env; для custom providers ключ
-хранится в on-disk secret store `~/.config/mindcode/credentials.json`
-(0600/0700) — приоритет env → store → fail-closed.
+Для разработки:
+
+```bash
+cargo build -p mindcode-native --locked
+./target/debug/mindcode --help
+./target/debug/mindcode tui          # in-process daemon + Rust TUI
+```
+
+Для built-in VEXZY profile ключ читается из env (`VEXZY_API_KEY`); для custom
+providers ключ хранится в on-disk secret store
+`~/.config/mindcode/credentials.json` (0600/0700) — приоритет env → store →
+fail-closed.
 
 Не помещайте ключ в settings, README, tests, fixtures или диагностические
 артефакты.  Сборочные и runtime-команды, параметры выбора провайдера,

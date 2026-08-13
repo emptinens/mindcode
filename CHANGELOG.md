@@ -4,10 +4,9 @@
 
 - Approve the target contract for a Linux x86_64 Rust-first single `mindcode`
   executable with an in-process daemon and Rust TUI.
-- Add the initial Rust CLI foundation: native help/version, VEXZY env-key
+- Add the initial Rust CLI foundation: native help/version, credential
   diagnostics, `setup-token`, `doctor`, `update|upgrade`, and an in-process
-  daemon entrypoint. Regular chat deliberately reports that it is not migrated
-  yet; this is not full CLI/TUI parity.
+  daemon entrypoint.
 - Plan removal of Bun/Node from the final core dependency graph. JS
   plugins/hooks may invoke Bun first and Node second, only on demand.
 - Make the eligible Worker model of the active provider selectable globally
@@ -45,6 +44,19 @@
   queue, input routing, state-to-snapshot projection).  `mindcode tui` runs
   the renderer and control server in-process over a Unix socket without Bun
   or Node.
+- Route bare prompts (`mindcode hello`) through the live chat transport via
+  the active provider, with run-scoped `--worker-model` and
+  `--worker-effort-lock` options.
+- Add the TUI provider setup screen: a `Providers` overlay lists profiles,
+  switches the active one, removes profiles, and adds new profiles through a
+  form, all routed through the control server to `mindcode-settings` with a
+  secret-free provider snapshot.
+- Replace `mindcode.sh` with a POSIX-sh launcher for the native binary and
+  add Bun/Node-free `scripts/build-native-release.sh` / `smoke-native-release.sh`
+  release gates.
+- Remove the 511K-line TypeScript agent and its Bun/Node build, test and
+  packaging pipeline; the repository is now a Rust workspace and CI runs only
+  the Rust gates (`fmt`, `clippy`, `test`, release build + smoke).
 
 ## 0.1.2 — checkpointed, untagged
 

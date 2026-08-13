@@ -47,10 +47,10 @@ Amendment `2026-08-13`: владелец утвердил multi-provider contrac
 - явная диагностика `native chat runtime is not migrated yet` для обычного
   prompt.
 
-Это **не** означает готовность `0.1.3`: Rust TUI, VEXZY chat transport,
-catalog/Worker settings, полный public CLI parity и release packaging ещё не
-перенесены. Разделы ниже фиксируют target contract и acceptance gates, а не
-заявляют, что эти пункты уже выполнены.
+На момент этого vertical slice Rust TUI, chat transport, catalog/Worker
+settings, полный public CLI parity и release packaging ещё не были перенесены;
+впоследствии они реализованы (см. CHANGELOG `0.1.3`).  Разделы ниже фиксируют
+target contract и acceptance gates миграции.
 
 ### 2.1 Один Rust executable
 
