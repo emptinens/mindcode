@@ -10,14 +10,24 @@
   yet; this is not full CLI/TUI parity.
 - Plan removal of Bun/Node from the final core dependency graph. JS
   plugins/hooks may invoke Bun first and Node second, only on demand.
-- Keep the release VEXZY-only, using `VEXZY_API_KEY` and the fixed
-  `https://api.echogate.one` endpoints with secret-free diagnostics and docs.
-- Make the eligible VEXZY Worker model selectable globally across every Worker
-  backend, with an optional global Worker-effort lock.
+- Make the eligible Worker model of the active provider selectable globally
+  across every Worker backend, with an optional global Worker-effort lock.
 - Remove `/config` and `/submodel`; publish one public CLI/docs/tests
   compatibility fixture covering the supported and removed surfaces.
-- Reserve named provider profiles for `0.1.5`; credentials will be env-only and
-  profile HTTP will be restricted to localhost.
+- 2026-08-13 — multi-provider amendment (docs-only contract update): two
+  protocols (`openai-compatible` via `/models` + `/chat/completions`,
+  `anthropic-compatible` via `/v1/messages`); VEXZY as the editable built-in
+  `openai-compatible` profile; on-disk secret store
+  (`~/.config/mindcode/credentials.json`, 0600/0700) separate from the
+  secret-free `settings.json`, with env → store → fail-closed precedence; any
+  `https` transport with loopback-only `http`; allowlist eligibility for custom
+  profiles; `/provider` and `/settings` surfaces and the `--provider` CLI
+  option.  The planning-only `0.1.5` provider-profile boundary is superseded;
+  `/config` and `/submodel` stay removed.
+- Retire the `/responses` endpoint from the provider contract: the
+  `openai-compatible` chat path is `/chat/completions` (with `/models` for the
+  catalog).  Legacy `/v1/responses` references are removed during the
+  migration.
 
 ## 0.1.2 — checkpointed, untagged
 

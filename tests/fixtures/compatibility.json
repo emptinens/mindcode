@@ -1,0 +1,80 @@
+{
+  "version": "0.1.3",
+  "platform": "linux-x64",
+  "providers": {
+    "protocols": {
+      "openai-compatible": ["/models", "/chat/completions"],
+      "anthropic-compatible": ["/v1/messages"]
+    },
+    "presets": false,
+    "builtin": {
+      "vexzy": {
+        "protocol": "openai-compatible",
+        "base_url": "https://api.echogate.one/v1",
+        "credential_env": "VEXZY_API_KEY",
+        "editable": true,
+        "removable": true
+      }
+    },
+    "custom": {
+      "fields": ["name", "base_url", "protocol", "key"],
+      "eligibility": "per-profile allowlist model IDs",
+      "allowlist_default": "empty",
+      "fail_closed": true
+    },
+    "active_switch": {
+      "command": "/provider",
+      "cli_option": "--provider <id>"
+    },
+    "management": {
+      "command": "/settings",
+      "capabilities": ["add", "edit", "remove"],
+      "edits": ["provider", "key", "allowlist", "prefs"]
+    }
+  },
+  "credentials": {
+    "storage": "on-disk secret store",
+    "path": "~/.config/mindcode/credentials.json",
+    "file_mode": "0600",
+    "directory_mode": "0700",
+    "separate_from_settings": true,
+    "precedence": ["env", "store", "fail-closed"],
+    "never_in": ["settings", "fixture", "logs", "reports", "git", "status_output"]
+  },
+  "transport": {
+    "https": "allowed_any_endpoint",
+    "http": "loopback_only",
+    "non_loopback_http": "warning",
+    "public_remote_endpoints": true
+  },
+  "eligibility": {
+    "vexzy": "catalog_driven",
+    "catalog_fields": ["available", "worker_capabilities", "supported_reasoning_efforts"],
+    "custom": "per_profile_allowlist",
+    "custom_default": "empty",
+    "fail_closed": true
+  },
+  "commands": {
+    "model": {"status": "public", "sets_global_worker_model": true},
+    "provider": {"status": "public", "switches_active_provider": true},
+    "settings": {
+      "status": "public",
+      "manages": ["provider", "key", "allowlist", "prefs"]
+    },
+    "effort": {"status": "public", "sets_leader_effort": true},
+    "config": {"status": "removed", "error": "unknown_command"},
+    "submodel": {"status": "removed", "error": "unknown_command"}
+  },
+  "cli_options": {
+    "provider": "--provider <id>",
+    "worker_model": "--worker-model <eligible-id>",
+    "worker_effort_lock": "--worker-effort-lock <effort|off>"
+  },
+  "worker": {
+    "selection": "global",
+    "eligible_catalog_only": true,
+    "effort_lock": "optional-global",
+    "allowed_efforts": ["none", "low", "medium", "high", "xhigh", "max"]
+  },
+  "js_runtime": {"order": ["bun", "node"], "mode": "on-demand", "core_required": false}
+}
