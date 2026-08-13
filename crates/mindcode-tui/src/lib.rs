@@ -379,7 +379,10 @@ impl App {
             last_mouse_scroll_at: None,
             suppress_input: false,
             started_at: Instant::now(),
-            sidebar_visible: true,
+            // The native in-process shell has no session/workspace backend, so
+            // the sidebar is pure dead weight: open chat-only by default and
+            // keep Ctrl+B as an explicit opt-in.
+            sidebar_visible: false,
             transcript_scroll: 0,
             tasks_scroll: 0,
             changes_scroll: 0,
@@ -2628,7 +2631,14 @@ mod tests {
             changes: Vec::new(),
             activity: Vec::new(),
             permissions: Vec::new(),
-            providers: Vec::new(),
+            providers: vec![UiProviderSnapshot {
+                id: "vexzy".into(),
+                name: "VEXZY".into(),
+                protocol: "openai-compatible".into(),
+                base_url: "https://api.echogate.one/v1".into(),
+                active: true,
+                credential: Some("env:VEXZY_API_KEY".into()),
+            }],
             writer: UiWriterState {
                 mode: "writer".into(),
                 writer_id: Some("client-1".into()),
@@ -2969,6 +2979,7 @@ mod tests {
     fn ctrl_b_hides_and_restores_sidebar_geometry() {
         let mut app = App {
             show_welcome: false,
+            sidebar_visible: true,
             ..App::default()
         };
         app.terminal_size = (140, 45);
@@ -3092,6 +3103,7 @@ mod tests {
         let mut app = App {
             show_welcome: false,
             active_view: NavigationView::Tasks,
+            sidebar_visible: true,
             terminal_size: (140, 45),
             ..App::default()
         };
@@ -3333,6 +3345,7 @@ mod tests {
     fn sidebar_navigation_works_in_desktop_layouts_and_focus_skips_hidden_panes() {
         let mut app = App {
             show_welcome: false,
+            sidebar_visible: true,
             ..App::default()
         };
         app.apply_message(render_message(snapshot(1), "snapshot"));

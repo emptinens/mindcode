@@ -1,6 +1,6 @@
 size 60x24
-style 609a8e6a75ac9380
-| ❀ MindCode  Demo session   gpt-5.6-luna · high · connected |
+style 5c0830fecd7234bd
+| ❀ MindCode         VEXZY · gpt-5.6-luna · high · connected |
 |                                                            |
 |────────────────────────────────────────────────────────────|
 |╭ Chat ────────────────────────────────────────────────────╮|
@@ -23,4 +23,4 @@ style 609a8e6a75ac9380
 |╭ Composer · Enter send · Shift+Enter newline ─────────────╮|
 |│> Type a prompt or / command…                             │|
 |╰──────────────────────────────────────────────────────────╯|
-| connected │ gpt-5.6-luna │ Context 1%                      |
+| Enter send · Shift+Enter newline · Ctrl+P providers  VEXZY |

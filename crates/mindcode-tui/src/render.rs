@@ -322,47 +322,41 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &RenderState<'_>) {
     }
     let theme = state.theme;
     let snapshot = state.snapshot;
-    let mut tabs = vec![Span::styled(
+    let brand = Span::styled(
         " ❀ MindCode ",
         theme.style(ColorToken::Accent).add_modifier(Modifier::BOLD),
-    )];
+    );
+
+    // The native runtime has no session/workspace backend, so the header
+    // carries the one thing that matters: which provider is answering and
+    // what model/effort/connection state it is in.  Empty parts are skipped
+    // so unset model/effort never renders a run of bare separators.
+    let mut parts: Vec<String> = Vec::new();
     if let Some(snapshot) = snapshot {
-        for session in snapshot
-            .sessions
-            .iter()
-            .filter(|session| session.pinned || session.active)
-            .take(4)
-        {
-            let style = if session.active {
-                theme
-                    .style(ColorToken::Text)
-                    .bg(theme.color(ColorToken::Selection))
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                theme.style(ColorToken::Muted)
-            };
-            tabs.push(Span::styled(
-                format!(" {} ", truncate(&session.name, 18)),
-                style,
-            ));
+        if let Some(provider) = snapshot.providers.iter().find(|provider| provider.active) {
+            parts.push(provider.name.clone());
         }
+        let telemetry = &snapshot.telemetry;
+        if !telemetry.model.is_empty() {
+            parts.push(telemetry.model.clone());
+        }
+        if !telemetry.effort.is_empty() {
+            parts.push(telemetry.effort.clone());
+        }
+        parts.push(telemetry.connection.state.clone());
     }
-    let telemetry = snapshot.map(|snapshot| &snapshot.telemetry);
-    let right = telemetry
-        .map(|value| {
-            format!(
-                "{} · {} · {} ",
-                value.model, value.effort, value.connection.state
-            )
-        })
-        .unwrap_or_else(|| "connecting · waiting for runtime ".to_owned());
+    let right = if parts.is_empty() {
+        " connecting · waiting for runtime ".to_owned()
+    } else {
+        format!(" {} ", parts.join(" · "))
+    };
     let [tabs_area, status_area] = Layout::horizontal([
         Constraint::Fill(1),
         Constraint::Length(right.chars().count().min(area.width as usize) as u16),
     ])
     .areas(area);
     frame.render_widget(
-        Paragraph::new(Line::from(tabs)).style(theme.style(ColorToken::Text)),
+        Paragraph::new(Line::from(vec![brand])).style(theme.style(ColorToken::Text)),
         tabs_area,
     );
     frame.render_widget(
@@ -996,40 +990,32 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &RenderState<'_>) {
         );
         return;
     };
-    let telemetry = &snapshot.telemetry;
-    let percent = if telemetry.context_limit_tokens == 0 {
-        0
-    } else {
-        telemetry
-            .context_used_tokens
-            .saturating_mul(100)
-            .checked_div(telemetry.context_limit_tokens)
-            .unwrap_or(0)
-            .min(100)
-    };
-    let full = format!(
-        " {} │ {} · {} │ Context {}% │ Credits {:.4} │ Agents {} │ Queue {} │ Permissions {} ",
-        telemetry.connection.state,
-        telemetry.model,
-        telemetry.effort,
-        percent,
-        telemetry.credits,
-        telemetry.active_agents,
-        telemetry.queued_tasks,
-        snapshot.permissions.len(),
-    );
-    let compact = format!(
-        " {} │ {} │ Context {}% ",
-        telemetry.connection.state, telemetry.model, percent
-    );
-    let value = if full.chars().count() <= area.width as usize {
-        full
-    } else {
-        compact
-    };
+    // The native runtime has no agents, queue, credits or permission grants,
+    // so the telemetry footer was all zeros.  A chat-first shell shows the
+    // keystrokes the user actually needs, with the active provider on the
+    // right.
+    let hints = " Enter send · Shift+Enter newline · Ctrl+P providers · /help commands ";
+    let provider = snapshot
+        .providers
+        .iter()
+        .find(|provider| provider.active)
+        .map(|provider| provider.name.as_str())
+        .unwrap_or("no provider");
+    let right = format!(" {provider} ");
+    let [hints_area, provider_area] = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(right.chars().count().min(area.width as usize) as u16),
+    ])
+    .areas(area);
     frame.render_widget(
-        Paragraph::new(value).style(theme.style(ColorToken::Muted)),
-        area,
+        Paragraph::new(hints).style(theme.style(ColorToken::Muted)),
+        hints_area,
+    );
+    frame.render_widget(
+        Paragraph::new(right)
+            .alignment(Alignment::Right)
+            .style(theme.style(ColorToken::AccentSoft)),
+        provider_area,
     );
 }
 
