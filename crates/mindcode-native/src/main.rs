@@ -38,6 +38,10 @@ const SETTINGS_KEY_CONFIRMATION: &str = "configured";
 /// Minimum delay between TUI snapshot republishes while a chat turn streams;
 /// tokens still accumulate locally between publishes.
 const STREAM_REPUBLISH_INTERVAL: Duration = Duration::from_millis(120);
+/// Default conversation-memory budget in estimated tokens (§10.1).  The
+/// estimate is a cheap local heuristic (`chars/4`); real usage comes from
+/// the provider response.
+const CONTEXT_TOKEN_BUDGET: usize = 16_000;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -1151,11 +1155,14 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
     )
     .map_err(anyhow::Error::msg)?;
     server.start().await.map_err(anyhow::Error::msg)?;
-    let _ = server.publish(&tui_initial_input()).await;
+    // Resume the conversation from disk if a session file exists (§10.1);
+    // an empty conversation falls back to the start hint.
+    let mut transcript = load_session(&session_id);
+    let _ = server.publish(&tui_snapshot(&transcript.entries)).await;
 
     let processor_server = server.clone();
+    let processor_session_id = session_id.clone();
     let processor = tokio::spawn(async move {
-        let mut transcript = TuiTranscript::default();
         while let Some(action) = action_rx.recv().await {
             if action.action == "composer_submit" {
                 let Some(text) = action.value else { continue };
@@ -1186,6 +1193,7 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
                         let _ = processor_server
                             .publish(&tui_snapshot(&transcript.entries))
                             .await;
+                        let _ = save_session(&processor_session_id, &transcript);
                     }
                     Ok(false) => {}
                     Err(error) => {
@@ -1193,6 +1201,7 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
                         let _ = processor_server
                             .publish(&tui_snapshot(&transcript.entries))
                             .await;
+                        let _ = save_session(&processor_session_id, &transcript);
                     }
                 }
                 continue;
@@ -1256,12 +1265,20 @@ impl TuiTranscript {
         current.push_str(text);
     }
 
-    /// Replace the most recent entry's text with the final, trimmed value.
-    fn set_last(&mut self, text: impl Into<String>) {
-        let Some(TranscriptInput::Entry { text: current, .. }) = self.entries.last_mut() else {
+    /// Replace the most recent entry's role and text (used to finalize an
+    /// assistant turn as a `system` line on empty/error, keeping it out of
+    /// the dialog history sent back to the provider).
+    fn finish_last(&mut self, role: &str, text: impl Into<String>) {
+        let Some(TranscriptInput::Entry {
+            role: current_role,
+            text: current_text,
+            ..
+        }) = self.entries.last_mut()
+        else {
             return;
         };
-        *current = text.into();
+        *current_role = role.to_owned();
+        *current_text = text.into();
     }
 }
 
@@ -1288,6 +1305,82 @@ fn tui_snapshot(transcript: &[TranscriptInput]) -> ProjectionInput {
         transcript.to_vec()
     };
     input
+}
+
+/// Directory holding persisted TUI conversations (§10.1).
+fn sessions_dir() -> Result<PathBuf, anyhow::Error> {
+    let settings_path = native_settings_path()?;
+    settings_path
+        .parent()
+        .map(|parent| parent.join("sessions"))
+        .ok_or_else(|| anyhow!("MindCode config home is unavailable"))
+}
+
+fn session_path(session_id: &str) -> Result<PathBuf, anyhow::Error> {
+    Ok(sessions_dir()?.join(format!("{session_id}.json")))
+}
+
+/// Persist the dialog (user/assistant turns only, secret-free) for one TUI
+/// session id (§10.1).  Never writes a credential; the file is plain
+/// conversation text.
+fn save_session(session_id: &str, transcript: &TuiTranscript) -> Result<(), anyhow::Error> {
+    let path = session_path(session_id)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let messages: Vec<serde_json::Value> = transcript
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptInput::Entry { role, text, .. }
+                if (role == "user" || role == "assistant") && !text.trim().is_empty() =>
+            {
+                Some(serde_json::json!({ "role": role, "text": text }))
+            }
+            _ => None,
+        })
+        .collect();
+    let updated_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let value = serde_json::json!({
+        "id": session_id,
+        "updated_at": updated_at,
+        "messages": messages,
+    });
+    fs::write(&path, serde_json::to_vec_pretty(&value)?)?;
+    Ok(())
+}
+
+/// Load a persisted TUI conversation; an absent or malformed file yields an
+/// empty transcript (fail open for display; credentials never involved).
+fn load_session(session_id: &str) -> TuiTranscript {
+    let mut transcript = TuiTranscript::default();
+    let Ok(path) = session_path(session_id) else {
+        return transcript;
+    };
+    let Ok(raw) = fs::read(&path) else {
+        return transcript;
+    };
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(&raw)
+    else {
+        return transcript;
+    };
+    let Some(serde_json::Value::Array(messages)) = map.get("messages") else {
+        return transcript;
+    };
+    for message in messages {
+        let (Some(serde_json::Value::String(role)), Some(serde_json::Value::String(text))) =
+            (message.get("role"), message.get("text"))
+        else {
+            continue;
+        };
+        if (role == "user" || role == "assistant") && !text.trim().is_empty() {
+            transcript.push(role, text);
+        }
+    }
+    transcript
 }
 
 const TUI_HELP: &str = "\
@@ -1523,7 +1616,10 @@ async fn chat_tui_turn(
 ) -> Result<()> {
     transcript.push("user", prompt);
     transcript.push("assistant", String::new());
-    let outcome = chat_completion_with_chunks(prompt, None, None, |delta| {
+    // Send the dialog history (trimmed to the token budget) so the model
+    // sees prior turns; system/UI lines never enter the request (§10.1).
+    let messages = conversation_messages(&transcript.entries, CONTEXT_TOKEN_BUDGET);
+    let outcome = chat_completion_with_chunks(&messages, None, None, |delta| {
         transcript.append_last(delta);
         on_progress(transcript);
     })
@@ -1532,15 +1628,73 @@ async fn chat_tui_turn(
         Ok(text) => {
             let text = text.trim();
             if text.is_empty() {
-                transcript.set_last("(empty response)");
+                transcript.finish_last("system", "(empty response)");
             } else {
-                transcript.set_last(text);
+                transcript.finish_last("assistant", text);
             }
         }
-        Err(error) => transcript.set_last(format!("chat failed: {error:#}")),
+        Err(error) => transcript.finish_last("system", format!("chat failed: {error:#}")),
     }
     on_progress(transcript);
     Ok(())
+}
+
+/// The dialog history sent to the provider: only completed user/assistant
+/// turns with non-empty text, walking from the newest backwards until the
+/// token budget is exhausted.  The newest turn is always included (its
+/// text is truncated if it alone exceeds the budget); older turns are
+/// hard-dropped, never summarized (§10.1).  System/UI lines are never part
+/// of the conversation.
+fn conversation_messages(entries: &[TranscriptInput], budget: usize) -> Vec<ChatMessage> {
+    let mut turns: Vec<ChatMessage> = Vec::new();
+    for entry in entries {
+        let TranscriptInput::Entry { role, text, .. } = entry else {
+            continue;
+        };
+        if (role == "user" || role == "assistant") && !text.trim().is_empty() {
+            turns.push(ChatMessage {
+                role: role.clone(),
+                content: text.clone(),
+            });
+        }
+    }
+    let mut kept: Vec<ChatMessage> = Vec::new();
+    let mut used = 0usize;
+    for (index, message) in turns.into_iter().rev().enumerate() {
+        let is_newest = index == 0;
+        let estimated = estimate_tokens(&message.content);
+        if !is_newest && used.saturating_add(estimated) > budget {
+            break;
+        }
+        let mut content = message.content;
+        if is_newest && estimated > budget {
+            content = truncate_to_estimate(content, budget);
+            used = estimate_tokens(&content);
+        } else {
+            used = used.saturating_add(estimated);
+        }
+        kept.push(ChatMessage {
+            role: message.role,
+            content,
+        });
+    }
+    kept.reverse();
+    kept
+}
+
+/// Local token estimate (`chars/4`): cheap, deterministic, no LLM call.
+fn estimate_tokens(text: &str) -> usize {
+    text.chars().count().div_ceil(4)
+}
+
+/// Truncate one message's text to fit `max_estimate` estimated tokens.
+fn truncate_to_estimate(text: String, max_estimate: usize) -> String {
+    let max_chars = max_estimate.saturating_mul(4).max(4);
+    let mut truncated: String = text.chars().take(max_chars).collect();
+    if truncated.chars().count() < text.chars().count() {
+        truncated.push('…');
+    }
+    truncated
 }
 
 /// Secret-free settings summary rendered as a `/settings` transcript line.
@@ -1806,13 +1960,18 @@ async fn chat_completion_text(
     model_override: Option<&str>,
     run_active: Option<&ProviderId>,
 ) -> Result<String> {
-    chat_completion_with_chunks(prompt, model_override, run_active, |_| {}).await
+    let messages = vec![ChatMessage {
+        role: "user".to_owned(),
+        content: prompt.to_owned(),
+    }];
+    chat_completion_with_chunks(&messages, model_override, run_active, |_| {}).await
 }
 
-/// Like [`chat_completion_text`], but hands every received text delta to
-/// `on_chunk` as it arrives so a live caller can repaint incrementally.
+/// Like [`chat_completion_text`], but sends a full message history (so the
+/// model sees prior turns) and hands every received text delta to `on_chunk`
+/// as it arrives so a live caller can repaint incrementally.
 async fn chat_completion_with_chunks(
-    prompt: &str,
+    messages: &[ChatMessage],
     model_override: Option<&str>,
     run_active: Option<&ProviderId>,
     mut on_chunk: impl FnMut(&str),
@@ -1840,10 +1999,7 @@ async fn chat_completion_with_chunks(
         Protocol::OpenAiCompatible => {
             let request = ChatCompletionsRequest {
                 model,
-                messages: vec![ChatMessage {
-                    role: "user".to_owned(),
-                    content: prompt.to_owned(),
-                }],
+                messages: messages.to_vec(),
                 max_tokens: None,
                 temperature: None,
             };
@@ -1865,10 +2021,7 @@ async fn chat_completion_with_chunks(
             let request = MessagesRequest {
                 model,
                 max_tokens: 1024,
-                messages: vec![ChatMessage {
-                    role: "user".to_owned(),
-                    content: prompt.to_owned(),
-                }],
+                messages: messages.to_vec(),
                 system: None,
                 temperature: None,
             };
@@ -2864,7 +3017,11 @@ mod tests {
                 let previous = env::var_os("MOCK_KEY");
                 env::set_var("MOCK_KEY", "mock-key");
                 let mut deltas = Vec::new();
-                let text = chat_completion_with_chunks("hi", None, None, |delta| {
+                let messages = vec![ChatMessage {
+                    role: "user".to_owned(),
+                    content: "hi".to_owned(),
+                }];
+                let text = chat_completion_with_chunks(&messages, None, None, |delta| {
                     deltas.push(delta.to_owned());
                 })
                 .await
@@ -2878,6 +3035,115 @@ mod tests {
                 assert_eq!(deltas, ["Hello".to_owned(), " world".to_owned()]);
                 server.await.unwrap();
             });
+        });
+    }
+
+    #[test]
+    fn conversation_messages_keeps_only_dialog_turns() {
+        let entries = vec![
+            TranscriptInput::Entry {
+                sequence: 0,
+                role: "system".into(),
+                text: "hint / ui line".into(),
+            },
+            TranscriptInput::Entry {
+                sequence: 1,
+                role: "user".into(),
+                text: "hello".into(),
+            },
+            TranscriptInput::Entry {
+                sequence: 2,
+                role: "assistant".into(),
+                text: "hi there".into(),
+            },
+            TranscriptInput::Entry {
+                sequence: 3,
+                role: "user".into(),
+                text: "second question".into(),
+            },
+            TranscriptInput::Entry {
+                sequence: 4,
+                role: "assistant".into(),
+                text: String::new(),
+            },
+        ];
+        let messages = conversation_messages(&entries, 16_000);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].content, "hello");
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[1].content, "hi there");
+        assert_eq!(messages[2].role, "user");
+        assert_eq!(messages[2].content, "second question");
+    }
+
+    #[test]
+    fn conversation_messages_drops_old_turns_over_budget() {
+        // 4 chars each ≈ 1 estimated token.
+        let entries = vec![
+            TranscriptInput::Entry {
+                sequence: 1,
+                role: "user".into(),
+                text: "aaaa".into(),
+            },
+            TranscriptInput::Entry {
+                sequence: 2,
+                role: "assistant".into(),
+                text: "bbbb".into(),
+            },
+            TranscriptInput::Entry {
+                sequence: 3,
+                role: "user".into(),
+                text: "cccc".into(),
+            },
+        ];
+        let messages = conversation_messages(&entries, 2);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, "bbbb");
+        assert_eq!(messages[1].content, "cccc");
+    }
+
+    #[test]
+    fn conversation_messages_truncates_single_oversized_newest_turn() {
+        let long = "x".repeat(400); // ≈100 estimated tokens
+        let entries = vec![TranscriptInput::Entry {
+            sequence: 1,
+            role: "user".into(),
+            text: long.clone(),
+        }];
+        let messages = conversation_messages(&entries, 10);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
+        assert!(messages[0].content.ends_with('…'));
+        assert!(messages[0].content.chars().count() <= 10 * 4 + 1);
+    }
+
+    #[test]
+    fn session_save_load_round_trips_dialog_only() {
+        with_sandbox_env(|dir| {
+            let mut transcript = TuiTranscript::default();
+            transcript.push("user", "hello");
+            transcript.push("assistant", "hi");
+            transcript.push("system", "ui line — never persisted");
+            save_session("roundtrip", &transcript).unwrap();
+
+            let loaded = load_session("roundtrip");
+            assert_eq!(loaded.entries.len(), 2);
+            let TranscriptInput::Entry { role, text, .. } = &loaded.entries[0] else {
+                panic!("expected entry");
+            };
+            assert_eq!(role, "user");
+            assert_eq!(text, "hello");
+            let TranscriptInput::Entry { role, text, .. } = &loaded.entries[1] else {
+                panic!("expected entry");
+            };
+            assert_eq!(role, "assistant");
+            assert_eq!(text, "hi");
+
+            // The persisted file itself is secret-free and holds no ui line.
+            let raw = fs::read_to_string(session_path("roundtrip").unwrap()).unwrap();
+            assert!(!raw.contains("ui line"));
+            assert!(dir.join("mindcode/sessions/roundtrip.json").exists());
         });
     }
 
