@@ -27,7 +27,7 @@
     "sources:clean": "node scripts/strip-inline-source-maps.mjs",
     "sources:check": "node scripts/strip-inline-source-maps.mjs --check",
     "check": "bun run lint && bun run typecheck",
-    "check:rust": "cargo fmt --all -- --check && cargo fmt --manifest-path crates/mindcode-tui/Cargo.toml -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo clippy --manifest-path crates/mindcode-tui/Cargo.toml --all-targets --locked -- -D warnings && cargo test --workspace --all-targets && cargo test --manifest-path crates/mindcode-tui/Cargo.toml --all-targets --locked",
+    "check:rust": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace --all-targets --locked",
     "quality-baseline:update": "node scripts/quality-baseline.mjs update",
     "test": "node scripts/run-bun-test.mjs --isolate",
     "test:daemon-interop": "cargo build -p mindcoded && bun scripts/test-daemon-interop.ts",
