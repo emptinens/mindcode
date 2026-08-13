@@ -152,9 +152,28 @@ pub fn default_settings_path() -> Result<PathBuf, SettingsError> {
 pub fn load_settings(path: &Path) -> Result<NativeSettings, SettingsError> {
     match fs::read_to_string(path) {
         Ok(input) => parse_settings(&input),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(NativeSettings::default()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(first_run_settings()),
         Err(error) => Err(SettingsError::Io(error)),
     }
+}
+
+/// First-run state: the built-in VEXZY profile is present and active.  This
+/// is returned only when no settings file exists yet.  Once a file is written
+/// — even an empty profile table after VEXZY is removed — the file is respected
+/// and VEXZY is never resurrected.
+pub fn first_run_settings() -> NativeSettings {
+    let mut settings = NativeSettings::default();
+    let vexzy = builtin_vexzy_provider();
+    settings
+        .add_provider(vexzy)
+        .expect("first-run settings start empty, so the built-in id cannot collide");
+    settings
+        .set_active_provider(
+            &ProviderId::new(BUILTIN_VEXZY_PROVIDER_ID.to_owned())
+                .expect("the built-in vexzy provider id is valid"),
+        )
+        .expect("the built-in vexzy provider was just added");
+    settings
 }
 
 pub fn parse_settings(input: &str) -> Result<NativeSettings, SettingsError> {
@@ -668,6 +687,41 @@ mod provider_tests {
         removable.remove_provider(&vexzy_id).unwrap();
         assert!(removable.providers().is_empty());
         assert_eq!(removable.active_provider, None);
+    }
+
+    #[test]
+    fn load_missing_file_seeds_builtin_vexzy_active() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("config/mindcode/settings.json");
+        let settings = load_settings(&path).unwrap();
+        assert_eq!(settings.providers().len(), 1);
+        let vexzy = settings
+            .provider(&ProviderId::new(BUILTIN_VEXZY_PROVIDER_ID.to_owned()).unwrap())
+            .unwrap();
+        assert_eq!(vexzy.name, "VEXZY");
+        assert!(vexzy.active);
+        assert_eq!(
+            settings.active_provider.as_ref().map(ProviderId::as_str),
+            Some(BUILTIN_VEXZY_PROVIDER_ID)
+        );
+        // Reading never writes: first-run seeding is in-memory until the user
+        // actually saves a change.
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn removed_vexzy_is_not_resurrected_on_reload() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("config/mindcode/settings.json");
+        let vexzy_id = ProviderId::new(BUILTIN_VEXZY_PROVIDER_ID.to_owned()).unwrap();
+
+        let mut settings = first_run_settings();
+        settings.remove_provider(&vexzy_id).unwrap();
+        save_settings(&path, &settings).unwrap();
+
+        let loaded = load_settings(&path).unwrap();
+        assert!(loaded.providers().is_empty());
+        assert_eq!(loaded.active_provider, None);
     }
 
     #[test]

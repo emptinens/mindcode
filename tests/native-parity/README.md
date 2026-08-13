@@ -8,10 +8,11 @@ exit status only.
 Capture procedure:
 
 - `--help` / `--version` need no configuration.
-- The `auth`/`print` missing-key vectors seed one settings.json with the
-  built-in `vexzy` profile active (env credential `VEXZY_API_KEY`) inside a
-  throwaway `XDG_CONFIG_HOME`, then run with no credential present, so no
-  host configuration or secret can leak into the fixture:
+- The `auth`/`print` missing-key vectors need no configuration either: on
+  first run (no settings.json) the built-in `vexzy` profile is seeded active
+  with the `VEXZY_API_KEY` env credential, so running inside a throwaway
+  `XDG_CONFIG_HOME` with no credential present exercises the exact
+  fail-closed path without a host configuration or secret leaking in:
 
     env -i HOME=<tmp-home> XDG_CONFIG_HOME=<tmp-xdg> ./target/debug/mindcode <args>
 

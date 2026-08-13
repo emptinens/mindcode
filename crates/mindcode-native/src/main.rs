@@ -2116,7 +2116,16 @@ mod tests {
 
     #[test]
     fn auth_status_without_any_active_provider_fails_closed() {
-        with_sandbox_env(|_dir| {
+        with_sandbox_env(|dir| {
+            // First-run seeds VEXZY active; remove it so no profile is
+            // active, then the command fails closed regardless of any env
+            // credential in the ambient environment.
+            let mut settings = load_sandbox_settings(dir);
+            settings
+                .remove_provider(&ProviderId::new(BUILTIN_VEXZY_PROVIDER_ID.to_owned()).unwrap())
+                .unwrap();
+            seed_settings(dir, &settings);
+
             let code = run_dispatch_exit(vec![OsString::from("auth"), OsString::from("status")]);
             assert_eq!(code, 1);
             let code = run_dispatch_exit(vec![OsString::from("hello")]);

@@ -87,8 +87,11 @@ fallback во время обычного запуска, daemon work, TUI ил�
 - Пресетов провайдеров нет: для каждого custom profile пользователь вводит
   `name`, `base_url`, `protocol` и ключ.
 - VEXZY — built-in `openai-compatible` profile: base
-  `https://api.echogate.one/v1`, env credential `VEXZY_API_KEY`.  Он
-  редактируется и удаляется как любой другой profile.
+  `https://api.echogate.one/v1`, env credential `VEXZY_API_KEY`.  На first-run
+  (нет `settings.json`) он сеется как активный profile; после того как файл
+  записан (даже пустой таблицей после удаления VEXZY), файл уважается и
+  VEXZY не воскрешается.  Он редактируется и удаляется как любой другой
+  profile.
 
 ### 3.1 Credentials
 
