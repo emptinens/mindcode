@@ -408,4 +408,34 @@ mod tests {
             Some(theme.color(ColorToken::Surface))
         );
     }
+
+    #[test]
+    fn shipped_default_matches_frozen_palette() {
+        // §11.6: the truecolor GraphiteSakura theme must equal the frozen
+        // values in `colors::default_graphite_sakura`; changing either without
+        // the other is caught here.
+        let palette = truecolor_palette(ThemeKind::GraphiteSakura);
+        let frozen = super::super::colors::default_graphite_sakura();
+        let rgb = |color: Color| -> (u8, u8, u8) {
+            match color {
+                Color::Rgb(r, g, b) => (r, g, b),
+                other => panic!("expected Rgb, got {other:?}"),
+            }
+        };
+        assert_eq!(rgb(palette.background), (frozen.background.r, frozen.background.g, frozen.background.b));
+        assert_eq!(rgb(palette.surface), (frozen.surface.r, frozen.surface.g, frozen.surface.b));
+        assert_eq!(rgb(palette.surface_alt), (frozen.surface_alt.r, frozen.surface_alt.g, frozen.surface_alt.b));
+        assert_eq!(rgb(palette.text), (frozen.text.r, frozen.text.g, frozen.text.b));
+        assert_eq!(rgb(palette.muted), (frozen.muted.r, frozen.muted.g, frozen.muted.b));
+        assert_eq!(rgb(palette.border), (frozen.border.r, frozen.border.g, frozen.border.b));
+        assert_eq!(rgb(palette.border_strong), (frozen.border_strong.r, frozen.border_strong.g, frozen.border_strong.b));
+        assert_eq!(rgb(palette.accent), (frozen.accent.r, frozen.accent.g, frozen.accent.b));
+        assert_eq!(rgb(palette.accent_soft), (frozen.accent_soft.r, frozen.accent_soft.g, frozen.accent_soft.b));
+        assert_eq!(rgb(palette.success), (frozen.success.r, frozen.success.g, frozen.success.b));
+        assert_eq!(rgb(palette.warning), (frozen.warning.r, frozen.warning.g, frozen.warning.b));
+        assert_eq!(rgb(palette.error), (frozen.error.r, frozen.error.g, frozen.error.b));
+        assert_eq!(rgb(palette.info), (frozen.info.r, frozen.info.g, frozen.info.b));
+        assert_eq!(rgb(palette.selection), (frozen.selection.r, frozen.selection.g, frozen.selection.b));
+        assert_eq!(rgb(palette.progress), (frozen.progress.r, frozen.progress.g, frozen.progress.b));
+    }
 }

@@ -6,6 +6,7 @@
 //! session or a terminal connection.
 
 pub mod animation;
+pub mod colors;
 pub mod layout;
 pub mod theme;
 
@@ -16,5 +17,9 @@ pub use animation::{
 pub use layout::{
     calculate_layout, calculate_layout_with_composer, calculate_workspace_layout, Breakpoint,
     LayoutRects, PaneRatios, WorkspaceLayoutModel,
+};
+pub use colors::{
+    default_graphite_sakura, generate_palette, score_palette, ColorError, HarmonyReport, Oklab,
+    PaletteSpec, Rgb, Role,
 };
 pub use theme::{ColorMode, ColorToken, Palette, Theme, ThemeKind};

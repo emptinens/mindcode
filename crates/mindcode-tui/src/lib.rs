@@ -21,9 +21,11 @@ use ratatui::layout::Rect;
 use ratatui::{Frame, Terminal};
 
 pub mod clipboard;
+pub mod debug_visual;
 pub mod interaction;
 pub mod preferences;
 mod render;
+pub mod terminal_caps;
 pub mod ui;
 
 use interaction::{LocalIntent, OverlayKind};
@@ -2419,6 +2421,10 @@ mod unix_runtime {
             ) {
                 return Err(error.into());
             }
+            // §11.9: request the kitty keyboard protocol so Shift+Enter is
+            // distinguishable from Enter on compatible terminals. A terminal
+            // that does not implement the protocol simply ignores the request.
+            let _ = crate::terminal_caps::enable_keyboard_enhancement();
             Ok(guard)
         }
     }
@@ -2437,6 +2443,7 @@ mod unix_runtime {
                 crossterm::terminal::LeaveAlternateScreen,
                 crossterm::cursor::Show
             );
+            let _ = crate::terminal_caps::disable_keyboard_enhancement();
             let _ = crossterm::terminal::disable_raw_mode();
             self.active = false;
         }
