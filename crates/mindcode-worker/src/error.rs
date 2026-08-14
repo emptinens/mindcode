@@ -13,6 +13,10 @@ pub enum WorkerError {
     OutOfScope { path: PathBuf },
     /// The permission guard hard-denied the action (e.g. a credential).
     Denied { path: PathBuf },
+    /// The shell risk filter (§11.1) hard-denied a catastrophic command.
+    RiskDenied { command: String },
+    /// A `pre_tool` hook (§11.4) blocked the tool call (exit 2).
+    HookBlocked(String),
     /// The action must be approved by the user before it can run.
     NeedsApproval { path: PathBuf },
     /// The task was cancelled.
@@ -32,6 +36,10 @@ impl fmt::Display for WorkerError {
                 write!(f, "path is outside the worker scope: {}", path.display())
             }
             Self::Denied { path } => write!(f, "access denied: {}", path.display()),
+            Self::RiskDenied { command } => {
+                write!(f, "denied (catastrophic shell risk): {command}")
+            }
+            Self::HookBlocked(reason) => write!(f, "blocked by hook: {reason}"),
             Self::NeedsApproval { path } => {
                 write!(f, "approval required: {}", path.display())
             }

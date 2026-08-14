@@ -45,6 +45,11 @@ impl WorkerScope {
         &self.entries
     }
 
+    /// Whether this scope covers the entire workspace.
+    pub fn is_all(&self) -> bool {
+        self.all
+    }
+
     pub fn is_empty(&self) -> bool {
         !self.all && self.entries.is_empty()
     }

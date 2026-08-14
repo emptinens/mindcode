@@ -4,17 +4,20 @@
 
 use crate::error::{WorkerError, WorkerResult};
 use crate::guard::OwnershipGuard;
+use crate::hooks::{run_pre_tool, HookDecision, HookSet};
 use crate::permission::PermissionTier;
 use crate::report::{CommandRun, WorkerReport, WorkerStatus};
+use crate::risk::{classify, ShellRisk};
 use crate::scope::WorkerScope;
 use crate::tools;
 use mindcode_core_tools::ProcessRunResult;
 use mindcode_transport::{ChatMessage, ChatUsage, ToolCall, ToolCallFunction, ToolSpec};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -92,7 +95,7 @@ You are a MindCode worker agent. Complete the task by calling the available \
 tools. Touch only files inside your ownership scope, never read credentials, \
 and finish with a concise summary of what you changed and why.";
 
-/// The six worker tools exposed to the model.
+/// The worker tools exposed to the model (§10.4.3, §11.10).
 pub fn default_tool_defs() -> Vec<ToolSpec> {
     let object = |properties: Value| -> Value {
         serde_json::json!({
@@ -144,6 +147,25 @@ pub fn default_tool_defs() -> Vec<ToolSpec> {
                 "path": {"type": "string"},
             })),
         },
+        ToolSpec {
+            name: "todo".to_owned(),
+            description: "Track this worker's own task list (list/add/check/uncheck/clear)"
+                .to_owned(),
+            parameters: object(serde_json::json!({
+                "action": {"type": "string"},
+                "item": {"type": "string"},
+            })),
+        },
+        ToolSpec {
+            name: "agentgrep".to_owned(),
+            description:
+                "Context-aware search: directory outline plus matches with context, adaptively trimmed"
+                    .to_owned(),
+            parameters: object(serde_json::json!({
+                "query": {"type": "string"},
+                "path": {"type": "string"},
+            })),
+        },
     ]
 }
 
@@ -155,6 +177,9 @@ pub struct WorkerAgent {
     gate: Arc<dyn ApprovalGate>,
     scope: WorkerScope,
     guard: OwnershipGuard,
+    todos: Mutex<crate::tools::TodoList>,
+    reflected_shell: Mutex<HashSet<String>>,
+    hooks: Option<Arc<HookSet>>,
     tools: Vec<ToolSpec>,
     system_prompt: String,
     max_iterations: usize,
@@ -174,6 +199,9 @@ impl WorkerAgent {
             gate,
             scope,
             guard,
+            todos: Mutex::new(crate::tools::TodoList::default()),
+            reflected_shell: Mutex::new(HashSet::new()),
+            hooks: None,
             tools: default_tool_defs(),
             system_prompt: DEFAULT_WORKER_SYSTEM_PROMPT.to_owned(),
             max_iterations: DEFAULT_MAX_ITERATIONS,
@@ -192,6 +220,12 @@ impl WorkerAgent {
 
     pub fn with_max_iterations(mut self, limit: usize) -> Self {
         self.max_iterations = limit;
+        self
+    }
+
+    /// Install a `pre_tool` hook set (§11.4). Hooks gate worker tools only.
+    pub fn with_hooks(mut self, hooks: HookSet) -> Self {
+        self.hooks = Some(Arc::new(hooks));
         self
     }
 
@@ -312,6 +346,12 @@ impl WorkerAgent {
         match outcome {
             Ok(result) => result,
             Err(WorkerError::Denied { path }) => (format!("denied: {}", path.display()), None),
+            Err(WorkerError::RiskDenied { command }) => {
+                (format!("denied: catastrophic shell risk: {command}"), None)
+            }
+            Err(WorkerError::HookBlocked(reason)) => {
+                (format!("blocked by hook: {reason}"), None)
+            }
             Err(WorkerError::OutOfScope { path }) => {
                 (format!("out of scope: {}", path.display()), None)
             }
@@ -330,6 +370,24 @@ impl WorkerAgent {
         report: &mut WorkerReport,
         cancel: CancellationToken,
     ) -> WorkerResult<(String, Option<CommandRun>)> {
+        // §11.4: the pre_tool hook gate runs before every worker tool call and
+        // sees a secret-free payload. A block becomes a tool error.
+        if let Some(hooks) = &self.hooks {
+            let scope = if self.scope.is_all() {
+                serde_json::Value::String("*".to_owned())
+            } else {
+                serde_json::json!(self.scope.entries())
+            };
+            let payload = serde_json::json!({
+                "tool": &call.name,
+                "args": &call.arguments,
+                "worker_id": &self.worker_id,
+                "scope": scope,
+            });
+            if let HookDecision::Block(reason) = run_pre_tool(hooks, &payload, &cancel).await {
+                return Err(WorkerError::HookBlocked(reason));
+            }
+        }
         match call.name.as_str() {
             "read_file" => {
                 let path = arg_path(&call.arguments)?;
@@ -374,8 +432,30 @@ impl WorkerAgent {
             }
             "run_shell" => {
                 let argv = arg_strings(&call.arguments, "argv")?;
-                self.authorize_command(&call.name, &argv.join(" "), allow_worker)
-                    .await?;
+                let command = argv.join(" ");
+                // §11.1 risk filter runs before the ownership guard and before
+                // execution: `Deny` is fail-closed, `Confirm` needs one
+                // reflection turn, `Safe` goes through the normal tier gate.
+                match classify(&command) {
+                    ShellRisk::Deny => {
+                        return Err(WorkerError::RiskDenied { command });
+                    }
+                    ShellRisk::Confirm => {
+                        // Tier 3 (full-access) is not reflection-gated by
+                        // definition (§11.1); only `Deny`/ProtectedPaths stay
+                        // fail-closed there. Tiers 1–2 require exactly one
+                        // reflection turn before the re-issued command runs.
+                        if self.guard.tier() != PermissionTier::FullAccess
+                            && !self.mark_reflected(&command)?
+                        {
+                            return Ok((reflection_prompt(&command), None));
+                        }
+                    }
+                    ShellRisk::Safe => {
+                        self.authorize_command(&call.name, &command, allow_worker)
+                            .await?;
+                    }
+                }
                 let guard = self.exec_guard();
                 let result = tools::run_shell(&guard, &argv, &cancel).await?;
                 Ok((
@@ -415,6 +495,36 @@ impl WorkerAgent {
                     &self.scope,
                     &guard,
                     &pattern,
+                    path.as_deref().map(Path::new),
+                    &cancel,
+                )
+                .await?;
+                Ok((output, None))
+            }
+            "todo" => {
+                let action = arg_string(&call.arguments, "action")?;
+                let item = arg_optional_string(&call.arguments, "item");
+                let mut todos = self.todos.lock().map_err(|_| {
+                    WorkerError::InvalidRequest("todo list is poisoned".to_owned())
+                })?;
+                let rendered = todos.apply(&action, item.as_deref())?;
+                Ok((rendered, None))
+            }
+            "agentgrep" => {
+                let query = arg_string(&call.arguments, "query")?;
+                let path = arg_optional_string(&call.arguments, "path");
+                if let Some(path) = &path {
+                    self.authorize_file(path, false, &call.name, allow_worker)
+                        .await?;
+                } else {
+                    self.authorize_command(&call.name, &query, allow_worker)
+                        .await?;
+                }
+                let guard = self.exec_guard();
+                let output = tools::run_agentgrep(
+                    &self.scope,
+                    &guard,
+                    &query,
                     path.as_deref().map(Path::new),
                     &cancel,
                 )
@@ -474,6 +584,17 @@ impl WorkerAgent {
                 path: self.guard.workspace_root().to_path_buf(),
             }),
         }
+    }
+
+    /// Record that a risky shell command has been reflected on (§11.1).
+    /// Returns `true` when the command was already reflected (the re-issued
+    /// call that may run), `false` when this is the first time the model has
+    /// been shown the risk.
+    fn mark_reflected(&self, command: &str) -> WorkerResult<bool> {
+        let mut set = self.reflected_shell.lock().map_err(|_| {
+            WorkerError::InvalidRequest("shell risk state is poisoned".to_owned())
+        })?;
+        Ok(!set.insert(command.to_owned()))
     }
 
     async fn approve(
@@ -548,6 +669,16 @@ fn arg_strings(arguments: &Value, key: &str) -> WorkerResult<Vec<String>> {
         })
         .filter(|items| !items.is_empty())
         .ok_or_else(|| WorkerError::InvalidRequest(format!("missing array argument '{key}'")))
+}
+
+/// The tool result shown to the model for a `Confirm`-classified shell command
+/// (§11.1): ask it to reflect and re-issue only if it still wants to run.
+fn reflection_prompt(command: &str) -> String {
+    format!(
+        "risk: this shell command needs a reflection turn before execution:\n  {command}\n\
+         Re-evaluate whether it is safe, necessary, and inside your scope. If you still want to\n\
+         run it, call run_shell again with the same arguments; otherwise abandon it."
+    )
 }
 
 fn process_result_text(result: &ProcessRunResult) -> String {

@@ -1,7 +1,7 @@
-//! The four worker tools, each enforcing the ownership scope and permission
-//! guard before doing anything (§10.4.3). Fail-closed: a path that escapes the
-//! scope, the workspace boundary, or the deny-list never reaches the file or
-//! process layer.
+//! The worker tools, each enforcing the ownership scope and permission guard
+//! before doing anything (§10.4.3, §11.10). Fail-closed: a path that escapes
+//! the scope, the workspace boundary, or the deny-list never reaches the file
+//! or process layer.
 
 use crate::error::{WorkerError, WorkerResult};
 use crate::guard::{OwnershipGuard, ToolAccess};
@@ -15,6 +15,13 @@ const MAX_PROCESS_OUTPUT: usize = 1024 * 1024;
 const SHELL_TIMEOUT_MS: u64 = 60_000;
 const GIT_TIMEOUT_MS: u64 = 30_000;
 const RG_TIMEOUT_MS: u64 = 30_000;
+/// Result budget for `agentgrep` (§11.10): matches are trimmed to this many
+/// bytes at a line boundary, not simply cut mid-line.
+const MAX_AGENTGREP_OUTPUT: usize = 64 * 1024;
+/// Context lines around each `agentgrep` match.
+const AGENTGREP_CONTEXT_LINES: usize = 2;
+/// Maximum top-level entries in the `agentgrep` directory outline.
+const AGENTGREP_OUTLINE_ENTRIES: usize = 24;
 const GIT_READ_ONLY: &[&str] = &[
     "status",
     "diff",
@@ -31,6 +38,80 @@ const GIT_DISABLED_HOOKS: &str = "/nonexistent/mindcode-hooks";
 pub struct FileReadResult {
     pub content: String,
     pub truncated: bool,
+}
+
+/// A worker-local task list (the `todo` tool, §11.10).  Independent of the
+/// system task graph; it exists so a worker can keep a plan across iterations.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TodoList {
+    pub items: Vec<TodoItem>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TodoItem {
+    pub text: String,
+    pub done: bool,
+}
+
+impl TodoList {
+    /// Apply a `todo` tool action and return a human-readable rendering of the
+    /// resulting list.  `list` never mutates, `clear` empties the list, `add`
+    /// appends an open item, `check`/`uncheck` toggle the 1-based index.
+    pub fn apply(&mut self, action: &str, item: Option<&str>) -> WorkerResult<String> {
+        match action {
+            "list" => {}
+            "clear" => self.items.clear(),
+            "add" => {
+                let text = item
+                    .filter(|text| !text.trim().is_empty())
+                    .ok_or_else(|| {
+                        WorkerError::InvalidRequest("todo add requires a non-empty item".to_owned())
+                    })?;
+                self.items.push(TodoItem {
+                    text: text.trim().to_owned(),
+                    done: false,
+                });
+            }
+            "check" | "uncheck" => {
+                let index = item
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .filter(|index| *index > 0)
+                    .ok_or_else(|| {
+                        WorkerError::InvalidRequest(
+                            "todo check/uncheck requires a 1-based item index".to_owned(),
+                        )
+                    })?;
+                let Some(entry) = self.items.get_mut(index - 1) else {
+                    return Err(WorkerError::InvalidRequest(format!(
+                        "todo item {index} does not exist"
+                    )));
+                };
+                entry.done = action == "check";
+            }
+            other => {
+                return Err(WorkerError::InvalidRequest(format!(
+                    "unknown todo action '{other}' (list|add|check|uncheck|clear)"
+                )));
+            }
+        }
+        Ok(self.render())
+    }
+
+    /// Render the list as `1. [ ] item` / `1. [x] item`, or an empty note.
+    pub fn render(&self) -> String {
+        if self.items.is_empty() {
+            return "todo list is empty".to_owned();
+        }
+        self.items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let mark = if item.done { "x" } else { " " };
+                format!("{}. [{}] {}", index + 1, mark, item.text)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 fn check_cancelled(cancel: &CancellationToken) -> WorkerResult<()> {
@@ -306,4 +387,155 @@ pub async fn run_rg(
     };
     let result = process_run(request, cancel.clone()).await?;
     Ok(result.stdout)
+}
+
+/// Run a context-aware search (agentgrep, §11.10): a short directory outline
+/// of the search root plus ripgrep matches with surrounding context, trimmed
+/// to the result budget at a line boundary.
+pub async fn run_agentgrep(
+    scope: &WorkerScope,
+    guard: &OwnershipGuard,
+    query: &str,
+    path: Option<&Path>,
+    cancel: &CancellationToken,
+) -> WorkerResult<String> {
+    check_cancelled(cancel)?;
+    if query.is_empty()
+        || query.len() > 16 * 1024
+        || query.contains('\0')
+        || query.chars().any(char::is_control)
+    {
+        return Err(WorkerError::InvalidRequest(
+            "agentgrep query is empty or invalid".to_owned(),
+        ));
+    }
+    let search_root = match path {
+        Some(path) => resolve_path(scope, guard, path, false)?,
+        None => guard.workspace_root().to_path_buf(),
+    };
+    match guard.check_command() {
+        ToolAccess::Allowed => {}
+        ToolAccess::NeedsApproval => {
+            return Err(WorkerError::NeedsApproval { path: search_root });
+        }
+        ToolAccess::Denied => {
+            return Err(WorkerError::Denied { path: search_root });
+        }
+    }
+    let outline = outline_directory(&search_root, AGENTGREP_OUTLINE_ENTRIES);
+    let request = ProcessRunRequest {
+        argv: vec![
+            "rg".to_owned(),
+            "--no-heading".to_owned(),
+            "--color".to_owned(),
+            "never".to_owned(),
+            "-n".to_owned(),
+            "-C".to_owned(),
+            AGENTGREP_CONTEXT_LINES.to_string(),
+            query.to_owned(),
+            search_root.to_string_lossy().into_owned(),
+        ],
+        cwd: guard.workspace_root().to_path_buf(),
+        env: Default::default(),
+        stdin: None,
+        timeout_ms: RG_TIMEOUT_MS,
+        max_output_bytes: MAX_PROCESS_OUTPUT,
+    };
+    let result = process_run(request, cancel.clone()).await?;
+    let matches = adaptive_trim(&result.stdout, MAX_AGENTGREP_OUTPUT);
+    let mut rendered = format!("search: {query}\n");
+    if !outline.is_empty() {
+        rendered.push_str("outline:\n");
+        rendered.push_str(&outline);
+        rendered.push('\n');
+    }
+    rendered.push_str("matches:\n");
+    rendered.push_str(&matches);
+    Ok(rendered)
+}
+
+/// List top-level entries of a directory as a compact outline (directories
+/// first, then files), capped to `limit` lines.  This is the "file/dir
+/// structure" prefix of an agentgrep result.
+fn outline_directory(root: &Path, limit: usize) -> String {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return String::new();
+    };
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => dirs.push(format!("  {name}/")),
+            _ => files.push(format!("  {name}")),
+        }
+    }
+    dirs.extend(files);
+    dirs.truncate(limit);
+    if dirs.len() == limit {
+        dirs.push("  …".to_owned());
+    }
+    dirs.join("\n")
+}
+
+/// Trim a search result to a byte budget at a line boundary (adaptive trim):
+/// drop whole trailing lines rather than cutting mid-line, and mark how many
+/// bytes were dropped.
+fn adaptive_trim(text: &str, budget: usize) -> String {
+    if text.len() <= budget {
+        return text.to_owned();
+    }
+    let mut end = budget.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let end = text[..end].rfind('\n').map(|index| index + 1).unwrap_or(end);
+    let mut kept = text[..end].to_owned();
+    kept.push_str(&format!("…\n[trimmed {} bytes]\n", text.len() - end));
+    kept
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn todo_list_apply_round_trips() {
+        let mut list = TodoList::default();
+        assert_eq!(list.apply("list", None).unwrap(), "todo list is empty");
+        assert_eq!(
+            list.apply("add", Some("write tests")).unwrap(),
+            "1. [ ] write tests"
+        );
+        assert_eq!(
+            list.apply("add", Some("run build")).unwrap(),
+            "1. [ ] write tests\n2. [ ] run build"
+        );
+        assert_eq!(
+            list.apply("check", Some("1")).unwrap(),
+            "1. [x] write tests\n2. [ ] run build"
+        );
+        assert_eq!(
+            list.apply("uncheck", Some("1")).unwrap(),
+            "1. [ ] write tests\n2. [ ] run build"
+        );
+        assert!(matches!(
+            list.apply("check", Some("9")),
+            Err(WorkerError::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            list.apply("nope", None),
+            Err(WorkerError::InvalidRequest(_))
+        ));
+        assert_eq!(list.apply("clear", None).unwrap(), "todo list is empty");
+    }
+
+    #[test]
+    fn adaptive_trim_truncates_at_a_line_boundary() {
+        let text = "line one\nline two\nline three\n";
+        let trimmed = adaptive_trim(text, 14);
+        assert!(trimmed.starts_with("line one\n"));
+        assert!(trimmed.contains("[trimmed "));
+        assert!(!trimmed.contains("line three"));
+    }
 }
