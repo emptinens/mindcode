@@ -145,7 +145,9 @@ mod tests {
         let mut store = MemoryStore::default();
         let mut learner = PreferenceLearner::default();
 
-        let first = learner.observe("commit without pushing", 1, &mut store).unwrap();
+        let first = learner
+            .observe("commit without pushing", 1, &mut store)
+            .unwrap();
         assert_eq!(
             first,
             PreferenceSignal::Pending {
@@ -156,7 +158,9 @@ mod tests {
         assert_eq!(store.len(), 0);
         assert_eq!(learner.pending_count(), 1);
 
-        let second = learner.observe("commit without pushing", 2, &mut store).unwrap();
+        let second = learner
+            .observe("commit without pushing", 2, &mut store)
+            .unwrap();
         assert!(matches!(second, PreferenceSignal::Promoted { .. }));
         assert_eq!(store.len(), 1);
         assert_eq!(learner.pending_count(), 0);
@@ -169,8 +173,12 @@ mod tests {
     fn normalization_aggregates_phrasing_differences() {
         let mut store = MemoryStore::default();
         let mut learner = PreferenceLearner::default();
-        learner.observe("comments  in   english", 1, &mut store).unwrap();
-        let signal = learner.observe("comments in english", 2, &mut store).unwrap();
+        learner
+            .observe("comments  in   english", 1, &mut store)
+            .unwrap();
+        let signal = learner
+            .observe("comments in english", 2, &mut store)
+            .unwrap();
         assert!(matches!(signal, PreferenceSignal::Promoted { .. }));
     }
 

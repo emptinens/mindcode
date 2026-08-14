@@ -183,10 +183,9 @@ async fn scopeless_rg_and_agentgrep_fail_closed_outside_all_scope() {
         .await
         .unwrap_err();
     assert!(matches!(rg_error, WorkerError::InvalidRequest(_)));
-    let agentgrep_error =
-        run_agentgrep(&fixture.scope, &fixture.guard, "needle", None, &cancel())
-            .await
-            .unwrap_err();
+    let agentgrep_error = run_agentgrep(&fixture.scope, &fixture.guard, "needle", None, &cancel())
+        .await
+        .unwrap_err();
     assert!(matches!(agentgrep_error, WorkerError::InvalidRequest(_)));
 }
 

@@ -6,7 +6,9 @@
 //! secret-free probe so `/terminal-setup` can point at the right fix. The
 //! diagnosis is a pure function of the probe and is therefore table-testable.
 
-use crossterm::event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
+use crossterm::event::{
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 
 /// Enable the kitty keyboard protocol (progressive enhancement, first level):
 /// escape and modified keys are sent as unambiguous `CSI-u` sequences. The
@@ -47,7 +49,9 @@ impl TerminalProbe {
         Self {
             term: std::env::var("TERM").unwrap_or_default(),
             term_program: std::env::var("TERM_PROGRAM").unwrap_or_default(),
-            inside_tmux: std::env::var("TMUX").map(|value| !value.is_empty()).unwrap_or(false),
+            inside_tmux: std::env::var("TMUX")
+                .map(|value| !value.is_empty())
+                .unwrap_or(false),
             kitty_query_replied: false,
             device_attributes: None,
         }
@@ -129,7 +133,11 @@ fn is_kitty_family(term_program: &str) -> bool {
 /// Render the `/terminal-setup` transcript text.
 pub fn terminal_setup_report(probe: &TerminalProbe) -> String {
     let status = diagnose_shift_enter(probe);
-    let term = if probe.term.is_empty() { "unset" } else { probe.term.as_str() };
+    let term = if probe.term.is_empty() {
+        "unset"
+    } else {
+        probe.term.as_str()
+    };
     let program = if probe.term_program.is_empty() {
         "unset"
     } else {
@@ -154,7 +162,10 @@ mod tests {
             term_program: "kitty".to_owned(),
             ..TerminalProbe::default()
         };
-        assert_eq!(diagnose_shift_enter(&probe), ShiftEnterStatus::TmuxNeedsExtendedKeys);
+        assert_eq!(
+            diagnose_shift_enter(&probe),
+            ShiftEnterStatus::TmuxNeedsExtendedKeys
+        );
     }
 
     #[test]

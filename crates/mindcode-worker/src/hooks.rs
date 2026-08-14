@@ -39,7 +39,10 @@ pub struct HookSet {
 impl HookSet {
     /// Resolve a hook script path: project-local first, then global.
     pub fn resolve(&self, name: &str) -> Option<PathBuf> {
-        for dir in [self.project.as_ref(), self.global.as_ref()].into_iter().flatten() {
+        for dir in [self.project.as_ref(), self.global.as_ref()]
+            .into_iter()
+            .flatten()
+        {
             let candidate = dir.join(name);
             if candidate.is_file() {
                 return Some(candidate);
@@ -110,7 +113,11 @@ mod tests {
         let hooks = HookSet::default();
         let decision = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(run_pre_tool(&hooks, &serde_json::json!({"tool": "read_file"}), &CancellationToken::new()));
+            .block_on(run_pre_tool(
+                &hooks,
+                &serde_json::json!({"tool": "read_file"}),
+                &CancellationToken::new(),
+            ));
         assert_eq!(decision, HookDecision::Allow);
     }
 
@@ -131,7 +138,11 @@ mod tests {
         ));
         assert_eq!(decision, HookDecision::Allow);
 
-        write_hook(tmp.path(), "pre_tool", "#!/bin/sh\necho 'not allowed' >&2\nexit 2\n");
+        write_hook(
+            tmp.path(),
+            "pre_tool",
+            "#!/bin/sh\necho 'not allowed' >&2\nexit 2\n",
+        );
         let decision = runtime.block_on(run_pre_tool(
             &hooks,
             &serde_json::json!({"tool": "run_shell"}),
@@ -154,11 +165,16 @@ mod tests {
             global: Some(global),
             project: Some(project),
         };
-        let decision = tokio::runtime::Runtime::new().unwrap().block_on(run_pre_tool(
-            &hooks,
-            &serde_json::json!({"tool": "write_file"}),
-            &CancellationToken::new(),
-        ));
-        assert_eq!(decision, HookDecision::Block("blocked by pre_tool hook".to_owned()));
+        let decision = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(run_pre_tool(
+                &hooks,
+                &serde_json::json!({"tool": "write_file"}),
+                &CancellationToken::new(),
+            ));
+        assert_eq!(
+            decision,
+            HookDecision::Block("blocked by pre_tool hook".to_owned())
+        );
     }
 }

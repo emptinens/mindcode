@@ -680,7 +680,9 @@ mod tests {
 
     #[test]
     fn color_overrides_parse_round_trip_and_reject_non_hex() {
-        let settings = parse_settings(r##"{"color_overrides":{"accent":"#FF4FA3","background":"#0b0b0d"}}"##).unwrap();
+        let settings =
+            parse_settings(r##"{"color_overrides":{"accent":"#FF4FA3","background":"#0b0b0d"}}"##)
+                .unwrap();
         let overrides = settings.color_overrides.clone().unwrap();
         assert_eq!(overrides["accent"], "#ff4fa3");
         assert_eq!(overrides["background"], "#0b0b0d");
@@ -702,12 +704,13 @@ mod tests {
             Err(SettingsError::InvalidColorOverrides)
         ));
         assert_eq!(unset.color_overrides, None);
-
     }
 
     #[test]
     fn system_prompt_round_trips_and_rejects_invalid() {
-        let settings = parse_settings(r##"{"system_prompt":{"leader":"Be brief","worker":"Do the task"}}"##).unwrap();
+        let settings =
+            parse_settings(r##"{"system_prompt":{"leader":"Be brief","worker":"Do the task"}}"##)
+                .unwrap();
         assert_eq!(settings.system_prompt.leader.as_deref(), Some("Be brief"));
         assert_eq!(settings.system_prompt.worker_prompt(), "Do the task");
         let reparsed = settings_from_value(settings_to_value(&settings).unwrap()).unwrap();

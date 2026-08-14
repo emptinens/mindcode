@@ -49,7 +49,10 @@ impl JsRuntime {
                     } else {
                         JsRuntimeKind::Node
                     };
-                    return Some(Self { kind, path: candidate });
+                    return Some(Self {
+                        kind,
+                        path: candidate,
+                    });
                 }
             }
         }
@@ -91,14 +94,14 @@ fn is_executable(path: &Path) -> bool {
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::metadata(path)
-            .map(|metadata| {
-                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
-            })
+            .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
             .unwrap_or(false)
     }
     #[cfg(not(unix))]
     {
-        std::fs::metadata(path).map(|metadata| metadata.is_file()).unwrap_or(false)
+        std::fs::metadata(path)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
     }
 }
 

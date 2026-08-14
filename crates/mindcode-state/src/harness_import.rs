@@ -92,7 +92,9 @@ impl fmt::Display for HarnessImportError {
         match self {
             Self::Io(message) => write!(formatter, "import I/O error: {message}"),
             Self::Malformed(message) => write!(formatter, "malformed harness session: {message}"),
-            Self::Unsupported(message) => write!(formatter, "unsupported harness session: {message}"),
+            Self::Unsupported(message) => {
+                write!(formatter, "unsupported harness session: {message}")
+            }
             Self::Oversized => formatter.write_str("harness session file exceeds the size limit"),
         }
     }
@@ -129,8 +131,8 @@ pub fn import_session(
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, HarnessImportError> {
-    let metadata = std::fs::metadata(path)
-        .map_err(|error| HarnessImportError::Io(error.to_string()))?;
+    let metadata =
+        std::fs::metadata(path).map_err(|error| HarnessImportError::Io(error.to_string()))?;
     if metadata.len() > MAX_SOURCE_BYTES {
         return Err(HarnessImportError::Oversized);
     }
@@ -145,8 +147,9 @@ fn parse_claude_jsonl(raw: &[u8]) -> Result<Vec<ImportedMessage>, HarnessImportE
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let value: serde_json::Value = serde_json::from_slice(line)
-            .map_err(|error| HarnessImportError::Malformed(format!("line {}: {error}", line_number + 1)))?;
+        let value: serde_json::Value = serde_json::from_slice(line).map_err(|error| {
+            HarnessImportError::Malformed(format!("line {}: {error}", line_number + 1))
+        })?;
         let Some(kind) = value.get("type").and_then(serde_json::Value::as_str) else {
             continue;
         };
@@ -197,8 +200,9 @@ fn parse_role_content_jsonl(raw: &[u8]) -> Result<Vec<ImportedMessage>, HarnessI
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let value: serde_json::Value = serde_json::from_slice(line)
-            .map_err(|error| HarnessImportError::Malformed(format!("line {}: {error}", line_number + 1)))?;
+        let value: serde_json::Value = serde_json::from_slice(line).map_err(|error| {
+            HarnessImportError::Malformed(format!("line {}: {error}", line_number + 1))
+        })?;
         let Some(role) = value.get("role").and_then(serde_json::Value::as_str) else {
             continue;
         };

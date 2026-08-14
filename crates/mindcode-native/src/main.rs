@@ -19,10 +19,12 @@ use mindcode_settings::{
 use mindcode_transport::{
     ChatCompletionsRequest, ChatMessage, ChatUsage, MessagesRequest, ToolSpec, Transport,
 };
-use mindcode_tui::TuiConfig;
 use mindcode_tui::debug_visual::{sanitize_frame_text, FrameDump, FrameRecorder};
 use mindcode_tui::terminal_caps::{terminal_setup_report, TerminalProbe};
-use mindcode_tui::ui::{default_graphite_sakura, generate_palette, score_palette, PaletteSpec, Rgb, Role};
+use mindcode_tui::ui::{
+    default_graphite_sakura, generate_palette, score_palette, PaletteSpec, Rgb, Role,
+};
+use mindcode_tui::TuiConfig;
 use mindcode_tui_server::{
     ConnectionInput, ControlServer, ControlServerConfig, InputHandler, PermissionInput,
     ProjectionInput, ProviderInput, StatusInput, TelemetryInput, TranscriptInput, WriterInput,
@@ -410,11 +412,17 @@ struct TuiArgs {
     /// §13.1: run risky shell commands unsandboxed. Off by default: risky
     /// commands (`Confirm`-after-reflection and `full-access`) run under the
     /// bwrap sandbox and fail closed when bwrap is absent.
-    #[arg(long, help = "Run risky worker shell commands without the bwrap sandbox")]
+    #[arg(
+        long,
+        help = "Run risky worker shell commands without the bwrap sandbox"
+    )]
     allow_unsafe_shell: bool,
     /// §13.1: let sandboxed worker shell commands reach the network. Off by
     /// default: the sandbox drops the net namespace.
-    #[arg(long, help = "Allow sandboxed worker shell commands to access the network")]
+    #[arg(
+        long,
+        help = "Allow sandboxed worker shell commands to access the network"
+    )]
     allow_network: bool,
 }
 
@@ -1136,10 +1144,16 @@ fn provider_credential_configured(provider: &ProviderConfig) -> bool {
 /// `missing`. The credential value is never read into this string.
 fn credential_source(provider: &ProviderConfig) -> &'static str {
     let name = provider.credential.name();
-    if env::var(name).map(|value| !value.is_empty()).unwrap_or(false) {
+    if env::var(name)
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+    {
         return "env";
     }
-    match native_store_path().ok().and_then(|path| load_store(&path).ok()) {
+    match native_store_path()
+        .ok()
+        .and_then(|path| load_store(&path).ok())
+    {
         Some(store) if store.resolve(&provider.credential, |_| None).is_ok() => "store",
         _ => "missing",
     }
@@ -1240,7 +1254,11 @@ fn colors_command(argument: &str) -> Result<String> {
             let palette = effective_palette(&settings);
             let mut lines = vec!["palette roles:".to_owned()];
             for role in Role::ALL {
-                lines.push(format!("  {:<15} {}", role.label(), palette.color(role).to_hex()));
+                lines.push(format!(
+                    "  {:<15} {}",
+                    role.label(),
+                    palette.color(role).to_hex()
+                ));
             }
             Ok(lines.join("\n"))
         }
@@ -1251,7 +1269,10 @@ fn colors_command(argument: &str) -> Result<String> {
             let seed = Rgb::from_hex(hex).map_err(anyhow::Error::msg)?;
             let palette = generate_palette(seed);
             let report = score_palette(&palette);
-            let mut lines = vec![format!("generated from {}:", seed.to_hex()), palette.to_toml()];
+            let mut lines = vec![
+                format!("generated from {}:", seed.to_hex()),
+                palette.to_toml(),
+            ];
             lines.push(format!(
                 "harmony: {:.3} (readability {:.2}, distinctness {:.2}, colourblind {:.2})",
                 report.score, report.readability, report.distinctness, report.colourblind
@@ -1303,9 +1324,10 @@ fn colors_command(argument: &str) -> Result<String> {
 /// sanitized frame into `~/.config/mindcode/debug/frames-<session>.jsonl` and
 /// report the path.  The file is only created when the command runs.
 fn debug_visual_dump(session_id: &str, transcript: &TuiTranscript) -> Result<String> {
-    let dir = sessions_dir()?.parent().map(Path::to_path_buf).ok_or_else(|| {
-        anyhow!("MindCode config home is unavailable")
-    })?;
+    let dir = sessions_dir()?
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow!("MindCode config home is unavailable"))?;
     let path = dir.join("debug").join(format!("frames-{session_id}.jsonl"));
     let render_text = transcript
         .entries
@@ -1898,9 +1920,7 @@ fn update_session_index(
         .ok()
         .and_then(|settings| settings.active_provider)
         .map(|id| id.to_string());
-    entries.retain(|entry| {
-        entry.get("id").and_then(serde_json::Value::as_str) != Some(session_id)
-    });
+    entries.retain(|entry| entry.get("id").and_then(serde_json::Value::as_str) != Some(session_id));
     entries.push(serde_json::json!({
         "id": session_id,
         "title": title,
@@ -1910,8 +1930,14 @@ fn update_session_index(
         "message_count": message_count,
     }));
     entries.sort_by(|a, b| {
-        let a = a.get("updated_at").and_then(serde_json::Value::as_u64).unwrap_or(0);
-        let b = b.get("updated_at").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let a = a
+            .get("updated_at")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let b = b
+            .get("updated_at")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
         b.cmp(&a)
     });
     fs::write(&path, serde_json::to_vec_pretty(&entries)?)?;

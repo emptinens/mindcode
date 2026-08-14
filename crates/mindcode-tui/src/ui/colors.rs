@@ -51,9 +51,7 @@ impl Rgb {
     }
 
     fn from_f64(channels: [f64; 3]) -> Self {
-        let to_u8 = |value: f64| {
-            (value.clamp(0.0, 1.0) * 255.0).round().clamp(0.0, 255.0) as u8
-        };
+        let to_u8 = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round().clamp(0.0, 255.0) as u8;
         Self {
             r: to_u8(channels[0]),
             g: to_u8(channels[1]),
@@ -266,21 +264,66 @@ impl PaletteSpec {
     /// Return a copy with one role overridden (used by `/colors set`).
     pub const fn with_override(self, role: Role, color: Rgb) -> Self {
         match role {
-            Role::Background => Self { background: color, ..self },
-            Role::Surface => Self { surface: color, ..self },
-            Role::SurfaceAlt => Self { surface_alt: color, ..self },
-            Role::Text => Self { text: color, ..self },
-            Role::Muted => Self { muted: color, ..self },
-            Role::Border => Self { border: color, ..self },
-            Role::BorderStrong => Self { border_strong: color, ..self },
-            Role::Accent => Self { accent: color, ..self },
-            Role::AccentSoft => Self { accent_soft: color, ..self },
-            Role::Success => Self { success: color, ..self },
-            Role::Warning => Self { warning: color, ..self },
-            Role::Error => Self { error: color, ..self },
-            Role::Info => Self { info: color, ..self },
-            Role::Selection => Self { selection: color, ..self },
-            Role::Progress => Self { progress: color, ..self },
+            Role::Background => Self {
+                background: color,
+                ..self
+            },
+            Role::Surface => Self {
+                surface: color,
+                ..self
+            },
+            Role::SurfaceAlt => Self {
+                surface_alt: color,
+                ..self
+            },
+            Role::Text => Self {
+                text: color,
+                ..self
+            },
+            Role::Muted => Self {
+                muted: color,
+                ..self
+            },
+            Role::Border => Self {
+                border: color,
+                ..self
+            },
+            Role::BorderStrong => Self {
+                border_strong: color,
+                ..self
+            },
+            Role::Accent => Self {
+                accent: color,
+                ..self
+            },
+            Role::AccentSoft => Self {
+                accent_soft: color,
+                ..self
+            },
+            Role::Success => Self {
+                success: color,
+                ..self
+            },
+            Role::Warning => Self {
+                warning: color,
+                ..self
+            },
+            Role::Error => Self {
+                error: color,
+                ..self
+            },
+            Role::Info => Self {
+                info: color,
+                ..self
+            },
+            Role::Selection => Self {
+                selection: color,
+                ..self
+            },
+            Role::Progress => Self {
+                progress: color,
+                ..self
+            },
         }
     }
 
@@ -375,10 +418,7 @@ pub fn score_palette(spec: &PaletteSpec) -> HarmonyReport {
         colourblind,
     ];
     let mean = components.iter().sum::<f64>() / components.len() as f64;
-    let worst = components
-        .iter()
-        .copied()
-        .fold(f64::INFINITY, f64::min);
+    let worst = components.iter().copied().fold(f64::INFINITY, f64::min);
     let score = 0.4 * mean + 0.6 * worst;
 
     HarmonyReport {
@@ -446,8 +486,7 @@ fn chroma_coherence(signals: &[Oklab]) -> f64 {
 /// collapses hue into a blue-yellow axis, so the status colors must also differ
 /// in lightness to stay distinguishable.
 fn colourblind_safety(spec: &PaletteSpec) -> f64 {
-    let statuses = [spec.success, spec.warning, spec.error]
-        .map(|color| color.to_oklab().l);
+    let statuses = [spec.success, spec.warning, spec.error].map(|color| color.to_oklab().l);
     let mut min = f64::INFINITY;
     for (index, first) in statuses.iter().enumerate() {
         for second in &statuses[index + 1..] {
@@ -525,7 +564,10 @@ mod tests {
         assert_eq!(color.to_hex(), "#ff4fa3");
         assert!(Rgb::from_hex("ff4fa3").is_ok());
         assert!(matches!(Rgb::from_hex("#fff"), Err(ColorError::InvalidHex)));
-        assert!(matches!(Rgb::from_hex("#gggggg"), Err(ColorError::InvalidHex)));
+        assert!(matches!(
+            Rgb::from_hex("#gggggg"),
+            Err(ColorError::InvalidHex)
+        ));
     }
 
     #[test]

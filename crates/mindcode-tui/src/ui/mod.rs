@@ -14,12 +14,12 @@ pub use animation::{
     frame_schedule, AnimationActivity, AnimationScheduler, FrameSchedule, MotionMode, PetalFrame,
     SakuraPetalField,
 };
-pub use layout::{
-    calculate_layout, calculate_layout_with_composer, calculate_workspace_layout, Breakpoint,
-    LayoutRects, PaneRatios, WorkspaceLayoutModel,
-};
 pub use colors::{
     default_graphite_sakura, generate_palette, score_palette, ColorError, HarmonyReport, Oklab,
     PaletteSpec, Rgb, Role,
+};
+pub use layout::{
+    calculate_layout, calculate_layout_with_composer, calculate_workspace_layout, Breakpoint,
+    LayoutRects, PaneRatios, WorkspaceLayoutModel,
 };
 pub use theme::{ColorMode, ColorToken, Palette, Theme, ThemeKind};

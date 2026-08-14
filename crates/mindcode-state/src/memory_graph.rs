@@ -292,7 +292,12 @@ impl MemoryStore {
             })
             .filter(|(_, score)| *score >= min_score)
             .collect();
-        scored.sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         scored.truncate(limit);
         scored
     }
@@ -435,7 +440,16 @@ pub fn contains_credential_shaped(text: &str) -> bool {
     if lower.contains("sk-") || lower.contains("bearer ") {
         return true;
     }
-    for key in ["api_key", "apikey", "api-key", "secret", "password", "credential", "authorization", "token"] {
+    for key in [
+        "api_key",
+        "apikey",
+        "api-key",
+        "secret",
+        "password",
+        "credential",
+        "authorization",
+        "token",
+    ] {
         if lower.contains(key) {
             return true;
         }
@@ -479,10 +493,18 @@ mod tests {
     fn cosine_search_ranks_related_text_above_unrelated() {
         let mut store = MemoryStore::default();
         store
-            .insert(record("a", "the build fails when rustc has no target", MemoryType::Fact))
+            .insert(record(
+                "a",
+                "the build fails when rustc has no target",
+                MemoryType::Fact,
+            ))
             .unwrap();
         store
-            .insert(record("b", "sushi is my favorite food", MemoryType::Preference))
+            .insert(record(
+                "b",
+                "sushi is my favorite food",
+                MemoryType::Preference,
+            ))
             .unwrap();
         let results = store.search("rust build target fails", 2, 0.0);
         assert_eq!(results[0].0.id, "a");
@@ -493,7 +515,11 @@ mod tests {
     fn credential_shaped_text_is_refused() {
         let mut store = MemoryStore::default();
         assert!(store
-            .insert(record("secret", "api_key = sk-abcdef1234567890", MemoryType::Fact))
+            .insert(record(
+                "secret",
+                "api_key = sk-abcdef1234567890",
+                MemoryType::Fact
+            ))
             .is_err());
         assert!(store
             .insert(record(
@@ -519,13 +545,20 @@ mod tests {
     fn json_round_trip_survives_restart_and_is_human_readable() {
         let mut store = MemoryStore::default();
         store
-            .insert(record("a", "prefer snake_case in Rust", MemoryType::Preference))
+            .insert(record(
+                "a",
+                "prefer snake_case in Rust",
+                MemoryType::Preference,
+            ))
             .unwrap();
         let json = store.to_json().unwrap();
         assert!(json.contains("\"memory_type\": \"preference\""));
         let restored = MemoryStore::from_json(&json).unwrap();
         assert_eq!(restored.len(), 1);
-        assert_eq!(restored.search("snake case", 1, 0.0)[0].0.text, "prefer snake_case in Rust");
+        assert_eq!(
+            restored.search("snake case", 1, 0.0)[0].0.text,
+            "prefer snake_case in Rust"
+        );
     }
 
     #[test]
@@ -540,7 +573,11 @@ mod tests {
     fn reinforcement_boosts_and_refreshes_confidence() {
         let mut store = MemoryStore::default();
         store
-            .insert(record("a", "commit messages in english", MemoryType::Preference))
+            .insert(record(
+                "a",
+                "commit messages in english",
+                MemoryType::Preference,
+            ))
             .unwrap();
         let now = 90 * 86_400_000_u64;
         let before = store.records[0].effective_confidence(now);
@@ -599,7 +636,11 @@ mod tests {
             .insert(record("shared", "team-wide fact", MemoryType::Fact))
             .unwrap();
         other
-            .insert(record("secret-note", "personal preference", MemoryType::Preference))
+            .insert(record(
+                "secret-note",
+                "personal preference",
+                MemoryType::Preference,
+            ))
             .unwrap();
         other.mark_private("secret-note");
 
@@ -634,6 +675,9 @@ mod tests {
         let restored = MemoryStore::load_from_file(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(restored.len(), 1);
-        assert_eq!(restored.search("persisted", 1, 0.0)[0].0.text, "persisted memory");
+        assert_eq!(
+            restored.search("persisted", 1, 0.0)[0].0.text,
+            "persisted memory"
+        );
     }
 }

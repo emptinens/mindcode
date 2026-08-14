@@ -49,7 +49,11 @@ pub struct SoftInterruptQueue {
 
 impl SoftInterruptQueue {
     pub fn push(&mut self, urgent: bool, text: impl Into<String>) {
-        let target = if urgent { &mut self.urgent } else { &mut self.queued };
+        let target = if urgent {
+            &mut self.urgent
+        } else {
+            &mut self.queued
+        };
         target.push_back(text.into());
     }
 

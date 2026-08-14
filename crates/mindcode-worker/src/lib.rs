@@ -24,9 +24,9 @@ pub use agent::{
     DEFAULT_MAX_ITERATIONS,
 };
 pub use error::{WorkerError, WorkerResult};
-pub use mindcode_core_tools::bwrap_available;
 pub use guard::{OwnershipGuard, ToolAccess};
 pub use hooks::{run_pre_tool, HookDecision, HookSet};
+pub use mindcode_core_tools::bwrap_available;
 pub use permission::PermissionTier;
 pub use pool::{PoolOutcome, WorkerPool, DEFAULT_MAX_CONCURRENT, MAX_CONCURRENT_CAP};
 pub use report::{CommandRun, WorkerReport, WorkerStatus, WorkerUsage};

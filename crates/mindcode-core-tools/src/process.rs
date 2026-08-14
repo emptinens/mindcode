@@ -640,8 +640,12 @@ mod tests {
                 nproc: None,
             }),
         };
-        let result = process_run(request, CancellationToken::new()).await.unwrap();
-        let size = std::fs::metadata(&target).map(|metadata| metadata.len()).unwrap_or(0);
+        let result = process_run(request, CancellationToken::new())
+            .await
+            .unwrap();
+        let size = std::fs::metadata(&target)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
         assert!(size <= 2048, "file grew to {size} bytes despite fsize=2048");
         assert!(size > 0, "dd should have written at least one block");
         let _ = result;

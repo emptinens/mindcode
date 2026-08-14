@@ -205,7 +205,10 @@ mod tests {
 
     #[test]
     fn argv_hides_credentials_and_mounts_workspace_rw() {
-        let argv = build_bwrap_argv(&config(), &["sh".to_owned(), "-c".to_owned(), "true".to_owned()]);
+        let argv = build_bwrap_argv(
+            &config(),
+            &["sh".to_owned(), "-c".to_owned(), "true".to_owned()],
+        );
         assert_eq!(argv[0], "bwrap");
         // Read-only root + writable workspace.
         assert!(argv.windows(2).any(|pair| pair == ["--ro-bind", "/"]));
@@ -226,7 +229,10 @@ mod tests {
         assert!(!denied.iter().any(|arg| arg == "--share-net"));
         // Opt-in: `--share-net` follows `--unshare-all`.
         let allowed = build_bwrap_argv(&config().with_network(NetworkPolicy::Allow), &command);
-        let unshare = allowed.iter().position(|arg| arg == "--unshare-all").unwrap();
+        let unshare = allowed
+            .iter()
+            .position(|arg| arg == "--unshare-all")
+            .unwrap();
         assert_eq!(allowed[unshare + 1], "--share-net");
     }
 
@@ -265,14 +271,14 @@ mod tests {
             "if cat '{}' 2>/dev/null; then echo LEAKED; else echo HIDDEN; fi",
             secret.display()
         );
-        let read = run_sandboxed(
-            &config,
-            &["sh".to_owned(), "-c".to_owned(), probe],
-            &cancel,
-        )
-        .await
-        .unwrap();
-        assert!(read.stdout.contains("HIDDEN"), "unexpected output: {}", read.stdout);
+        let read = run_sandboxed(&config, &["sh".to_owned(), "-c".to_owned(), probe], &cancel)
+            .await
+            .unwrap();
+        assert!(
+            read.stdout.contains("HIDDEN"),
+            "unexpected output: {}",
+            read.stdout
+        );
         assert!(!read.stdout.contains("LEAKED"));
         assert!(!read.stdout.contains("super-secret-value"));
 

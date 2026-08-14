@@ -112,7 +112,8 @@ fn is_identifier(value: &str) -> bool {
         return false;
     };
     (first.is_ascii_alphabetic() || first == '_')
-        && chars.all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+        && chars
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
 }
 
 /// Run a plugin's entry script under the bwrap sandbox using the resolved JS
@@ -219,7 +220,10 @@ mod tests {
 
         let mut bad_tool = manifest.clone();
         bad_tool.tools = vec!["1bad".to_owned()];
-        assert!(matches!(bad_tool.validate(), Err(PluginError::InvalidTool(_))));
+        assert!(matches!(
+            bad_tool.validate(),
+            Err(PluginError::InvalidTool(_))
+        ));
     }
 
     #[test]
@@ -234,17 +238,26 @@ mod tests {
 
         let mut traversal = manifest.clone();
         traversal.entry = "../credentials.json".to_owned();
-        assert!(matches!(traversal.validate(), Err(PluginError::InvalidEntry)));
+        assert!(matches!(
+            traversal.validate(),
+            Err(PluginError::InvalidEntry)
+        ));
 
         let mut absolute = manifest;
         absolute.entry = "/etc/passwd".to_owned();
-        assert!(matches!(absolute.validate(), Err(PluginError::InvalidEntry)));
+        assert!(matches!(
+            absolute.validate(),
+            Err(PluginError::InvalidEntry)
+        ));
     }
 
     #[test]
     fn unknown_manifest_fields_are_rejected() {
         let json = r#"{"name":"x","api_version":1,"entry":"a.js","extra":true}"#;
-        assert!(matches!(PluginManifest::from_json(json), Err(PluginError::Json(_))));
+        assert!(matches!(
+            PluginManifest::from_json(json),
+            Err(PluginError::Json(_))
+        ));
     }
 
     /// §14.3 acceptance: the plugin cannot read `credentials.json` no matter

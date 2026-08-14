@@ -49,7 +49,10 @@ impl fmt::Display for MermaidError {
             Self::Empty => formatter.write_str("mermaid source is empty"),
             Self::TooLarge => formatter.write_str("mermaid source exceeds the size limit"),
             Self::Unsupported(kind) => {
-                write!(formatter, "mermaid diagram type is not supported yet: {kind}")
+                write!(
+                    formatter,
+                    "mermaid diagram type is not supported yet: {kind}"
+                )
             }
             Self::Parse(message) => write!(formatter, "mermaid parse error: {message}"),
             Self::TooManyNodes => formatter.write_str("mermaid diagram has too many nodes"),
@@ -90,8 +93,13 @@ pub fn parse_mermaid(source: &str) -> Result<MermaidDiagram, MermaidError> {
     if source.len() > MAX_SOURCE_BYTES {
         return Err(MermaidError::TooLarge);
     }
-    if source.chars().any(|character| (character as u32) < 0x20 && character != '\n' && character != '\t') {
-        return Err(MermaidError::Parse("control characters are not allowed".to_owned()));
+    if source
+        .chars()
+        .any(|character| (character as u32) < 0x20 && character != '\n' && character != '\t')
+    {
+        return Err(MermaidError::Parse(
+            "control characters are not allowed".to_owned(),
+        ));
     }
 
     let mut direction = "TD".to_owned();
@@ -119,7 +127,7 @@ pub fn parse_mermaid(source: &str) -> Result<MermaidDiagram, MermaidError> {
             match first {
                 "flowchart" | "graph" => {
                     diagram_kind = Some(first.to_owned());
-                    if let Some(dir) = direction_of(&line[first.len()..].trim()) {
+                    if let Some(dir) = direction_of(line[first.len()..].trim()) {
                         direction = dir.to_owned();
                     }
                 }
@@ -145,12 +153,9 @@ pub fn parse_mermaid(source: &str) -> Result<MermaidDiagram, MermaidError> {
 }
 
 fn direction_of(value: &str) -> Option<&str> {
-    for dir in ["TD", "LR", "RL", "BT", "TB"] {
-        if value == dir || value.starts_with(dir) {
-            return Some(dir);
-        }
-    }
-    None
+    ["TD", "LR", "RL", "BT", "TB"]
+        .into_iter()
+        .find(|dir| value == *dir || value.starts_with(dir))
 }
 
 fn parse_flowchart_line(
@@ -211,10 +216,7 @@ fn edge_targets(rest: &str) -> Vec<(String, Option<String>)> {
     let (rest, label) = if let Some(open) = rest.find('|') {
         let after = &rest[open + 1..];
         match after.find('|') {
-            Some(close) => (
-                &after[close + 1..],
-                Some(after[..close].trim().to_owned()),
-            ),
+            Some(close) => (&after[close + 1..], Some(after[..close].trim().to_owned())),
             None => (rest, None),
         }
     } else {
@@ -242,7 +244,8 @@ fn node_parts(token: &str) -> (String, Option<String>) {
         if id.is_empty() {
             return (token.to_owned(), None);
         }
-        let mut label = token[index..].trim_matches(|c| matches!(c, '[' | ']' | '(' | ')' | '{' | '}' | '>'));
+        let mut label =
+            token[index..].trim_matches(|c| matches!(c, '[' | ']' | '(' | ')' | '{' | '}' | '>'));
         label = label.trim();
         return (id, Some(label.to_owned()));
     }

@@ -87,13 +87,22 @@ const CONFIRM_MARKERS: &[&str] = &[
 
 /// Classify a shell command (already-joined argv) into its risk class.
 pub fn classify(command: &str) -> ShellRisk {
-    if PROTECTED_TARGETS.iter().any(|target| command.contains(target)) {
+    if PROTECTED_TARGETS
+        .iter()
+        .any(|target| command.contains(target))
+    {
         return ShellRisk::Deny;
     }
-    if DENY_PATTERNS.iter().any(|pattern| command.contains(pattern)) {
+    if DENY_PATTERNS
+        .iter()
+        .any(|pattern| command.contains(pattern))
+    {
         return ShellRisk::Deny;
     }
-    if CONFIRM_MARKERS.iter().any(|marker| command.contains(marker)) {
+    if CONFIRM_MARKERS
+        .iter()
+        .any(|marker| command.contains(marker))
+    {
         return ShellRisk::Confirm;
     }
     ShellRisk::Safe

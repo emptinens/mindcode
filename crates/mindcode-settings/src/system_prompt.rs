@@ -55,10 +55,16 @@ impl fmt::Display for SystemPromptError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooLong { field } => {
-                write!(formatter, "{field} system prompt exceeds {MAX_SYSTEM_PROMPT_BYTES} bytes")
+                write!(
+                    formatter,
+                    "{field} system prompt exceeds {MAX_SYSTEM_PROMPT_BYTES} bytes"
+                )
             }
             Self::ControlCharacter { field } => {
-                write!(formatter, "{field} system prompt contains a control character")
+                write!(
+                    formatter,
+                    "{field} system prompt contains a control character"
+                )
             }
         }
     }

@@ -129,7 +129,10 @@ impl fmt::Display for DagValidationError {
             Self::DuplicateNode(id) => write!(formatter, "duplicate node: {id}"),
             Self::SelfDependency(id) => write!(formatter, "node depends on itself: {id}"),
             Self::MissingDependency { node, dependency } => {
-                write!(formatter, "node {node} references missing dependency {dependency}")
+                write!(
+                    formatter,
+                    "node {node} references missing dependency {dependency}"
+                )
             }
             Self::Cycle { node } => write!(formatter, "dependency cycle through {node}"),
             Self::NodeCapExceeded { limit } => {
@@ -139,10 +142,16 @@ impl fmt::Display for DagValidationError {
                 write!(formatter, "light preset forbids node dependencies: {node}")
             }
             Self::VerifyRequired { node } => {
-                write!(formatter, "deep preset requires a verify gate before {node} closes")
+                write!(
+                    formatter,
+                    "deep preset requires a verify gate before {node} closes"
+                )
             }
             Self::VerifyNotHonest { node } => {
-                write!(formatter, "verify artifact for {node} is not structurally honest")
+                write!(
+                    formatter,
+                    "verify artifact for {node} is not structurally honest"
+                )
             }
             Self::VerifyIncompleteCoverage { node, missing } => {
                 write!(
@@ -152,7 +161,10 @@ impl fmt::Display for DagValidationError {
                 )
             }
             Self::InvalidConfidence(node) => {
-                write!(formatter, "verify confidence for {node} is not in 0.0..=1.0")
+                write!(
+                    formatter,
+                    "verify confidence for {node} is not in 0.0..=1.0"
+                )
             }
         }
     }
@@ -163,10 +175,7 @@ impl std::error::Error for DagValidationError {}
 /// Validate a DAG against a preset (§12.1 acceptance).  Runs all structural
 /// checks: identity, dependencies, acyclicity, cap, preset shape, and — in
 /// `deep` — mandatory honest verify gates for every closed node.
-pub fn validate_dag(
-    nodes: &[DagNode],
-    preset: DagPreset,
-) -> Result<(), DagValidationError> {
+pub fn validate_dag(nodes: &[DagNode], preset: DagPreset) -> Result<(), DagValidationError> {
     if nodes.len() > preset.max_nodes() {
         return Err(DagValidationError::NodeCapExceeded {
             limit: preset.max_nodes(),
@@ -268,7 +277,11 @@ fn assert_acyclic(nodes: &[DagNode]) -> Result<(), DagValidationError> {
     ) -> Result<(), DagValidationError> {
         match marks.get(node.id.as_str()) {
             Some(Mark::Done) => return Ok(()),
-            Some(Mark::Visiting) => return Err(DagValidationError::Cycle { node: node.id.clone() }),
+            Some(Mark::Visiting) => {
+                return Err(DagValidationError::Cycle {
+                    node: node.id.clone(),
+                })
+            }
             None => {}
         }
         marks.insert(node.id.as_str(), Mark::Visiting);
@@ -326,7 +339,9 @@ mod tests {
 
     #[test]
     fn light_requires_flat_fan_out_and_enforces_cap() {
-        let mut nodes = (0..16).map(|index| node(&format!("n{index}"), &[])).collect::<Vec<_>>();
+        let mut nodes = (0..16)
+            .map(|index| node(&format!("n{index}"), &[]))
+            .collect::<Vec<_>>();
         assert!(validate_dag(&nodes, DagPreset::Light).is_ok());
         nodes.push(node("extra", &[]));
         assert!(matches!(

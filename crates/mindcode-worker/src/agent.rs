@@ -372,9 +372,7 @@ impl WorkerAgent {
             Err(WorkerError::RiskDenied { command }) => {
                 (format!("denied: catastrophic shell risk: {command}"), None)
             }
-            Err(WorkerError::HookBlocked(reason)) => {
-                (format!("blocked by hook: {reason}"), None)
-            }
+            Err(WorkerError::HookBlocked(reason)) => (format!("blocked by hook: {reason}"), None),
             Err(WorkerError::OutOfScope { path }) => {
                 (format!("out of scope: {}", path.display()), None)
             }
@@ -541,9 +539,10 @@ impl WorkerAgent {
             "todo" => {
                 let action = arg_string(&call.arguments, "action")?;
                 let item = arg_optional_string(&call.arguments, "item");
-                let mut todos = self.todos.lock().map_err(|_| {
-                    WorkerError::InvalidRequest("todo list is poisoned".to_owned())
-                })?;
+                let mut todos = self
+                    .todos
+                    .lock()
+                    .map_err(|_| WorkerError::InvalidRequest("todo list is poisoned".to_owned()))?;
                 let rendered = todos.apply(&action, item.as_deref())?;
                 Ok((rendered, None))
             }
@@ -628,9 +627,10 @@ impl WorkerAgent {
     /// call that may run), `false` when this is the first time the model has
     /// been shown the risk.
     fn mark_reflected(&self, command: &str) -> WorkerResult<bool> {
-        let mut set = self.reflected_shell.lock().map_err(|_| {
-            WorkerError::InvalidRequest("shell risk state is poisoned".to_owned())
-        })?;
+        let mut set = self
+            .reflected_shell
+            .lock()
+            .map_err(|_| WorkerError::InvalidRequest("shell risk state is poisoned".to_owned()))?;
         Ok(!set.insert(command.to_owned()))
     }
 

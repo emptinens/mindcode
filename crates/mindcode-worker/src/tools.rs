@@ -7,8 +7,8 @@ use crate::error::{WorkerError, WorkerResult};
 use crate::guard::{OwnershipGuard, ToolAccess};
 use crate::scope::WorkerScope;
 use mindcode_core_tools::{
-    process_run, redact_secrets, run_sandboxed, NetworkPolicy, ProcessRunRequest,
-    ProcessRunResult, SandboxConfig,
+    process_run, redact_secrets, run_sandboxed, NetworkPolicy, ProcessRunRequest, ProcessRunResult,
+    SandboxConfig,
 };
 use std::path::{Component, Path, PathBuf};
 use tokio_util::sync::CancellationToken;
@@ -65,11 +65,9 @@ impl TodoList {
             "list" => {}
             "clear" => self.items.clear(),
             "add" => {
-                let text = item
-                    .filter(|text| !text.trim().is_empty())
-                    .ok_or_else(|| {
-                        WorkerError::InvalidRequest("todo add requires a non-empty item".to_owned())
-                    })?;
+                let text = item.filter(|text| !text.trim().is_empty()).ok_or_else(|| {
+                    WorkerError::InvalidRequest("todo add requires a non-empty item".to_owned())
+                })?;
                 self.items.push(TodoItem {
                     text: text.trim().to_owned(),
                     done: false,
@@ -545,7 +543,10 @@ fn adaptive_trim(text: &str, budget: usize) -> String {
     while end > 0 && !text.is_char_boundary(end) {
         end -= 1;
     }
-    let end = text[..end].rfind('\n').map(|index| index + 1).unwrap_or(end);
+    let end = text[..end]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(end);
     let mut kept = text[..end].to_owned();
     kept.push_str(&format!("…\n[trimmed {} bytes]\n", text.len() - end));
     kept

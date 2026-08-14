@@ -20,6 +20,4 @@ pub use plugin::{
 };
 pub use process::{process_run, ProcessRunRequest, ProcessRunResult, ResourceLimits};
 pub use redact::redact_secrets;
-pub use sandbox::{
-    build_bwrap_argv, bwrap_available, run_sandboxed, NetworkPolicy, SandboxConfig,
-};
+pub use sandbox::{build_bwrap_argv, bwrap_available, run_sandboxed, NetworkPolicy, SandboxConfig};
