@@ -28,7 +28,7 @@ pub mod ui;
 
 use interaction::{LocalIntent, OverlayKind};
 use preferences::Preferences;
-use render::{NavigationView, OverlayView, PanelFocus, RenderState};
+use render::{NavigationView, OverlayView, PanelFocus, RenderState, EFFORT_LEVELS};
 use ui::{
     calculate_layout_with_composer, AnimationActivity, AnimationScheduler, ColorMode, MotionMode,
     PaneRatios, Theme, ThemeKind,
@@ -314,6 +314,7 @@ pub struct App {
     provider_selection: usize,
     provider_form: Option<ProviderForm>,
     model_selection: usize,
+    effort_selection: usize,
     providers_auto_opened: bool,
 }
 
@@ -393,6 +394,7 @@ impl App {
             provider_selection: 0,
             provider_form: None,
             model_selection: 0,
+            effort_selection: 0,
             providers_auto_opened: false,
         }
     }
@@ -519,6 +521,27 @@ impl App {
 
     fn selected_model_id(&self) -> Option<String> {
         self.active_models().get(self.model_selection).cloned()
+    }
+
+    /// Open the effort-lock picker, pre-selecting the currently locked level
+    /// (or the medium default) when it appears in the list.
+    fn open_effort(&mut self) {
+        if self.overlay == OverlayView::None {
+            self.set_overlay(OverlayView::Effort);
+        }
+        let current = self
+            .latest_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.telemetry.effort.as_str())
+            .unwrap_or("");
+        self.effort_selection = EFFORT_LEVELS
+            .iter()
+            .position(|level| *level == current)
+            .unwrap_or(2); // default: medium
+    }
+
+    fn selected_effort(&self) -> Option<&'static str> {
+        EFFORT_LEVELS.get(self.effort_selection).copied()
     }
 
     fn clamp_provider_selection(&mut self) {
@@ -678,6 +701,7 @@ impl App {
                 provider_selection: self.provider_selection,
                 provider_form: self.provider_form.as_ref(),
                 model_selection: self.model_selection,
+                effort_selection: self.effort_selection,
             },
         );
     }
@@ -1089,6 +1113,13 @@ impl App {
                     return self.handle_models_list_key(&key, &modifiers);
                 }
 
+                if self.overlay == OverlayView::Effort {
+                    self.suppress_input = true;
+                    let key = key.clone();
+                    let modifiers = modifiers.clone();
+                    return self.handle_effort_list_key(&key, &modifiers);
+                }
+
                 if self.overlay != OverlayView::None {
                     // Every key not explicitly handled above belongs to the
                     // modal focus scope and must not leak into the session.
@@ -1152,6 +1183,18 @@ impl App {
                 self.suppress_input = true;
                 true
             }
+            UiInputEventKind::Submit if self.overlay == OverlayView::Effort => {
+                if let Some(level) = self.selected_effort() {
+                    *event = UiInputEventKind::Action(provider_action(
+                        "effort_select",
+                        Some(level.to_owned()),
+                        None,
+                    ));
+                }
+                self.set_overlay(OverlayView::None);
+                self.suppress_input = true;
+                true
+            }
             UiInputEventKind::Submit if self.overlay == OverlayView::None && !self.show_welcome => {
                 // Interactive pickers: a bare `/model` or `/settings` submit
                 // opens an overlay locally instead of round-tripping through
@@ -1168,6 +1211,14 @@ impl App {
                 }
                 if trimmed == "/settings" {
                     self.set_overlay(OverlayView::Settings);
+                    self.input_buffer.clear();
+                    self.input_cursor = 0;
+                    self.preferred_column = None;
+                    self.suppress_input = true;
+                    return true;
+                }
+                if trimmed == "/effort" {
+                    self.open_effort();
                     self.input_buffer.clear();
                     self.input_cursor = 0;
                     self.preferred_column = None;
@@ -1263,6 +1314,20 @@ impl App {
             "down" if len > 0 => {
                 self.model_selection = (self.model_selection + 1).min(len - 1);
             }
+            _ => {}
+        }
+        true
+    }
+
+    /// Effort-picker keys: move the selection across the fixed level list.
+    fn handle_effort_list_key(&mut self, key: &str, modifiers: &[String]) -> bool {
+        if !modifiers.is_empty() {
+            return true;
+        }
+        let len = EFFORT_LEVELS.len();
+        match key {
+            "up" => self.effort_selection = self.effort_selection.saturating_sub(1),
+            "down" => self.effort_selection = (self.effort_selection + 1).min(len - 1),
             _ => {}
         }
         true
@@ -1817,6 +1882,7 @@ pub fn render_snapshot(frame: &mut Frame<'_>, snapshot: Option<&UiRenderSnapshot
             provider_selection: 0,
             provider_form: None,
             model_selection: 0,
+            effort_selection: 0,
         },
     );
 }
@@ -2950,6 +3016,37 @@ mod tests {
         let mut up = key_message("up", &[]);
         assert!(app.contextualize_input(&mut up));
         assert_eq!(app.model_selection, 0);
+    }
+
+    #[test]
+    fn effort_picker_opens_on_bare_effort_and_select_emits_action() {
+        let mut app = app_with_providers();
+        app.push_input("/effort");
+        let mut submit = submit_message();
+        assert!(app.contextualize_input(&mut submit));
+        assert_eq!(app.overlay, OverlayView::Effort);
+        assert!(app.input_buffer.is_empty());
+        // The test snapshot reports effort "high", so the picker pre-selects
+        // it (index 3 in none|low|medium|high|xhigh|max).
+        assert_eq!(app.effort_selection, 3);
+
+        let mut down = key_message("down", &[]);
+        assert!(app.contextualize_input(&mut down));
+        assert_eq!(app.effort_selection, 4); // xhigh
+
+        let mut enter = submit_message();
+        assert!(app.contextualize_input(&mut enter));
+        match enter {
+            UiMessage::InputEvent {
+                event: UiInputEventKind::Action(action),
+                ..
+            } => {
+                assert_eq!(action.action, "effort_select");
+                assert_eq!(action.target.as_deref(), Some("xhigh"));
+            }
+            other => panic!("expected effort_select action, got {other:?}"),
+        }
+        assert_eq!(app.overlay, OverlayView::None);
     }
 
     #[test]

@@ -83,6 +83,7 @@ pub enum OverlayView {
     Permission,
     Providers,
     Models,
+    Effort,
     Settings,
     Reconnect,
 }
@@ -107,6 +108,7 @@ pub struct RenderState<'a> {
     pub provider_selection: usize,
     pub provider_form: Option<&'a ProviderForm>,
     pub model_selection: usize,
+    pub effort_selection: usize,
 }
 
 struct TranscriptView<'a> {
@@ -1184,6 +1186,7 @@ fn render_overlay(frame: &mut Frame<'_>, state: &RenderState<'_>) {
         OverlayView::Permission => render_permission_overlay(frame, state),
         OverlayView::Providers => render_providers_overlay(frame, state),
         OverlayView::Models => render_models_overlay(frame, state),
+        OverlayView::Effort => render_effort_overlay(frame, state),
         OverlayView::Settings => render_settings_overlay(frame, state),
         OverlayView::Reconnect => render_text_modal(
             frame,
@@ -1418,6 +1421,52 @@ fn render_models_overlay(frame: &mut Frame<'_>, state: &RenderState<'_>) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "[↑/↓] choose   [Enter] select   [Esc] close",
+        theme.style(ColorToken::Muted),
+    )));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Interactive effort-lock picker opened by a bare `/effort` submit.  The
+/// levels are the fixed contract values; the current lock (or the medium
+/// default when unset) is marked.
+pub const EFFORT_LEVELS: [&str; 6] = ["none", "low", "medium", "high", "xhigh", "max"];
+
+fn render_effort_overlay(frame: &mut Frame<'_>, state: &RenderState<'_>) {
+    let area = centered_rect(
+        frame.area().width.min(48),
+        frame.area().height.saturating_sub(4).min(20),
+        frame.area(),
+    );
+    frame.render_widget(Clear, area);
+    let theme = state.theme;
+    let block = panel_block("Worker effort lock", true, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let current = state
+        .snapshot
+        .map(|snapshot| snapshot.telemetry.effort.as_str())
+        .unwrap_or("");
+    let mut lines = Vec::new();
+    for (index, level) in EFFORT_LEVELS.iter().enumerate() {
+        let selected = index == state.effort_selection;
+        let marker = if selected { "▸" } else { " " };
+        let active = if *level == current { "●" } else { " " };
+        let style = if selected {
+            theme.style(ColorToken::Accent)
+        } else if *level == current {
+            theme.style(ColorToken::Text).add_modifier(Modifier::BOLD)
+        } else {
+            theme.style(ColorToken::Text)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker} {active} {level}"),
+            style,
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "[↑/↓] choose   [Enter] lock   [Esc] close",
         theme.style(ColorToken::Muted),
     )));
     frame.render_widget(Paragraph::new(lines), inner);

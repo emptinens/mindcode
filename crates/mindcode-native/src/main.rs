@@ -1588,7 +1588,8 @@ Commands (type and press Enter):
   /chat <text>          same as typing text directly
   /model                pick a model from the active provider's list
   /model <id>           set the global Worker model directly
-  /effort [<level>|off] show or set the effort lock (none|low|medium|high|xhigh|max)
+  /effort               pick the effort lock (none|low|medium|high|xhigh|max)
+  /effort <level>|off   set the effort lock directly, or clear it with off
   /provider             list provider profiles (* = active)
   /provider use <id>    switch the active provider
   /provider remove <id> remove a provider profile
@@ -2137,6 +2138,17 @@ fn apply_tui_action(action: &UiActionInput) -> Result<bool> {
             )
             .map_err(anyhow::Error::msg)?;
             settings.global_worker_model = Some(model.to_string());
+            true
+        }
+        "effort_select" => {
+            let level = action
+                .target
+                .clone()
+                .ok_or_else(|| anyhow!("effort_select requires a target"))?;
+            let effort: WorkerEffort = level
+                .parse()
+                .map_err(|_| anyhow!("invalid effort level '{level}'"))?;
+            settings.worker_effort_lock = Some(effort);
             true
         }
         _ => false,
@@ -3828,6 +3840,30 @@ mod tests {
                 value: None,
             };
             assert!(apply_tui_action(&missing).is_err());
+        });
+    }
+
+    #[test]
+    fn effort_select_action_sets_the_global_effort_lock() {
+        with_sandbox_env(|dir| {
+            seed_builtin_active(dir);
+            let select = UiActionInput {
+                action: "effort_select".into(),
+                target: Some("max".into()),
+                value: None,
+            };
+            assert!(apply_tui_action(&select).unwrap());
+            assert_eq!(
+                load_sandbox_settings(dir).worker_effort_lock,
+                Some(WorkerEffort::Max)
+            );
+
+            let invalid = UiActionInput {
+                action: "effort_select".into(),
+                target: Some("ultra".into()),
+                value: None,
+            };
+            assert!(apply_tui_action(&invalid).is_err());
         });
     }
 
