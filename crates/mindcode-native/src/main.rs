@@ -1756,6 +1756,7 @@ fn conversation_messages(entries: &[TranscriptInput], budget: usize) -> Vec<Chat
             turns.push(ChatMessage {
                 role: role.clone(),
                 content: text.clone(),
+                ..Default::default()
             });
         }
     }
@@ -1777,6 +1778,7 @@ fn conversation_messages(entries: &[TranscriptInput], budget: usize) -> Vec<Chat
         kept.push(ChatMessage {
             role: message.role,
             content,
+            ..Default::default()
         });
     }
     kept.reverse();
@@ -2064,6 +2066,7 @@ async fn chat_completion_text(
     let messages = vec![ChatMessage {
         role: "user".to_owned(),
         content: prompt.to_owned(),
+        ..Default::default()
     }];
     chat_completion_with_chunks(&messages, model_override, run_active, |_| {})
         .await
@@ -3265,6 +3268,7 @@ mod tests {
                 let messages = vec![ChatMessage {
                     role: "user".to_owned(),
                     content: "hi".to_owned(),
+                    ..Default::default()
                 }];
                 let text = chat_completion_with_chunks(&messages, None, None, |delta| {
                     deltas.push(delta.to_owned());

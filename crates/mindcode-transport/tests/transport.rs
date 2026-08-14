@@ -20,6 +20,7 @@ fn chat_request(model: &str) -> ChatCompletionsRequest {
         messages: vec![ChatMessage {
             role: "user".to_owned(),
             content: "ping".to_owned(),
+            ..Default::default()
         }],
         max_tokens: Some(16),
         temperature: None,
@@ -34,6 +35,7 @@ fn messages_request(model: &str) -> MessagesRequest {
         messages: vec![ChatMessage {
             role: "user".to_owned(),
             content: "ping".to_owned(),
+            ..Default::default()
         }],
         system: None,
         temperature: None,

@@ -181,10 +181,43 @@ pub struct AnthropicModelList {
 }
 
 /// One request message shared by both chat protocols.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+///
+/// The neutral shape also carries tool-call requests (on `role:
+/// "assistant"` messages) and tool results (`role: "tool"` plus
+/// `tool_result_id`). The body builders translate these into each
+/// protocol's wire format: OpenAI keeps them natively, Anthropic rewrites
+/// them into `tool_use` / `tool_result` content blocks.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    /// Assistant tool-call requests (OpenAI-native shape).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    /// Correlation id for a `role: "tool"` result message: `tool_call_id` on
+    /// OpenAI, `tool_use_id` on Anthropic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_result_id: Option<String>,
+}
+
+/// One assistant tool-call request in a message. Serializes to the OpenAI
+/// `{id, type: "function", function: {name, arguments}}` shape; the Anthropic
+/// builder translates it into a `tool_use` content block.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: ToolCallFunction,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ToolCallFunction {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// JSON-encoded arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
 }
 
 /// A tool the model may call, in a provider-neutral shape. The request body
@@ -649,12 +682,33 @@ fn inject_stream_flag(request: &impl Serialize) -> Result<Value, TransportError>
     Ok(value)
 }
 
-/// Build the `openai-compatible` chat body: force `stream: true` and translate
-/// neutral tool specs into the `{"type":"function","function":{...}}` shape.
+/// Build the `openai-compatible` chat body: force `stream: true`, translate
+/// neutral tool specs into the `{"type":"function","function":{...}}` shape,
+/// and rename `tool_result_id` into the OpenAI `tool_call_id` field.
 fn inject_chat_body(request: &ChatCompletionsRequest) -> Result<Value, TransportError> {
     let mut value = inject_stream_flag(request)?;
     apply_openai_tools(&mut value);
+    apply_openai_tool_results(&mut value);
     Ok(value)
+}
+
+/// Rename the neutral `tool_result_id` on `role: "tool"` messages into the
+/// OpenAI `tool_call_id` correlation field.
+fn apply_openai_tool_results(value: &mut Value) {
+    let Some(messages) = value.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for message in messages.iter_mut() {
+        let Some(object) = message.as_object_mut() else {
+            continue;
+        };
+        if object.get("role").and_then(Value::as_str) != Some("tool") {
+            continue;
+        }
+        if let Some(id) = object.remove("tool_result_id") {
+            object.insert("tool_call_id".to_owned(), id);
+        }
+    }
 }
 
 /// Translate neutral `{name,description,parameters}` tool specs into the
@@ -710,38 +764,152 @@ fn apply_anthropic_tools(value: &mut Value) {
 fn inject_messages_body(request: &MessagesRequest) -> Result<Value, TransportError> {
     let mut value = inject_stream_flag(request)?;
     apply_anthropic_tools(&mut value);
-    apply_anthropic_cache_control(&mut value);
+    apply_anthropic_messages(&mut value);
     Ok(value)
 }
 
-/// Put an Anthropic `cache_control: {"type":"ephemeral"}` breakpoint on the
-/// last message's text content, caching everything before it as a reusable
-/// prefix. Only applied when there is a prior turn worth caching.
-fn apply_anthropic_cache_control(value: &mut Value) {
-    let Some(messages) = value.get_mut("messages").and_then(Value::as_array_mut) else {
+/// Rewrite neutral messages into the Anthropic wire shape: pull `system`
+/// messages into the top-level `system` field, translate tool results into
+/// `tool_result` blocks and assistant tool calls into `tool_use` blocks, then
+/// put a `cache_control` breakpoint on the last content block when there is a
+/// prefix worth caching (§10.3).
+fn apply_anthropic_messages(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
         return;
     };
-    if messages.len() < 2 {
+    let Some(messages) = object.remove("messages") else {
         return;
+    };
+    let Some(messages) = messages.as_array() else {
+        object.insert("messages".to_owned(), messages);
+        return;
+    };
+
+    let mut system_parts: Vec<String> = Vec::new();
+    let mut translated: Vec<Value> = Vec::new();
+    for message in messages.iter() {
+        let Some(message) = message.as_object() else {
+            translated.push(message.clone());
+            continue;
+        };
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let content = message
+            .get("content")
+            .cloned()
+            .unwrap_or_else(|| Value::String(String::new()));
+
+        if role == "system" {
+            if let Value::String(text) = &content {
+                if !text.trim().is_empty() {
+                    system_parts.push(text.clone());
+                }
+            }
+            continue;
+        }
+
+        if role == "tool" {
+            let tool_use_id = message
+                .get("tool_result_id")
+                .cloned()
+                .unwrap_or_else(|| Value::String(String::new()));
+            translated.push(serde_json::json!({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": content,
+                }],
+            }));
+            continue;
+        }
+
+        if role == "assistant" {
+            if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+                let mut blocks: Vec<Value> = Vec::new();
+                if let Value::String(text) = &content {
+                    if !text.is_empty() {
+                        blocks.push(serde_json::json!({ "type": "text", "text": text }));
+                    }
+                }
+                for call in calls {
+                    if let Some(call) = call.as_object() {
+                        let id = call
+                            .get("id")
+                            .cloned()
+                            .unwrap_or_else(|| Value::String(String::new()));
+                        let function = call.get("function").cloned();
+                        let name = function
+                            .as_ref()
+                            .and_then(|f| f.get("name"))
+                            .cloned()
+                            .unwrap_or(Value::Null);
+                        let arguments = function
+                            .as_ref()
+                            .and_then(|f| f.get("arguments"))
+                            .and_then(Value::as_str)
+                            .and_then(|arguments| serde_json::from_str::<Value>(arguments).ok())
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        blocks.push(serde_json::json!({
+                            "type": "tool_use",
+                            "id": id,
+                            "name": name,
+                            "input": arguments,
+                        }));
+                    }
+                }
+                translated.push(serde_json::json!({ "role": "assistant", "content": blocks }));
+                continue;
+            }
+        }
+
+        translated.push(serde_json::json!({ "role": role, "content": content }));
     }
-    let Some(last) = messages.last_mut().and_then(Value::as_object_mut) else {
-        return;
-    };
-    let Some(content) = last.remove("content") else {
-        return;
-    };
-    let text = match &content {
-        Value::String(text) => text.clone(),
-        other => other.to_string(),
-    };
-    last.insert(
-        "content".to_owned(),
-        serde_json::json!([{
-            "type": "text",
-            "text": text,
-            "cache_control": { "type": "ephemeral" },
-        }]),
-    );
+
+    if !system_parts.is_empty() {
+        object.insert(
+            "system".to_owned(),
+            Value::String(system_parts.join("\n\n")),
+        );
+    }
+    if translated.len() >= 2 {
+        if let Some(last) = translated.last_mut().and_then(Value::as_object_mut) {
+            apply_cache_control_to_last_block(last);
+        }
+    }
+    object.insert("messages".to_owned(), Value::Array(translated));
+}
+
+/// Attach an ephemeral `cache_control` breakpoint to a message's last content
+/// block, converting a plain string content into a single text block first.
+fn apply_cache_control_to_last_block(message: &mut serde_json::Map<String, Value>) {
+    let cache_control = serde_json::json!({ "type": "ephemeral" });
+    match message.get("content") {
+        Some(Value::String(_)) => {
+            let Some(content) = message.remove("content") else {
+                return;
+            };
+            message.insert(
+                "content".to_owned(),
+                Value::Array(vec![serde_json::json!({
+                    "type": "text",
+                    "text": content,
+                    "cache_control": cache_control,
+                })]),
+            );
+        }
+        Some(Value::Array(blocks)) => {
+            let mut blocks = blocks.clone();
+            if let Some(last) = blocks.last_mut().and_then(Value::as_object_mut) {
+                last.insert("cache_control".to_owned(), cache_control);
+            }
+            message.insert("content".to_owned(), Value::Array(blocks));
+        }
+        _ => {}
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -932,6 +1100,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: "user".to_owned(),
                 content: "ping".to_owned(),
+                ..Default::default()
             }],
             max_tokens: Some(16),
             temperature: None,
@@ -977,6 +1146,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: "user".to_owned(),
                 content: "ping".to_owned(),
+                ..Default::default()
             }],
             system: None,
             temperature: None,
@@ -1096,10 +1266,12 @@ mod tests {
                 ChatMessage {
                     role: "user".to_owned(),
                     content: "first".to_owned(),
+                    ..Default::default()
                 },
                 ChatMessage {
                     role: "user".to_owned(),
                     content: "second".to_owned(),
+                    ..Default::default()
                 },
             ],
             system: None,
@@ -1129,6 +1301,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: "user".to_owned(),
                 content: "only".to_owned(),
+                ..Default::default()
             }],
             system: None,
             temperature: None,
@@ -1182,5 +1355,127 @@ mod tests {
         // Empty tool lists are omitted from the wire body entirely.
         let no_tools = inject_chat_body(&chat_request()).unwrap();
         assert!(no_tools.get("tools").is_none());
+    }
+
+    #[test]
+    fn tool_messages_translate_to_both_wire_shapes() {
+        // OpenAI: assistant tool_calls pass through; role "tool" + the neutral
+        // tool_result_id becomes the OpenAI tool_call_id.
+        let chat = inject_chat_body(&ChatCompletionsRequest {
+            model: "model-alpha".to_owned(),
+            messages: vec![
+                ChatMessage {
+                    role: "assistant".to_owned(),
+                    content: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "call_1".to_owned(),
+                        kind: "function".to_owned(),
+                        function: ToolCallFunction {
+                            name: Some("read_file".to_owned()),
+                            arguments: Some(r#"{"path":"a.txt"}"#.to_owned()),
+                        },
+                    }],
+                    ..Default::default()
+                },
+                ChatMessage {
+                    role: "tool".to_owned(),
+                    content: "hello".to_owned(),
+                    tool_result_id: Some("call_1".to_owned()),
+                    ..Default::default()
+                },
+            ],
+            max_tokens: None,
+            temperature: None,
+            tools: Vec::new(),
+        })
+        .unwrap();
+        let messages = chat["messages"].as_array().unwrap();
+        assert_eq!(
+            messages[0]["tool_calls"][0]["function"]["name"],
+            Value::String("read_file".to_owned())
+        );
+        assert_eq!(messages[1]["role"], Value::String("tool".to_owned()));
+        assert_eq!(
+            messages[1]["tool_call_id"],
+            Value::String("call_1".to_owned())
+        );
+        assert!(messages[1].get("tool_result_id").is_none());
+
+        // Anthropic: assistant tool_calls -> tool_use blocks; role "tool" -> a
+        // user tool_result block.
+        let body = inject_messages_body(&MessagesRequest {
+            model: "model-alpha".to_owned(),
+            max_tokens: 16,
+            messages: vec![
+                ChatMessage {
+                    role: "user".to_owned(),
+                    content: "read a.txt".to_owned(),
+                    ..Default::default()
+                },
+                ChatMessage {
+                    role: "assistant".to_owned(),
+                    content: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "toolu_1".to_owned(),
+                        kind: "function".to_owned(),
+                        function: ToolCallFunction {
+                            name: Some("read_file".to_owned()),
+                            arguments: Some(r#"{"path":"a.txt"}"#.to_owned()),
+                        },
+                    }],
+                    ..Default::default()
+                },
+                ChatMessage {
+                    role: "tool".to_owned(),
+                    content: "hello".to_owned(),
+                    tool_result_id: Some("toolu_1".to_owned()),
+                    ..Default::default()
+                },
+            ],
+            system: None,
+            temperature: None,
+            tools: Vec::new(),
+        })
+        .unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[1]["role"], Value::String("assistant".to_owned()));
+        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+        assert_eq!(messages[1]["content"][0]["name"], "read_file");
+        assert_eq!(messages[1]["content"][0]["input"]["path"], "a.txt");
+        assert_eq!(messages[2]["role"], Value::String("user".to_owned()));
+        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+        assert_eq!(messages[2]["content"][0]["tool_use_id"], "toolu_1");
+        assert_eq!(messages[2]["content"][0]["content"], "hello");
+    }
+
+    #[test]
+    fn anthropic_system_messages_move_to_the_system_field() {
+        let body = inject_messages_body(&MessagesRequest {
+            model: "model-alpha".to_owned(),
+            max_tokens: 16,
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_owned(),
+                    content: "you are a coding agent".to_owned(),
+                    ..Default::default()
+                },
+                ChatMessage {
+                    role: "user".to_owned(),
+                    content: "hi".to_owned(),
+                    ..Default::default()
+                },
+            ],
+            system: None,
+            temperature: None,
+            tools: Vec::new(),
+        })
+        .unwrap();
+        assert_eq!(
+            body["system"],
+            Value::String("you are a coding agent".to_owned())
+        );
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], Value::String("user".to_owned()));
     }
 }
