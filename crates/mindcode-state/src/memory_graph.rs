@@ -63,6 +63,9 @@ pub enum MemoryScope {
     Global,
     Project,
     Session,
+    /// Shared team/repository graph (§14.4): local shared files, not a server
+    /// account (no OAuth/logins).
+    Team,
 }
 
 impl MemoryScope {
@@ -71,6 +74,7 @@ impl MemoryScope {
             Self::Global => "global",
             Self::Project => "project",
             Self::Session => "session",
+            Self::Team => "team",
         }
     }
 }
@@ -86,6 +90,10 @@ pub struct MemoryRecord {
     pub reinforced_at_ms: u64,
     pub reinforcement: u32,
     pub confidence: f64,
+    /// Per-user private record (§14.4): never exported into a shared team
+    /// graph. Defaults to `false` (shareable).
+    #[serde(default)]
+    pub private: bool,
 }
 
 impl MemoryRecord {
@@ -155,7 +163,7 @@ impl Embedder for HashingEmbedder {
     }
 }
 
-fn fnv1a(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in bytes {
         hash ^= u64::from(*byte);
@@ -253,6 +261,21 @@ impl MemoryStore {
         true
     }
 
+    /// Look up one record by id.
+    pub fn get(&self, id: &str) -> Option<&MemoryRecord> {
+        self.records.iter().find(|record| record.id == id)
+    }
+
+    /// Mark a record per-user private (§14.4): it stays in this store but is
+    /// excluded from every team merge/export.
+    pub fn mark_private(&mut self, id: &str) -> bool {
+        let Some(record) = self.records.iter_mut().find(|record| record.id == id) else {
+            return false;
+        };
+        record.private = true;
+        true
+    }
+
     /// Cosine-ranked retrieval with a relevance floor (the deterministic stand-in
     /// for the sidecar-LLM filter; the sidecar can raise the floor at runtime).
     pub fn search(&self, query: &str, limit: usize, min_score: f32) -> Vec<(MemoryRecord, f32)> {
@@ -325,8 +348,21 @@ impl MemoryStore {
     /// broken by the newer `reinforced_at_ms`.  Returns the number of records
     /// newly added.
     pub fn merge(&mut self, other: &MemoryStore) -> usize {
+        self.merge_filtered(other, true)
+    }
+
+    /// Merge only shareable records (§14.4): per-user private records are never
+    /// pulled into a shared team graph.
+    pub fn merge_shared(&mut self, other: &MemoryStore) -> usize {
+        self.merge_filtered(other, false)
+    }
+
+    fn merge_filtered(&mut self, other: &MemoryStore, include_private: bool) -> usize {
         let mut added = 0;
         for record in &other.records {
+            if !include_private && record.private {
+                continue;
+            }
             match self
                 .records
                 .iter_mut()
@@ -435,6 +471,7 @@ mod tests {
             reinforced_at_ms: 0,
             reinforcement: 0,
             confidence: 0.9,
+            private: false,
         }
     }
 
@@ -553,6 +590,30 @@ mod tests {
             .unwrap();
         assert_eq!(subject.text, "corrected");
         assert_eq!(subject.memory_type, MemoryType::Correction);
+    }
+
+    #[test]
+    fn team_merge_excludes_private_records() {
+        let mut other = MemoryStore::default();
+        other
+            .insert(record("shared", "team-wide fact", MemoryType::Fact))
+            .unwrap();
+        other
+            .insert(record("secret-note", "personal preference", MemoryType::Preference))
+            .unwrap();
+        other.mark_private("secret-note");
+
+        let mut base = MemoryStore::default();
+        let added = base.merge_shared(&other);
+        assert_eq!(added, 1);
+        assert!(base.get("shared").is_some());
+        assert!(base.get("secret-note").is_none());
+
+        // Full merge (single-user) still pulls private records.
+        let added_all = base.merge(&other);
+        assert_eq!(added_all, 1);
+        assert!(base.get("secret-note").is_some());
+        assert_eq!(MemoryScope::Team.label(), "team");
     }
 
     #[test]
