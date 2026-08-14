@@ -1073,6 +1073,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mindcode-worker"
+version = "0.1.3"
+dependencies = [
+ "mindcode-core-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "mindcoded"
 version = "0.1.3"
 dependencies = [
