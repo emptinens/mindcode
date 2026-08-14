@@ -1053,6 +1053,7 @@ name = "mindcode-tui"
 version = "0.1.3"
 dependencies = [
  "crossterm",
+ "mindcode-core-tools",
  "mindcode-protocol",
  "ratatui",
  "serde_json",

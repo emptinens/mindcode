@@ -4,6 +4,7 @@ mod error;
 mod git;
 mod js_runtime;
 mod process;
+mod redact;
 mod sandbox;
 
 pub use error::{CoreToolError, CoreToolErrorCode, CoreToolResult};
@@ -14,4 +15,7 @@ pub use git::{
 };
 pub use js_runtime::{JsRuntime, JsRuntimeKind};
 pub use process::{process_run, ProcessRunRequest, ProcessRunResult};
-pub use sandbox::{build_bwrap_argv, bwrap_available, run_sandboxed, SandboxConfig};
+pub use redact::redact_secrets;
+pub use sandbox::{
+    build_bwrap_argv, bwrap_available, run_sandboxed, NetworkPolicy, SandboxConfig,
+};

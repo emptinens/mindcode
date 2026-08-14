@@ -10,7 +10,7 @@ use crate::report::{CommandRun, WorkerReport, WorkerStatus};
 use crate::risk::{classify, ShellRisk};
 use crate::scope::WorkerScope;
 use crate::tools;
-use mindcode_core_tools::ProcessRunResult;
+use mindcode_core_tools::{NetworkPolicy, ProcessRunResult};
 use mindcode_transport::{ChatMessage, ChatUsage, ToolCall, ToolCallFunction, ToolSpec};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -184,6 +184,9 @@ pub struct WorkerAgent {
     /// shell commands run unsandboxed; when unset they run under bwrap and
     /// fail closed if bwrap is absent.
     allow_unsafe_shell: bool,
+    /// Whether `--allow-network` was passed (§13.1): when set, sandboxed
+    /// commands may reach the network; when unset they run offline.
+    allow_network: bool,
     tools: Vec<ToolSpec>,
     system_prompt: String,
     max_iterations: usize,
@@ -207,6 +210,7 @@ impl WorkerAgent {
             reflected_shell: Mutex::new(HashSet::new()),
             hooks: None,
             allow_unsafe_shell: false,
+            allow_network: false,
             tools: default_tool_defs(),
             system_prompt: DEFAULT_WORKER_SYSTEM_PROMPT.to_owned(),
             max_iterations: DEFAULT_MAX_ITERATIONS,
@@ -238,6 +242,13 @@ impl WorkerAgent {
     /// commands run under bwrap and fail closed when bwrap is unavailable.
     pub fn with_unsafe_shell(mut self, allow: bool) -> Self {
         self.allow_unsafe_shell = allow;
+        self
+    }
+
+    /// Allow sandboxed commands to reach the network (§13.1).  Default is off:
+    /// the sandbox drops the net namespace unless this is set.
+    pub fn with_allow_network(mut self, allow: bool) -> Self {
+        self.allow_network = allow;
         self
     }
 
@@ -475,7 +486,12 @@ impl WorkerAgent {
                 }
                 let guard = self.exec_guard();
                 let result = if sandboxed && !self.allow_unsafe_shell {
-                    tools::run_shell_sandboxed(&guard, &argv, &cancel).await?
+                    let network = if self.allow_network {
+                        NetworkPolicy::Allow
+                    } else {
+                        NetworkPolicy::Deny
+                    };
+                    tools::run_shell_sandboxed(&guard, &argv, network, &cancel).await?
                 } else {
                     tools::run_shell(&guard, &argv, &cancel).await?
                 };

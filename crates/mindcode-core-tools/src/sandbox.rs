@@ -22,6 +22,20 @@ pub struct SandboxConfig {
     /// The MindCode config directory (holds `credentials.json`).  Replaced by
     /// an empty tmpfs inside the sandbox so the credential store is unreadable.
     pub config_home: PathBuf,
+    /// Whether the sandboxed process may reach the network.  Off by default:
+    /// isolation drops the net namespace unless the caller explicitly opts in.
+    pub network: NetworkPolicy,
+}
+
+/// Network exposure for a sandboxed command.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum NetworkPolicy {
+    /// No network: the net namespace is unshared and the command is offline.
+    #[default]
+    Deny,
+    /// The command shares the host network namespace (e.g. `cargo build` that
+    /// must fetch dependencies).  Requires an explicit opt-in.
+    Allow,
 }
 
 impl SandboxConfig {
@@ -29,7 +43,14 @@ impl SandboxConfig {
         Self {
             workspace,
             config_home,
+            network: NetworkPolicy::Deny,
         }
+    }
+
+    /// Opt a sandboxed command into network access (default is offline).
+    pub fn with_network(mut self, network: NetworkPolicy) -> Self {
+        self.network = network;
+        self
     }
 }
 
@@ -65,7 +86,7 @@ fn find_bwrap() -> Option<PathBuf> {
 /// Build the full `bwrap` argv.  Deterministic and independent of bwrap being
 /// installed, so the layout is unit-testable.
 pub fn build_bwrap_argv(config: &SandboxConfig, command: &[String]) -> Vec<String> {
-    let mut argv = vec![
+    let mut argv: Vec<String> = vec![
         "bwrap".to_owned(),
         "--die-with-parent".to_owned(),
         "--unshare-all".to_owned(),
@@ -101,6 +122,12 @@ pub fn build_bwrap_argv(config: &SandboxConfig, command: &[String]) -> Vec<Strin
         "/tmp".to_owned(),
         "--".to_owned(),
     ];
+    if config.network == NetworkPolicy::Allow {
+        // `--unshare-all` drops the net namespace; `--share-net` re-adds it so
+        // the command can reach the network while every other namespace stays
+        // isolated. Insert it right after `--unshare-all` (index 2).
+        argv.insert(3, "--share-net".to_owned());
+    }
     argv.extend(command.iter().cloned());
     argv
 }
@@ -162,6 +189,18 @@ mod tests {
             .any(|pair| pair == ["--tmpfs", "/home/user/.config/mindcode"]));
         // The original command is preserved verbatim at the tail.
         assert_eq!(argv[argv.len() - 3..], ["sh", "-c", "true"]);
+    }
+
+    #[test]
+    fn network_is_denied_by_default_and_opt_in_shares_it() {
+        let command = ["sh".to_owned(), "-c".to_owned(), "true".to_owned()];
+        // Default: no `--share-net`, the net namespace stays unshared.
+        let denied = build_bwrap_argv(&config(), &command);
+        assert!(!denied.iter().any(|arg| arg == "--share-net"));
+        // Opt-in: `--share-net` follows `--unshare-all`.
+        let allowed = build_bwrap_argv(&config().with_network(NetworkPolicy::Allow), &command);
+        let unshare = allowed.iter().position(|arg| arg == "--unshare-all").unwrap();
+        assert_eq!(allowed[unshare + 1], "--share-net");
     }
 
     #[tokio::test]

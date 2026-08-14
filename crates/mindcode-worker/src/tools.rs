@@ -7,7 +7,8 @@ use crate::error::{WorkerError, WorkerResult};
 use crate::guard::{OwnershipGuard, ToolAccess};
 use crate::scope::WorkerScope;
 use mindcode_core_tools::{
-    process_run, run_sandboxed, ProcessRunRequest, ProcessRunResult, SandboxConfig,
+    process_run, redact_secrets, run_sandboxed, NetworkPolicy, ProcessRunRequest,
+    ProcessRunResult, SandboxConfig,
 };
 use std::path::{Component, Path, PathBuf};
 use tokio_util::sync::CancellationToken;
@@ -122,6 +123,16 @@ fn check_cancelled(cancel: &CancellationToken) -> WorkerResult<()> {
     } else {
         Ok(())
     }
+}
+
+/// Scrub credential-shaped values from process output before it reaches the
+/// model transcript (§13.1 hardening). The sandbox hides the config home, but
+/// a worker can still read an in-workspace `.env` and echo it back; this
+/// filters that leak at the boundary.
+fn redact_result(mut result: ProcessRunResult) -> ProcessRunResult {
+    result.stdout = redact_secrets(&result.stdout);
+    result.stderr = redact_secrets(&result.stderr);
+    result
 }
 
 /// Resolve a worker-supplied (relative) path against the workspace, verify it
@@ -267,9 +278,10 @@ pub async fn run_shell(
         timeout_ms: SHELL_TIMEOUT_MS,
         max_output_bytes: MAX_PROCESS_OUTPUT,
     };
-    process_run(request, cancel.clone())
+    let result = process_run(request, cancel.clone())
         .await
-        .map_err(WorkerError::from)
+        .map_err(WorkerError::from)?;
+    Ok(redact_result(result))
 }
 
 /// Run a shell command under the bwrap sandbox (§13.1): the filesystem is
@@ -279,16 +291,19 @@ pub async fn run_shell(
 pub async fn run_shell_sandboxed(
     guard: &OwnershipGuard,
     argv: &[String],
+    network: NetworkPolicy,
     cancel: &CancellationToken,
 ) -> WorkerResult<ProcessRunResult> {
     check_cancelled(cancel)?;
     let config = SandboxConfig::new(
         guard.workspace_root().to_path_buf(),
         guard.config_home().to_path_buf(),
-    );
-    run_sandboxed(&config, argv, cancel)
+    )
+    .with_network(network);
+    let result = run_sandboxed(&config, argv, cancel)
         .await
-        .map_err(WorkerError::from)
+        .map_err(WorkerError::from)?;
+    Ok(redact_result(result))
 }
 
 /// Run a read-only git subcommand with `cwd` set to the workspace root. Only
@@ -357,7 +372,7 @@ pub async fn run_git(
         max_output_bytes: MAX_PROCESS_OUTPUT,
     };
     let result = process_run(request, cancel.clone()).await?;
-    Ok(result.stdout)
+    Ok(redact_secrets(&result.stdout))
 }
 
 /// Run ripgrep over the workspace (or a scoped subpath) and return matches.
@@ -415,7 +430,7 @@ pub async fn run_rg(
         max_output_bytes: MAX_PROCESS_OUTPUT,
     };
     let result = process_run(request, cancel.clone()).await?;
-    Ok(result.stdout)
+    Ok(redact_secrets(&result.stdout))
 }
 
 /// Run a context-aware search (agentgrep, §11.10): a short directory outline
@@ -479,7 +494,7 @@ pub async fn run_agentgrep(
         max_output_bytes: MAX_PROCESS_OUTPUT,
     };
     let result = process_run(request, cancel.clone()).await?;
-    let matches = adaptive_trim(&result.stdout, MAX_AGENTGREP_OUTPUT);
+    let matches = adaptive_trim(&redact_secrets(&result.stdout), MAX_AGENTGREP_OUTPUT);
     let mut rendered = format!("search: {query}\n");
     if !outline.is_empty() {
         rendered.push_str("outline:\n");

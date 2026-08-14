@@ -154,6 +154,26 @@ async fn shell_prompts_in_ask_everything() {
 }
 
 #[tokio::test]
+async fn shell_output_is_redacted_before_reaching_the_caller() {
+    // §13.1: a worker can echo an in-workspace secret back out; the output
+    // boundary must scrub it before it reaches the model transcript.
+    let fixture = Fixture::new(PermissionTier::Workspace);
+    let result = run_shell(
+        &fixture.guard,
+        &[
+            "sh".into(),
+            "-c".into(),
+            "echo 'api_key=forge-supersecret12345'".into(),
+        ],
+        &cancel(),
+    )
+    .await
+    .unwrap();
+    assert!(result.stdout.contains("[redacted]"));
+    assert!(!result.stdout.contains("forge-supersecret12345"));
+}
+
+#[tokio::test]
 async fn scopeless_rg_and_agentgrep_fail_closed_outside_all_scope() {
     // §10.4.3 / §11.10: a worker whose scope is a subset of the workspace must
     // not search the whole tree (which would leak match context). No explicit

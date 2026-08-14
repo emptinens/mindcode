@@ -412,6 +412,10 @@ struct TuiArgs {
     /// bwrap sandbox and fail closed when bwrap is absent.
     #[arg(long, help = "Run risky worker shell commands without the bwrap sandbox")]
     allow_unsafe_shell: bool,
+    /// §13.1: let sandboxed worker shell commands reach the network. Off by
+    /// default: the sandbox drops the net namespace.
+    #[arg(long, help = "Allow sandboxed worker shell commands to access the network")]
+    allow_network: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1360,6 +1364,8 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
     // §13.1: whether risky worker shell commands may run without bwrap. Off by
     // default; the flag is read once at launch and applies session-wide.
     let allow_unsafe_shell = args.allow_unsafe_shell;
+    // §13.1: whether sandboxed commands may reach the network (offline default).
+    let allow_network = args.allow_network;
     if session_id.is_empty()
         || !session_id
             .bytes()
@@ -1478,6 +1484,7 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
                                     task,
                                     tier,
                                     allow_unsafe_shell,
+                                    allow_network,
                                     pending.clone(),
                                     worker_event_tx.clone(),
                                     worker_pool.clone(),
@@ -3182,6 +3189,7 @@ fn spawn_worker(
     task: &str,
     tier: PermissionTier,
     allow_unsafe_shell: bool,
+    allow_network: bool,
     pending: Arc<Mutex<PendingApprovals>>,
     worker_event_tx: mpsc::UnboundedSender<WorkerEvent>,
     pool: WorkerPool,
@@ -3215,7 +3223,8 @@ fn spawn_worker(
             guard,
         )
         .with_hooks(hooks)
-        .with_unsafe_shell(allow_unsafe_shell),
+        .with_unsafe_shell(allow_unsafe_shell)
+        .with_allow_network(allow_network),
     );
     let task = task.to_owned();
     let confirmation = format!("spawned {worker_id}: {task}");
