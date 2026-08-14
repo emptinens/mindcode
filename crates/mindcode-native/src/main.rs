@@ -424,6 +424,18 @@ struct TuiArgs {
         help = "Allow sandboxed worker shell commands to access the network"
     )]
     allow_network: bool,
+    /// §13.2: run the session host as a detached background daemon so worker
+    /// tasks survive closing the TUI. Re-running `--session <id>` without this
+    /// flag attaches to the still-running host.
+    #[arg(long, help = "Host this session in a detached background daemon")]
+    detach: bool,
+    /// Internal entry point for the detached host: runs the session host loop
+    /// without detaching again or attaching a client.
+    #[arg(long, hide = true)]
+    detach_host: bool,
+    /// §13.2: stop the detached session host (if any) and exit.
+    #[arg(long, help = "Stop the detached session host for this session id")]
+    stop: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1420,6 +1432,283 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
     }
     let socket_path = tui_socket_path(&session_id);
 
+    // §13.2: stop a detached host (via its pidfile) and exit without touching
+    // the socket or starting any session machinery.
+    if args.stop {
+        return stop_session_host(&session_id);
+    }
+
+    // §13.2: internal entry point for the detached background host. It owns
+    // the control server, worker pool, and conversation; it never detaches
+    // again and never runs the renderer.
+    if args.detach_host {
+        write_host_pidfile(&session_id, process::id())?;
+        let host =
+            run_tui_host_session(session_id.clone(), allow_unsafe_shell, allow_network).await?;
+        let outcome = host.await_shutdown().await;
+        let _ = remove_host_pidfile(&session_id);
+        return outcome.map(|()| 0);
+    }
+
+    // §13.2: host the session in a detached daemon, then attach. If a host is
+    // already live, attach to it instead of spawning a second one.
+    if args.detach {
+        if !session_host_alive(&socket_path).await {
+            let pid = spawn_detached_host(&session_id, allow_unsafe_shell, allow_network).await?;
+            println!("detached session host: pid {pid}");
+        }
+        return run_tui_client(&session_id, socket_path).await;
+    }
+
+    // Default: attach to a live detached host when one exists; otherwise run
+    // the host and client in-process (the pre-§13.2 behavior, where workers
+    // live and die with the TUI process).
+    if session_host_alive(&socket_path).await {
+        return run_tui_client(&session_id, socket_path).await;
+    }
+    let host = run_tui_host_session(session_id.clone(), allow_unsafe_shell, allow_network).await?;
+    let outcome = run_tui_client(&session_id, socket_path).await;
+    host.shutdown().await;
+    outcome
+}
+
+/// The server-side of a TUI session: the in-process control server plus the
+/// processor task that owns the conversation, worker pool, and approvals.
+/// It outlives any single client, which is what lets workers survive the TUI
+/// closing (§13.2).
+struct TuiHost {
+    server: ControlServer,
+    processor: tokio::task::JoinHandle<()>,
+}
+
+impl TuiHost {
+    /// Run until the process receives SIGINT or SIGTERM, then tear down.
+    async fn await_shutdown(self) -> Result<()> {
+        wait_for_termination_signal().await;
+        self.shutdown().await;
+        Ok(())
+    }
+
+    async fn shutdown(self) {
+        self.server.close().await;
+        self.processor.abort();
+    }
+}
+
+/// The renderer-only side of a TUI session (§13.2 attach path): connect to an
+/// already-running host's control socket and never own session state.
+async fn run_tui_client(session_id: &str, socket_path: PathBuf) -> Result<i32> {
+    let tui_config = TuiConfig {
+        control_socket: socket_path,
+        session_id: session_id.to_owned(),
+    };
+    let outcome = tokio::task::spawn_blocking(move || mindcode_tui::run(tui_config)).await;
+    match outcome {
+        Ok(Ok(())) => Ok(0),
+        Ok(Err(error)) => {
+            eprintln!("mindcode: {error}");
+            Ok(1)
+        }
+        Err(error) => {
+            eprintln!("mindcode: {error}");
+            Ok(1)
+        }
+    }
+}
+
+/// How long `spawn_detached_host` waits for the child's control socket before
+/// reporting a failed startup.
+const HOST_START_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn session_host_alive(socket_path: &Path) -> bool {
+    tokio::net::UnixStream::connect(socket_path).await.is_ok()
+}
+
+async fn wait_for_host_socket(socket_path: &Path) -> Result<()> {
+    let deadline = Instant::now() + HOST_START_TIMEOUT;
+    loop {
+        if session_host_alive(socket_path).await {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(anyhow!(
+                "detached session host did not start within {}s",
+                HOST_START_TIMEOUT.as_secs()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Re-exec the current `mindcode` binary as a detached session host: new
+/// session + process group with no controlling terminal, stdio pointed at
+/// `/dev/null` (stderr appended to a per-session log), then wait for its
+/// control socket to come up.
+async fn spawn_detached_host(
+    session_id: &str,
+    allow_unsafe_shell: bool,
+    allow_network: bool,
+) -> Result<u32> {
+    let exe = env::current_exe().context("resolve mindcode executable path")?;
+    let mut command = process::Command::new(exe);
+    command
+        .arg("tui")
+        .arg("--session-id")
+        .arg(session_id)
+        .arg("--detach-host");
+    if allow_unsafe_shell {
+        command.arg("--allow-unsafe-shell");
+    }
+    if allow_network {
+        command.arg("--allow-network");
+    }
+    let log_path = host_log_path(session_id);
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("open session host log {}", log_path.display()))?;
+    command
+        .stdin(process::Stdio::null())
+        .stdout(process::Stdio::null())
+        .stderr(process::Stdio::from(log_file));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let mut child = command.spawn().context("spawn detached session host")?;
+    let pid = child.id();
+    let socket_path = tui_socket_path(session_id);
+    if let Err(error) = wait_for_host_socket(&socket_path).await {
+        // Reap the failed host and surface its log tail to the user.
+        let _ = child.kill();
+        let _ = child.wait();
+        let tail = host_log_tail(session_id);
+        return Err(error.context(format!(
+            "host log tail: {}",
+            tail.unwrap_or_else(|| "(empty)".to_owned())
+        )));
+    }
+    Ok(pid)
+}
+
+fn host_log_path(session_id: &str) -> PathBuf {
+    tui_runtime_dir().join(format!("native-tui-{session_id}.log"))
+}
+
+fn host_log_tail(session_id: &str) -> Option<String> {
+    let path = host_log_path(session_id);
+    let raw = fs::read_to_string(path).ok()?;
+    let mut lines: Vec<&str> = raw.lines().collect();
+    if lines.len() > 20 {
+        lines = lines.split_off(lines.len() - 20);
+    }
+    Some(lines.join("\n"))
+}
+
+fn host_pidfile_path(session_id: &str) -> PathBuf {
+    tui_runtime_dir().join(format!("native-tui-{session_id}.pid"))
+}
+
+fn write_host_pidfile(session_id: &str, pid: u32) -> Result<()> {
+    let path = host_pidfile_path(session_id);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, format!("{pid}\n"))?;
+    Ok(())
+}
+
+fn remove_host_pidfile(session_id: &str) -> Result<()> {
+    match fs::remove_file(host_pidfile_path(session_id)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Signal the detached host for `session_id` to stop (SIGTERM), idempotently.
+fn stop_session_host(session_id: &str) -> Result<i32> {
+    let pidfile = host_pidfile_path(session_id);
+    let pid = match fs::read_to_string(&pidfile) {
+        Ok(raw) => match raw.trim().parse::<i32>() {
+            Ok(pid) if pid > 0 => pid,
+            _ => {
+                return Err(anyhow!(
+                    "invalid session host pidfile {}",
+                    pidfile.display()
+                ))
+            }
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            println!("no detached session host for {session_id}");
+            return Ok(0);
+        }
+        Err(error) => return Err(error).context("read session host pidfile"),
+    };
+    #[cfg(unix)]
+    {
+        // SAFETY: `pid` is a positive process id parsed from our own pidfile;
+        // the raw `kill(2)` wrapper is marked unsafe by `libc` on this target.
+        let killed = unsafe { libc::kill(pid, libc::SIGTERM) } == 0;
+        if !killed {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::NotFound {
+                let _ = remove_host_pidfile(session_id);
+                println!("detached session host for {session_id} already stopped");
+                return Ok(0);
+            }
+            return Err(error).context("signal detached session host");
+        }
+    }
+    let _ = remove_host_pidfile(session_id);
+    println!("stopped detached session host for {session_id}");
+    Ok(0)
+}
+
+async fn wait_for_termination_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut terminate = match signal(SignalKind::terminate()) {
+            Ok(stream) => stream,
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Host the server side of one TUI session: control server + worker pool +
+/// processor loop.  Returns once the socket is bound and the initial snapshot
+/// is published; the returned [`TuiHost`] keeps the session alive.
+async fn run_tui_host_session(
+    session_id: String,
+    allow_unsafe_shell: bool,
+    allow_network: bool,
+) -> Result<TuiHost> {
+    let socket_path = tui_socket_path(&session_id);
+
     // The renderer is a dumb client: provider setup actions arrive as input
     // events, this channel hands them to a task that mutates settings and
     // republishes a fresh snapshot.
@@ -1627,7 +1916,10 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
                 Some(event) = worker_event_rx.recv() => {
                     if let WorkerEvent::Finished(report) = event {
                         processor_stats.lock().unwrap().record_worker(&report.usage);
-                        transcript.push("system", worker_report_text(&report));
+                        // §13.2: worker reports use a dedicated role so they
+                        // persist across host restarts and reattach as their
+                        // own (secret-free) transcript entries.
+                        transcript.push("worker", worker_report_text(&report));
                         let current = *processor_stats.lock().unwrap();
                         let _ = save_session(&processor_session_id, &transcript, current);
                     }
@@ -1642,24 +1934,7 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
         }
     });
 
-    let tui_config = TuiConfig {
-        control_socket: socket_path,
-        session_id,
-    };
-    let outcome = tokio::task::spawn_blocking(move || mindcode_tui::run(tui_config)).await;
-    server.close().await;
-    processor.abort();
-    match outcome {
-        Ok(Ok(())) => Ok(0),
-        Ok(Err(error)) => {
-            eprintln!("mindcode: {error}");
-            Ok(1)
-        }
-        Err(error) => {
-            eprintln!("mindcode: {error}");
-            Ok(1)
-        }
-    }
+    Ok(TuiHost { server, processor })
 }
 
 /// In-memory TUI conversation state: the transcript republished on every turn.
@@ -1781,18 +2056,25 @@ fn save_session(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let messages: Vec<serde_json::Value> = transcript
-        .entries
-        .iter()
-        .filter_map(|entry| match entry {
-            TranscriptInput::Entry { role, text, .. }
-                if (role == "user" || role == "assistant") && !text.trim().is_empty() =>
-            {
-                Some(serde_json::json!({ "role": role, "text": text }))
-            }
-            _ => None,
-        })
-        .collect();
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    // §13.2: worker reports persist with a dedicated role and their sequence
+    // so a restarted host can replay them in order on reattach.
+    let mut worker_reports: Vec<serde_json::Value> = Vec::new();
+    for entry in &transcript.entries {
+        let TranscriptInput::Entry {
+            sequence,
+            role,
+            text,
+        } = entry
+        else {
+            continue;
+        };
+        if (role == "user" || role == "assistant") && !text.trim().is_empty() {
+            messages.push(serde_json::json!({ "sequence": sequence, "role": role, "text": text }));
+        } else if role == "worker" && !text.trim().is_empty() {
+            worker_reports.push(serde_json::json!({ "sequence": sequence, "text": text }));
+        }
+    }
     let message_count = messages.len();
     let now = now_unix_seconds();
     let created_at = existing_created_at(&path).unwrap_or(now);
@@ -1805,6 +2087,9 @@ fn save_session(
         "created_at": created_at,
         "updated_at": now,
         "messages": messages,
+        // §13.2: worker reports survive host restarts so a reattached TUI can
+        // show them even when the original host process is gone.
+        "worker_reports": worker_reports,
         // Secret-free counters so a resumed session keeps its running totals
         // (§10.3); the per-turn `last_*` values are transient and not stored.
         "usage": {
@@ -1853,18 +2138,42 @@ fn load_session(session_id: &str) -> (TuiTranscript, SessionStats) {
             .and_then(serde_json::Value::as_f64)
             .unwrap_or(0.0);
     }
-    let Some(serde_json::Value::Array(messages)) = map.get("messages") else {
-        return (transcript, stats);
-    };
-    for message in messages {
-        let (Some(serde_json::Value::String(role)), Some(serde_json::Value::String(text))) =
-            (message.get("role"), message.get("text"))
-        else {
-            continue;
-        };
-        if (role == "user" || role == "assistant") && !text.trim().is_empty() {
-            transcript.push(role, text);
+    // Replay dialog turns and worker reports in transcript order. Files from
+    // before §13.2 carry no `sequence` and fall back to document order (0).
+    let mut entries: Vec<(u64, String, String)> = Vec::new();
+    if let Some(serde_json::Value::Array(messages)) = map.get("messages") {
+        for message in messages {
+            let (Some(serde_json::Value::String(role)), Some(serde_json::Value::String(text))) =
+                (message.get("role"), message.get("text"))
+            else {
+                continue;
+            };
+            if (role == "user" || role == "assistant") && !text.trim().is_empty() {
+                let sequence = message
+                    .get("sequence")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                entries.push((sequence, role.clone(), text.clone()));
+            }
         }
+    }
+    if let Some(serde_json::Value::Array(worker_reports)) = map.get("worker_reports") {
+        for report in worker_reports {
+            let Some(serde_json::Value::String(text)) = report.get("text") else {
+                continue;
+            };
+            if !text.trim().is_empty() {
+                let sequence = report
+                    .get("sequence")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                entries.push((sequence, "worker".to_owned(), text.clone()));
+            }
+        }
+    }
+    entries.sort_by_key(|(sequence, _, _)| *sequence);
+    for (_, role, text) in entries {
+        transcript.push(&role, text);
     }
     (transcript, stats)
 }
@@ -4498,6 +4807,37 @@ mod tests {
     }
 
     #[test]
+    fn session_save_load_round_trips_worker_reports_in_order() {
+        with_sandbox_env(|dir| {
+            let mut transcript = TuiTranscript::default();
+            transcript.push("user", "do the thing");
+            transcript.push("worker", "worker w1: done in 1.0s\n  summary: ok");
+            transcript.push("assistant", "finished");
+            transcript.push("worker", "worker w2: done in 2.0s\n  summary: ok too");
+            save_session("workers", &transcript, SessionStats::default()).unwrap();
+
+            let (loaded, _stats) = load_session("workers");
+            let roles: Vec<String> = loaded
+                .entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    TranscriptInput::Entry { role, .. } => Some(role.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(roles, vec!["user", "worker", "assistant", "worker"]);
+            let TranscriptInput::Entry { text, .. } = &loaded.entries[1] else {
+                panic!("expected worker report");
+            };
+            assert!(text.contains("worker w1"));
+            // Reports are secret-free and never echo a credential shape.
+            let raw = fs::read_to_string(session_path("workers").unwrap()).unwrap();
+            assert!(!raw.contains("sk-"));
+            assert!(dir.join("mindcode/sessions/workers.json").exists());
+        });
+    }
+
+    #[test]
     fn session_save_load_round_trips_usage_counters() {
         with_sandbox_env(|_dir| {
             let transcript = TuiTranscript::default();
@@ -5215,6 +5555,18 @@ mod tests {
         assert_eq!(args.session_id.as_deref(), Some("abc"));
         let args = TuiArgs::try_parse_from(["mindcode tui"]).unwrap();
         assert!(args.session_id.is_none());
+    }
+
+    #[test]
+    fn tui_args_accept_detach_stop_and_detach_host_flags() {
+        let args = TuiArgs::try_parse_from(["mindcode tui", "--detach"]).unwrap();
+        assert!(args.detach);
+        assert!(!args.detach_host);
+        assert!(!args.stop);
+        let args = TuiArgs::try_parse_from(["mindcode tui", "--detach-host"]).unwrap();
+        assert!(args.detach_host);
+        let args = TuiArgs::try_parse_from(["mindcode tui", "--stop"]).unwrap();
+        assert!(args.stop);
     }
 
     #[test]
