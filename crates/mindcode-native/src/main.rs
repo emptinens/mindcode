@@ -2215,6 +2215,7 @@ async fn chat_completion_with_chunks(
                 messages: messages.to_vec(),
                 max_tokens: None,
                 temperature: None,
+                tools: Vec::new(),
             };
             let stream = transport
                 .chat_completions(&key, &request)
@@ -2244,6 +2245,7 @@ async fn chat_completion_with_chunks(
                 messages: messages.to_vec(),
                 system: None,
                 temperature: None,
+                tools: Vec::new(),
             };
             let stream = transport
                 .messages(&key, &request)

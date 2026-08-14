@@ -187,6 +187,16 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+/// A tool the model may call, in a provider-neutral shape. The request body
+/// builders translate it into each protocol's wire format.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema describing the tool arguments.
+    pub parameters: Value,
+}
+
 /// The `openai-compatible` chat request; `stream` is always set to `true` by
 /// the client and is not part of this shape.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -197,6 +207,9 @@ pub struct ChatCompletionsRequest {
     pub max_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
+    /// Tools offered to the model; empty is omitted from the wire body.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolSpec>,
 }
 
 /// The `anthropic-compatible` messages request; `stream` is always set to
@@ -210,6 +223,9 @@ pub struct MessagesRequest {
     pub system: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
+    /// Tools offered to the model; empty is omitted from the wire body.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolSpec>,
 }
 
 /// One streamed `openai-compatible` chat chunk (`data: {...}` line).
@@ -243,6 +259,30 @@ pub struct ChatDelta {
     pub role: Option<String>,
     #[serde(default)]
     pub content: Option<String>,
+    /// Streamed tool-call fragments (`index` groups them; `arguments` may
+    /// arrive across several chunks).
+    #[serde(default)]
+    pub tool_calls: Vec<ChatToolCallDelta>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ChatToolCallDelta {
+    #[serde(default)]
+    pub index: u64,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub r#type: Option<String>,
+    #[serde(default)]
+    pub function: Option<ChatToolCallFunction>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ChatToolCallFunction {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub arguments: Option<String>,
 }
 
 /// One streamed `anthropic-compatible` messages event (`data: {...}` line).
@@ -271,6 +311,9 @@ pub struct MessageDelta {
     pub text: Option<String>,
     #[serde(default)]
     pub stop_reason: Option<String>,
+    /// Incremental `input_json_delta` for a `tool_use` block.
+    #[serde(default)]
+    pub partial_json: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -278,6 +321,13 @@ pub struct ContentBlock {
     pub r#type: String,
     #[serde(default)]
     pub text: Option<String>,
+    /// `tool_use` block fields: id, name, and the (possibly partial) input.
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub input: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -487,7 +537,7 @@ impl Transport {
         impl Stream<Item = Result<ChatChunk, TransportError>> + Send + 'static,
         TransportError,
     > {
-        let body = inject_stream_flag(request)?;
+        let body = inject_chat_body(request)?;
         let url = format!("{}/chat/completions", self.base_url);
         let stream = spawn_sse_stream(self.client.clone(), url, key.clone(), body, SseMode::Chat);
         Ok(stream.filter_map(|item| async move {
@@ -524,7 +574,7 @@ impl Transport {
         );
         Ok(stream.filter_map(|item| async move {
             match item {
-                Ok(SsePayload::Messages(chunk)) => Some(Ok(chunk)),
+                Ok(SsePayload::Messages(chunk)) => Some(Ok(*chunk)),
                 Ok(SsePayload::Chat(_)) => None,
                 Err(error) => Some(Err(error)),
             }
@@ -599,6 +649,59 @@ fn inject_stream_flag(request: &impl Serialize) -> Result<Value, TransportError>
     Ok(value)
 }
 
+/// Build the `openai-compatible` chat body: force `stream: true` and translate
+/// neutral tool specs into the `{"type":"function","function":{...}}` shape.
+fn inject_chat_body(request: &ChatCompletionsRequest) -> Result<Value, TransportError> {
+    let mut value = inject_stream_flag(request)?;
+    apply_openai_tools(&mut value);
+    Ok(value)
+}
+
+/// Translate neutral `{name,description,parameters}` tool specs into the
+/// OpenAI function-calling wire shape.
+fn apply_openai_tools(value: &mut Value) {
+    let Some(tools) = value.get_mut("tools").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for tool in tools.iter_mut() {
+        let Some(object) = tool.as_object_mut() else {
+            continue;
+        };
+        let name = object.remove("name");
+        let description = object.remove("description");
+        let parameters = object
+            .remove("parameters")
+            .unwrap_or_else(|| serde_json::json!({}));
+        object.insert("type".to_owned(), Value::String("function".to_owned()));
+        object.insert(
+            "function".to_owned(),
+            serde_json::json!({
+                "name": name,
+                "description": description,
+                "parameters": parameters,
+            }),
+        );
+    }
+}
+
+/// Translate neutral `{name,description,parameters}` tool specs into the
+/// Anthropic `{name,description,input_schema}` wire shape.
+fn apply_anthropic_tools(value: &mut Value) {
+    let Some(tools) = value.get_mut("tools").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for tool in tools.iter_mut() {
+        let Some(object) = tool.as_object_mut() else {
+            continue;
+        };
+        let parameters = object.remove("parameters");
+        object.insert(
+            "input_schema".to_owned(),
+            parameters.unwrap_or_else(|| serde_json::json!({})),
+        );
+    }
+}
+
 /// Build the `anthropic-compatible` `/v1/messages` body: force `stream: true`
 /// and mark the newest turn with a `cache_control` breakpoint so the
 /// conversation prefix is cached and read back on later turns (§10.3).
@@ -606,6 +709,7 @@ fn inject_stream_flag(request: &impl Serialize) -> Result<Value, TransportError>
 /// cache costs more than it can ever save.
 fn inject_messages_body(request: &MessagesRequest) -> Result<Value, TransportError> {
     let mut value = inject_stream_flag(request)?;
+    apply_anthropic_tools(&mut value);
     apply_anthropic_cache_control(&mut value);
     Ok(value)
 }
@@ -649,7 +753,7 @@ enum SseMode {
 #[derive(Clone, Debug)]
 enum SsePayload {
     Chat(ChatChunk),
-    Messages(MessageChunk),
+    Messages(Box<MessageChunk>),
 }
 
 /// Spawn a bounded streaming session: the reader runs in a task and forwards
@@ -745,7 +849,10 @@ async fn run_sse_session(
                     let _ = sender.send(Err(TransportError::ProviderError)).await;
                     return;
                 }
-                sender.send(Ok(SsePayload::Messages(chunk))).await.is_ok()
+                sender
+                    .send(Ok(SsePayload::Messages(Box::new(chunk))))
+                    .await
+                    .is_ok()
             }
         };
         if !sent {
@@ -828,6 +935,7 @@ mod tests {
             }],
             max_tokens: Some(16),
             temperature: None,
+            tools: Vec::new(),
         }
     }
 
@@ -872,6 +980,7 @@ mod tests {
             }],
             system: None,
             temperature: None,
+            tools: Vec::new(),
         })
         .unwrap();
         assert_eq!(messages["stream"], Value::Bool(true));
@@ -995,6 +1104,7 @@ mod tests {
             ],
             system: None,
             temperature: None,
+            tools: Vec::new(),
         })
         .unwrap();
         assert_eq!(two_turns["stream"], Value::Bool(true));
@@ -1022,9 +1132,55 @@ mod tests {
             }],
             system: None,
             temperature: None,
+            tools: Vec::new(),
         })
         .unwrap();
         let messages = one_turn["messages"].as_array().unwrap();
         assert_eq!(messages[0]["content"], Value::String("only".to_owned()));
+    }
+
+    #[test]
+    fn tool_specs_translate_to_both_wire_shapes() {
+        let spec = ToolSpec {
+            name: "read_file".to_owned(),
+            description: "read a file".to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } }
+            }),
+        };
+
+        let chat = inject_chat_body(&ChatCompletionsRequest {
+            model: "model-alpha".to_owned(),
+            messages: vec![],
+            max_tokens: None,
+            temperature: None,
+            tools: vec![spec.clone()],
+        })
+        .unwrap();
+        let tool = &chat["tools"][0];
+        assert_eq!(tool["type"], Value::String("function".to_owned()));
+        assert_eq!(
+            tool["function"]["name"],
+            Value::String("read_file".to_owned())
+        );
+        assert_eq!(tool["function"]["parameters"]["type"], "object");
+
+        let messages = inject_messages_body(&MessagesRequest {
+            model: "model-alpha".to_owned(),
+            max_tokens: 16,
+            messages: vec![],
+            system: None,
+            temperature: None,
+            tools: vec![spec],
+        })
+        .unwrap();
+        let tool = &messages["tools"][0];
+        assert_eq!(tool["name"], Value::String("read_file".to_owned()));
+        assert_eq!(tool["input_schema"]["type"], "object");
+
+        // Empty tool lists are omitted from the wire body entirely.
+        let no_tools = inject_chat_body(&chat_request()).unwrap();
+        assert!(no_tools.get("tools").is_none());
     }
 }

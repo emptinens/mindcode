@@ -23,6 +23,7 @@ fn chat_request(model: &str) -> ChatCompletionsRequest {
         }],
         max_tokens: Some(16),
         temperature: None,
+        tools: Vec::new(),
     }
 }
 
@@ -36,6 +37,7 @@ fn messages_request(model: &str) -> MessagesRequest {
         }],
         system: None,
         temperature: None,
+        tools: Vec::new(),
     }
 }
 
@@ -378,6 +380,82 @@ async fn anthropic_catalog_oversized_body_fails_closed() {
         .await
         .unwrap_err();
     assert!(matches!(error, TransportError::ResponseTooLarge { .. }));
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn chat_stream_parses_streamed_tool_call_deltas() {
+    let routes = MockRoutes {
+        chat_events: vec![
+            r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"model-alpha","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}"#.to_owned(),
+            r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"model-alpha","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"src/a.txt\"}"}}]},"finish_reason":null}]}"#.to_owned(),
+            r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"model-alpha","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#.to_owned(),
+            "[DONE]".to_owned(),
+        ],
+        ..Default::default()
+    };
+    let server = MockServer::start(routes).await;
+    let transport = Transport::new(&server.base_url()).unwrap();
+
+    let chunks: Vec<ChatChunk> = transport
+        .chat_completions(&test_key(), &chat_request("model-alpha"))
+        .unwrap()
+        .map(|item| item.unwrap())
+        .collect()
+        .await;
+
+    let name = chunks[0].choices[0].delta.tool_calls[0]
+        .function
+        .as_ref()
+        .unwrap()
+        .name
+        .clone();
+    assert_eq!(name.as_deref(), Some("read_file"));
+    assert_eq!(
+        chunks[0].choices[0].delta.tool_calls[0].id.as_deref(),
+        Some("call_1")
+    );
+    // Arguments fragments concatenate across chunks by index.
+    let arguments: String = chunks
+        .iter()
+        .flat_map(|chunk| &chunk.choices[0].delta.tool_calls)
+        .filter_map(|call| call.function.as_ref())
+        .filter_map(|function| function.arguments.as_deref())
+        .collect();
+    assert_eq!(arguments, "{\"path\":\"src/a.txt\"}");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn messages_stream_parses_tool_use_blocks() {
+    let routes = MockRoutes {
+        messages_events: vec![
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}"#.to_owned(),
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"src/a.txt\"}"}}"#.to_owned(),
+            r#"{"type":"content_block_stop","index":0}"#.to_owned(),
+            r#"{"type":"message_stop"}"#.to_owned(),
+        ],
+        ..Default::default()
+    };
+    let server = MockServer::start(routes).await;
+    let transport = Transport::new(&server.base_url()).unwrap();
+
+    let events: Vec<MessageChunk> = transport
+        .messages(&test_key(), &messages_request("model-alpha"))
+        .unwrap()
+        .map(|item| item.unwrap())
+        .collect()
+        .await;
+
+    assert_eq!(events.len(), 3);
+    let block = events[0].content_block.as_ref().unwrap();
+    assert_eq!(block.r#type, "tool_use");
+    assert_eq!(block.name.as_deref(), Some("read_file"));
+    assert_eq!(block.id.as_deref(), Some("toolu_1"));
+    assert_eq!(
+        events[1].delta.as_ref().unwrap().partial_json.as_deref(),
+        Some("{\"path\":\"src/a.txt\"}")
+    );
     server.shutdown().await;
 }
 
