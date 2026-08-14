@@ -32,6 +32,6 @@ pub use report::{CommandRun, WorkerReport, WorkerStatus, WorkerUsage};
 pub use risk::{classify, ShellRisk};
 pub use scope::{ScopeError, WorkerScope};
 pub use tools::{
-    append_file, read_file, resolve_path, run_agentgrep, run_git, run_rg, run_shell, write_file,
-    FileReadResult, TodoItem, TodoList,
+    append_file, read_file, resolve_path, run_agentgrep, run_git, run_rg, run_shell,
+    run_shell_sandboxed, write_file, FileReadResult, TodoItem, TodoList,
 };

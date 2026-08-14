@@ -407,6 +407,11 @@ struct UpdateArgs {}
 struct TuiArgs {
     #[arg(long, value_name = "ID", help = "TUI session id (defaults to 'tui')")]
     session_id: Option<String>,
+    /// §13.1: run risky shell commands unsandboxed. Off by default: risky
+    /// commands (`Confirm`-after-reflection and `full-access`) run under the
+    /// bwrap sandbox and fail closed when bwrap is absent.
+    #[arg(long, help = "Run risky worker shell commands without the bwrap sandbox")]
+    allow_unsafe_shell: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1352,6 +1357,9 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
     let session_id = args
         .session_id
         .unwrap_or_else(|| DEFAULT_TUI_SESSION_ID.to_owned());
+    // §13.1: whether risky worker shell commands may run without bwrap. Off by
+    // default; the flag is read once at launch and applies session-wide.
+    let allow_unsafe_shell = args.allow_unsafe_shell;
     if session_id.is_empty()
         || !session_id
             .bytes()
@@ -1469,6 +1477,7 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
                                 match spawn_worker(
                                     task,
                                     tier,
+                                    allow_unsafe_shell,
                                     pending.clone(),
                                     worker_event_tx.clone(),
                                     worker_pool.clone(),
@@ -3172,6 +3181,7 @@ static NEXT_WORKER_ID: AtomicU64 = AtomicU64::new(1);
 fn spawn_worker(
     task: &str,
     tier: PermissionTier,
+    allow_unsafe_shell: bool,
     pending: Arc<Mutex<PendingApprovals>>,
     worker_event_tx: mpsc::UnboundedSender<WorkerEvent>,
     pool: WorkerPool,
@@ -3204,7 +3214,8 @@ fn spawn_worker(
             scope,
             guard,
         )
-        .with_hooks(hooks),
+        .with_hooks(hooks)
+        .with_unsafe_shell(allow_unsafe_shell),
     );
     let task = task.to_owned();
     let confirmation = format!("spawned {worker_id}: {task}");

@@ -6,7 +6,9 @@
 use crate::error::{WorkerError, WorkerResult};
 use crate::guard::{OwnershipGuard, ToolAccess};
 use crate::scope::WorkerScope;
-use mindcode_core_tools::{process_run, ProcessRunRequest, ProcessRunResult};
+use mindcode_core_tools::{
+    process_run, run_sandboxed, ProcessRunRequest, ProcessRunResult, SandboxConfig,
+};
 use std::path::{Component, Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
@@ -266,6 +268,25 @@ pub async fn run_shell(
         max_output_bytes: MAX_PROCESS_OUTPUT,
     };
     process_run(request, cancel.clone())
+        .await
+        .map_err(WorkerError::from)
+}
+
+/// Run a shell command under the bwrap sandbox (§13.1): the filesystem is
+/// read-only, only the workspace is writable, and the config home — the
+/// credential store — is hidden behind an empty tmpfs.  Fails closed when
+/// bwrap is absent so the caller can apply its `--allow-unsafe-shell` policy.
+pub async fn run_shell_sandboxed(
+    guard: &OwnershipGuard,
+    argv: &[String],
+    cancel: &CancellationToken,
+) -> WorkerResult<ProcessRunResult> {
+    check_cancelled(cancel)?;
+    let config = SandboxConfig::new(
+        guard.workspace_root().to_path_buf(),
+        guard.config_home().to_path_buf(),
+    );
+    run_sandboxed(&config, argv, cancel)
         .await
         .map_err(WorkerError::from)
 }

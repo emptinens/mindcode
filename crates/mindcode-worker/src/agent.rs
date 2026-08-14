@@ -180,6 +180,10 @@ pub struct WorkerAgent {
     todos: Mutex<crate::tools::TodoList>,
     reflected_shell: Mutex<HashSet<String>>,
     hooks: Option<Arc<HookSet>>,
+    /// Whether `--allow-unsafe-shell` was passed (§13.1): when set, risky
+    /// shell commands run unsandboxed; when unset they run under bwrap and
+    /// fail closed if bwrap is absent.
+    allow_unsafe_shell: bool,
     tools: Vec<ToolSpec>,
     system_prompt: String,
     max_iterations: usize,
@@ -202,6 +206,7 @@ impl WorkerAgent {
             todos: Mutex::new(crate::tools::TodoList::default()),
             reflected_shell: Mutex::new(HashSet::new()),
             hooks: None,
+            allow_unsafe_shell: false,
             tools: default_tool_defs(),
             system_prompt: DEFAULT_WORKER_SYSTEM_PROMPT.to_owned(),
             max_iterations: DEFAULT_MAX_ITERATIONS,
@@ -226,6 +231,13 @@ impl WorkerAgent {
     /// Install a `pre_tool` hook set (§11.4). Hooks gate worker tools only.
     pub fn with_hooks(mut self, hooks: HookSet) -> Self {
         self.hooks = Some(Arc::new(hooks));
+        self
+    }
+
+    /// Allow unsandboxed risky shell commands (§13.1).  Default is off: risky
+    /// commands run under bwrap and fail closed when bwrap is unavailable.
+    pub fn with_unsafe_shell(mut self, allow: bool) -> Self {
+        self.allow_unsafe_shell = allow;
         self
     }
 
@@ -436,11 +448,16 @@ impl WorkerAgent {
                 // §11.1 risk filter runs before the ownership guard and before
                 // execution: `Deny` is fail-closed, `Confirm` needs one
                 // reflection turn, `Safe` goes through the normal tier gate.
+                // §13.1: `Confirm`-after-reflection and every full-access shell
+                // command run under the bwrap sandbox unless the caller opted
+                // into `--allow-unsafe-shell`.
+                let mut sandboxed = self.guard.tier() == PermissionTier::FullAccess;
                 match classify(&command) {
                     ShellRisk::Deny => {
                         return Err(WorkerError::RiskDenied { command });
                     }
                     ShellRisk::Confirm => {
+                        sandboxed = true;
                         // Tier 3 (full-access) is not reflection-gated by
                         // definition (§11.1); only `Deny`/ProtectedPaths stay
                         // fail-closed there. Tiers 1–2 require exactly one
@@ -457,7 +474,11 @@ impl WorkerAgent {
                     }
                 }
                 let guard = self.exec_guard();
-                let result = tools::run_shell(&guard, &argv, &cancel).await?;
+                let result = if sandboxed && !self.allow_unsafe_shell {
+                    tools::run_shell_sandboxed(&guard, &argv, &cancel).await?
+                } else {
+                    tools::run_shell(&guard, &argv, &cancel).await?
+                };
                 Ok((
                     process_result_text(&result),
                     Some(command_run(&argv, &result)),

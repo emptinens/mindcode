@@ -175,6 +175,55 @@ async fn agent_reports_a_denied_tool_and_continues() {
     assert!(report.files_read.is_empty());
 }
 
+// §13.1: under `full-access` a shell command is sandboxed by default, and the
+// explicit `--allow-unsafe-shell` opt-out runs it unsandboxed.
+#[tokio::test]
+async fn full_access_shell_runs_unsandboxed_when_unsafe_shell_allowed() {
+    let (_workspace, _config, scope, guard) = fixture(PermissionTier::FullAccess);
+    let client = Arc::new(ScriptedClient::new(vec![ModelTurn {
+        tool_calls: vec![tool_call(
+            "call_1",
+            "run_shell",
+            serde_json::json!({"argv": ["echo", "hi"]}),
+        )],
+        ..Default::default()
+    }]));
+
+    let agent = WorkerAgent::new("w-unsafe", client, Arc::new(AllowAllGate), scope, guard)
+        .with_unsafe_shell(true);
+    let report = agent.run("echo hi", CancellationToken::new()).await;
+
+    assert_eq!(report.status, WorkerStatus::Success);
+    assert_eq!(report.commands_run.len(), 1);
+    assert_eq!(report.commands_run[0].exit_code, Some(0));
+}
+
+#[tokio::test]
+async fn full_access_shell_is_sandboxed_by_default() {
+    let (_workspace, _config, scope, guard) = fixture(PermissionTier::FullAccess);
+    let client = Arc::new(ScriptedClient::new(vec![ModelTurn {
+        tool_calls: vec![tool_call(
+            "call_1",
+            "run_shell",
+            serde_json::json!({"argv": ["echo", "hi"]}),
+        )],
+        ..Default::default()
+    }]));
+
+    let agent = WorkerAgent::new("w-sandboxed", client, Arc::new(AllowAllGate), scope, guard);
+    let report = agent.run("echo hi", CancellationToken::new()).await;
+
+    assert_eq!(report.status, WorkerStatus::Success);
+    if mindcode_core_tools::bwrap_available() {
+        // The command runs, but only under the bwrap sandbox.
+        assert_eq!(report.commands_run.len(), 1);
+        assert_eq!(report.commands_run[0].exit_code, Some(0));
+    } else {
+        // bwrap is absent: fail closed, the command is never recorded as run.
+        assert!(report.commands_run.is_empty());
+    }
+}
+
 #[tokio::test]
 async fn deny_all_gate_refuses_every_tool_call() {
     let (_workspace, _config, scope, guard) = fixture(PermissionTier::AskEverything);
