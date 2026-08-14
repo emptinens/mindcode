@@ -23,6 +23,7 @@ use ratatui::{Frame, Terminal};
 pub mod clipboard;
 pub mod debug_visual;
 pub mod interaction;
+pub mod mermaid;
 pub mod preferences;
 mod render;
 pub mod terminal_caps;
