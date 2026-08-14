@@ -1017,6 +1017,7 @@ version = "0.1.3"
 dependencies = [
  "mindcode-provider",
  "mindcode-vexzy",
+ "serde",
  "serde_json",
  "tempfile",
 ]

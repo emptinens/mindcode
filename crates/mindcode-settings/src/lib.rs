@@ -14,6 +14,9 @@
 
 pub use mindcode_provider::{CredentialRef, ModelId, Protocol, ProviderConfig, ProviderId};
 
+pub mod cred_state;
+pub use cred_state::{transition as transition_cred_state, CredEvent, CredState};
+
 use mindcode_vexzy::WorkerEffort;
 use serde_json::{Map, Value};
 use std::{
@@ -42,6 +45,12 @@ pub const BUILTIN_VEXZY_PROVIDER_ID: &str = "vexzy";
 pub struct NativeSettings {
     pub global_worker_model: Option<String>,
     pub worker_effort_lock: Option<WorkerEffort>,
+    /// Conversation-memory budget override in estimated tokens (§11.3).  When
+    /// `None` the caller falls back to the 200K base.  Secret-free.
+    pub context_token_budget: Option<usize>,
+    /// Custom `/colors` overrides (§11.6): role label → `#rrggbb`.  Metadata
+    /// only — never a credential, never a secret.
+    pub color_overrides: Option<BTreeMap<String, String>>,
     /// The multi-provider profile table (0.1.3).  Secret-free: every profile
     /// references its credential by name instead of carrying a value.
     pub providers: Vec<ProviderConfig>,
@@ -63,6 +72,8 @@ pub enum SettingsError {
     RootMustBeObject,
     InvalidWorkerModel,
     InvalidWorkerEffortLock,
+    InvalidContextBudget,
+    InvalidColorOverrides,
     InvalidProviders,
     InvalidActiveProvider,
     ProviderNotFound(String),
@@ -83,6 +94,12 @@ impl fmt::Display for SettingsError {
             Self::InvalidWorkerEffortLock => f.write_str(
                 "worker_effort_lock must be null or one of none, low, medium, high, xhigh, max",
             ),
+            Self::InvalidContextBudget => {
+                f.write_str("context_token_budget must be a positive integer or null")
+            }
+            Self::InvalidColorOverrides => {
+                f.write_str("color_overrides must be an object of role → #rrggbb")
+            }
             Self::InvalidProviders => {
                 f.write_str("providers must be an array of provider profiles")
             }
@@ -202,6 +219,35 @@ pub fn settings_from_value(value: Value) -> Result<NativeSettings, SettingsError
         Some(_) => return Err(SettingsError::InvalidWorkerEffortLock),
     };
 
+    let context_token_budget = match object.get("context_token_budget") {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(value)) => Some(
+            value
+                .as_u64()
+                .filter(|value| *value > 0)
+                .ok_or(SettingsError::InvalidContextBudget)? as usize,
+        ),
+        Some(_) => return Err(SettingsError::InvalidContextBudget),
+    };
+
+    let color_overrides = match object.get("color_overrides") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(entries)) => {
+            let mut overrides = BTreeMap::new();
+            for (role, value) in entries {
+                let Some(hex) = value.as_str() else {
+                    return Err(SettingsError::InvalidColorOverrides);
+                };
+                if !is_valid_hex_color(hex) {
+                    return Err(SettingsError::InvalidColorOverrides);
+                }
+                overrides.insert(role.clone(), hex.to_ascii_lowercase());
+            }
+            Some(overrides)
+        }
+        Some(_) => return Err(SettingsError::InvalidColorOverrides),
+    };
+
     let active_provider = match object.get("active_provider") {
         None | Some(Value::Null) => None,
         Some(Value::String(value)) => {
@@ -236,6 +282,8 @@ pub fn settings_from_value(value: Value) -> Result<NativeSettings, SettingsError
     Ok(NativeSettings {
         global_worker_model,
         worker_effort_lock,
+        context_token_budget,
+        color_overrides,
         providers,
         active_provider,
         unknown,
@@ -260,6 +308,21 @@ pub fn settings_to_value(settings: &NativeSettings) -> Result<Value, SettingsErr
         settings
             .worker_effort_lock
             .map(|effort| Value::String(effort.to_string()))
+            .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "context_token_budget".to_owned(),
+        settings
+            .context_token_budget
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "color_overrides".to_owned(),
+        settings
+            .color_overrides
+            .as_ref()
+            .map(|overrides| serde_json::to_value(overrides).unwrap_or(Value::Null))
             .unwrap_or(Value::Null),
     );
     object.insert(
@@ -456,8 +519,20 @@ fn normalize_provider_state(
 fn is_known_settings_key(key: &str) -> bool {
     matches!(
         key,
-        "global_worker_model" | "worker_effort_lock" | "providers" | "active_provider"
+        "global_worker_model"
+            | "worker_effort_lock"
+            | "context_token_budget"
+            | "color_overrides"
+            | "providers"
+            | "active_provider"
     )
+}
+
+/// A `#rrggbb` hex color (case-insensitive).  Only six hex digits are accepted
+/// so a credential value can never masquerade as a color.
+fn is_valid_hex_color(hex: &str) -> bool {
+    let value = hex.trim().trim_start_matches('#');
+    value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Atomically replace one settings file after validation.  On Unix, both the
@@ -567,6 +642,33 @@ mod tests {
     }
 
     #[test]
+    fn color_overrides_parse_round_trip_and_reject_non_hex() {
+        let settings = parse_settings(r##"{"color_overrides":{"accent":"#FF4FA3","background":"#0b0b0d"}}"##).unwrap();
+        let overrides = settings.color_overrides.clone().unwrap();
+        assert_eq!(overrides["accent"], "#ff4fa3");
+        assert_eq!(overrides["background"], "#0b0b0d");
+        let reparsed = settings_from_value(settings_to_value(&settings).unwrap()).unwrap();
+        assert_eq!(reparsed.color_overrides, settings.color_overrides);
+
+        let unset = parse_settings(r#"{"color_overrides":null}"#).unwrap();
+
+        assert!(matches!(
+            parse_settings(r##"{"color_overrides":{"accent":"sk-1234"}}"##),
+            Err(SettingsError::InvalidColorOverrides)
+        ));
+        assert!(matches!(
+            parse_settings(r##"{"color_overrides":{"accent":"#fff"}}"##),
+            Err(SettingsError::InvalidColorOverrides)
+        ));
+        assert!(matches!(
+            parse_settings(r##"{"color_overrides":["#ff4fa3"]}"##),
+            Err(SettingsError::InvalidColorOverrides)
+        ));
+        assert_eq!(unset.color_overrides, None);
+
+    }
+
+    #[test]
     fn rejects_malformed_and_invalid_known_values() {
         assert!(matches!(parse_settings("{"), Err(SettingsError::Json(_))));
         assert!(matches!(
@@ -580,6 +682,26 @@ mod tests {
         assert!(matches!(
             parse_settings(r#"{"worker_effort_lock":"auto"}"#),
             Err(SettingsError::InvalidWorkerEffortLock)
+        ));
+    }
+
+    #[test]
+    fn context_token_budget_parse_and_reject_invalid() {
+        let settings = parse_settings(r#"{"context_token_budget":300000}"#).unwrap();
+        assert_eq!(settings.context_token_budget, Some(300_000));
+        let reparsed = settings_from_value(settings_to_value(&settings).unwrap()).unwrap();
+        assert_eq!(reparsed.context_token_budget, Some(300_000));
+
+        let unset = parse_settings(r#"{"context_token_budget":null}"#).unwrap();
+        assert_eq!(unset.context_token_budget, None);
+
+        assert!(matches!(
+            parse_settings(r#"{"context_token_budget":0}"#),
+            Err(SettingsError::InvalidContextBudget)
+        ));
+        assert!(matches!(
+            parse_settings(r#"{"context_token_budget":"big"}"#),
+            Err(SettingsError::InvalidContextBudget)
         ));
     }
 
