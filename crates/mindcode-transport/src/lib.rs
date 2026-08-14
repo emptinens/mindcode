@@ -27,6 +27,8 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+pub mod soft_interrupt;
+
 /// Connection establishment timeout for every provider request.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Overall timeout for every provider request, including streamed bodies.
