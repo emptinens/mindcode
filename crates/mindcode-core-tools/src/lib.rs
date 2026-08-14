@@ -2,6 +2,7 @@
 
 mod error;
 mod git;
+mod js_runtime;
 mod process;
 
 pub use error::{CoreToolError, CoreToolErrorCode, CoreToolResult};
@@ -10,4 +11,5 @@ pub use git::{
     GitRevParseRequest, GitRevParseResult, GitRootRequest, GitRootResult, GitStatusChange,
     GitStatusRequest, GitStatusResult,
 };
+pub use js_runtime::{JsRuntime, JsRuntimeKind};
 pub use process::{process_run, ProcessRunRequest, ProcessRunResult};
