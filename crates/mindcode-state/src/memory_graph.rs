@@ -10,6 +10,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::path::Path;
+
+/// Maximum size of a memory-graph file accepted by the loader.
+const MAX_MEMORY_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -285,6 +289,78 @@ impl MemoryStore {
         }
         Ok(store)
     }
+
+    /// Persist the graph as human-readable JSON (§14.1: survives restart).
+    pub fn save_to_file(&self, path: &Path) -> Result<(), MemoryError> {
+        let json = self
+            .to_json()
+            .map_err(|error| MemoryError::Json(error.to_string()))?;
+        std::fs::write(path, json).map_err(|error| MemoryError::Io(error.to_string()))
+    }
+
+    /// Load a persisted graph with a size bound; missing files are an error
+    /// (callers decide whether that means "empty").
+    pub fn load_from_file(path: &Path) -> Result<Self, MemoryError> {
+        let metadata =
+            std::fs::metadata(path).map_err(|error| MemoryError::Io(error.to_string()))?;
+        if metadata.len() > MAX_MEMORY_FILE_BYTES {
+            return Err(MemoryError::Oversized);
+        }
+        let raw =
+            std::fs::read_to_string(path).map_err(|error| MemoryError::Io(error.to_string()))?;
+        Self::from_json(&raw)
+    }
+
+    /// Drop records whose effective confidence has decayed below
+    /// `min_confidence` (§14.1 decay).  Returns the number dropped.
+    pub fn prune(&mut self, now_ms: u64, min_confidence: f64) -> usize {
+        let before = self.records.len();
+        self.records
+            .retain(|record| record.effective_confidence(now_ms) >= min_confidence);
+        before - self.records.len()
+    }
+
+    /// Merge another store's records, resolving same-id conflicts (§14.1): a
+    /// `Correction` supersedes a `Fact`, which supersedes the rest; a tie is
+    /// broken by the newer `reinforced_at_ms`.  Returns the number of records
+    /// newly added.
+    pub fn merge(&mut self, other: &MemoryStore) -> usize {
+        let mut added = 0;
+        for record in &other.records {
+            match self
+                .records
+                .iter_mut()
+                .find(|existing| existing.id == record.id)
+            {
+                Some(existing) => {
+                    let existing_priority = type_priority(existing.memory_type);
+                    let incoming_priority = type_priority(record.memory_type);
+                    if incoming_priority > existing_priority
+                        || (incoming_priority == existing_priority
+                            && record.reinforced_at_ms > existing.reinforced_at_ms)
+                    {
+                        *existing = record.clone();
+                    }
+                }
+                None => {
+                    if self.enabled && !contains_credential_shaped(&record.text) {
+                        self.records.push(record.clone());
+                        added += 1;
+                    }
+                }
+            }
+        }
+        added
+    }
+}
+
+/// Conflict precedence for merge (§14.1): Correction > Fact > the rest.
+fn type_priority(memory_type: MemoryType) -> u8 {
+    match memory_type {
+        MemoryType::Correction => 3,
+        MemoryType::Fact => 2,
+        MemoryType::Preference | MemoryType::Procedure | MemoryType::Negative => 1,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,6 +369,8 @@ pub enum MemoryError {
     EmptyText,
     CredentialShaped,
     Json(String),
+    Io(String),
+    Oversized,
 }
 
 impl fmt::Display for MemoryError {
@@ -304,6 +382,8 @@ impl fmt::Display for MemoryError {
                 formatter.write_str("credential-shaped text is never stored in memory")
             }
             Self::Json(message) => write!(formatter, "memory JSON error: {message}"),
+            Self::Io(message) => write!(formatter, "memory I/O error: {message}"),
+            Self::Oversized => formatter.write_str("memory graph file exceeds the size limit"),
         }
     }
 }
@@ -430,5 +510,69 @@ mod tests {
         assert!(store.reinforce("a", now));
         let after = store.records[0].effective_confidence(now);
         assert!(after > before);
+    }
+
+    #[test]
+    fn prune_drops_decayed_records_but_keeps_fresh_ones() {
+        let mut store = MemoryStore::default();
+        store
+            .insert(record("old-negative", "avoid x", MemoryType::Negative))
+            .unwrap();
+        store
+            .insert(record("fresh-fact", "keep me", MemoryType::Fact))
+            .unwrap();
+        // 60 days later: Negative (14-day half-life) is fully decayed, Fact
+        // (90-day half-life) survives at 0.9 confidence.
+        let dropped = store.prune(60 * 86_400_000, 0.2);
+        assert_eq!(dropped, 1);
+        assert_eq!(store.len(), 1);
+        assert!(store.reinforce("fresh-fact", 60 * 86_400_000));
+    }
+
+    #[test]
+    fn merge_dedups_and_correction_supersedes_fact() {
+        let mut base = MemoryStore::default();
+        base.insert(record("subject", "old fact", MemoryType::Fact))
+            .unwrap();
+
+        let mut other = MemoryStore::default();
+        other
+            .insert(record("subject", "corrected", MemoryType::Correction))
+            .unwrap();
+        other
+            .insert(record("new", "new memory", MemoryType::Fact))
+            .unwrap();
+
+        let added = base.merge(&other);
+        assert_eq!(added, 1); // only "new" was added; "subject" was replaced
+        assert_eq!(base.len(), 2);
+        let subject = base
+            .records
+            .iter()
+            .find(|record| record.id == "subject")
+            .unwrap();
+        assert_eq!(subject.text, "corrected");
+        assert_eq!(subject.memory_type, MemoryType::Correction);
+    }
+
+    #[test]
+    fn save_and_load_round_trip_to_disk() {
+        let mut store = MemoryStore::default();
+        store
+            .insert(record("a", "persisted memory", MemoryType::Preference))
+            .unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "mindcode-memory-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        store.save_to_file(&path).unwrap();
+        let restored = MemoryStore::load_from_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored.search("persisted", 1, 0.0)[0].0.text, "persisted memory");
     }
 }
