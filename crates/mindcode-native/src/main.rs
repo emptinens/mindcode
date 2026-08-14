@@ -1332,6 +1332,8 @@ fn tui_snapshot(transcript: &[TranscriptInput], stats: SessionStats) -> Projecti
     input.telemetry.last_input_tokens = Some(stats.last_input_tokens);
     input.telemetry.last_output_tokens = Some(stats.last_output_tokens);
     input.telemetry.last_cost = Some(stats.last_cost);
+    input.telemetry.last_savings = Some(stats.last_savings);
+    input.telemetry.savings = Some(stats.savings);
     input
 }
 
@@ -1394,6 +1396,7 @@ fn save_session(
             "input_tokens": stats.input_tokens,
             "output_tokens": stats.output_tokens,
             "cost": stats.cost,
+            "savings": stats.savings,
         },
     });
     fs::write(&path, serde_json::to_vec_pretty(&value)?)?;
@@ -1427,6 +1430,10 @@ fn load_session(session_id: &str) -> (TuiTranscript, SessionStats) {
             .unwrap_or(0);
         stats.cost = usage
             .get("cost")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+        stats.savings = usage
+            .get("savings")
             .and_then(serde_json::Value::as_f64)
             .unwrap_or(0.0);
     }
@@ -2060,22 +2067,26 @@ struct SessionStats {
     input_tokens: u64,
     output_tokens: u64,
     cost: f64,
+    savings: f64,
     last_input_tokens: u64,
     last_output_tokens: u64,
     last_cost: f64,
+    last_savings: f64,
 }
 
 impl SessionStats {
     fn record(&mut self, outcome: &ChatOutcome) {
-        let turn_cost = estimate_turn_cost(outcome);
+        let (turn_cost, turn_savings) = estimate_turn_cost(outcome);
         self.input_tokens = self.input_tokens.saturating_add(outcome.usage.input_tokens);
         self.output_tokens = self
             .output_tokens
             .saturating_add(outcome.usage.output_tokens);
         self.cost += turn_cost;
+        self.savings += turn_savings;
         self.last_input_tokens = outcome.usage.input_tokens;
         self.last_output_tokens = outcome.usage.output_tokens;
         self.last_cost = turn_cost;
+        self.last_savings = turn_savings;
     }
 }
 
@@ -2122,10 +2133,29 @@ fn load_pricing_override() -> Option<std::collections::HashMap<String, (f64, f64
     (!out.is_empty()).then_some(out)
 }
 
-fn estimate_turn_cost(outcome: &ChatOutcome) -> f64 {
+/// Estimated `(cost, savings)` for one request (§10.3).  `cost` is the
+/// cache-aware price; `savings` is how much the provider cache saved versus
+/// billing every input token at the full input rate.
+///
+/// Cache rates follow the standard Anthropic scheme relative to the input
+/// price: writes cost 1.25×, reads cost 0.1×.  The same multipliers are used
+/// for OpenAI-compatible `cached_tokens` reports.
+fn estimate_turn_cost(outcome: &ChatOutcome) -> (f64, f64) {
     let (input_per_1k, output_per_1k) = model_price_per_1k(&outcome.model);
-    outcome.usage.input_tokens as f64 / 1000.0 * input_per_1k
-        + outcome.usage.output_tokens as f64 / 1000.0 * output_per_1k
+    let usage = outcome.usage;
+    let uncached_input = usage
+        .input_tokens
+        .saturating_sub(usage.cached_read_tokens)
+        .saturating_sub(usage.cache_creation_tokens);
+    let cache_write_per_1k = input_per_1k * 1.25;
+    let cache_read_per_1k = input_per_1k * 0.1;
+    let cost = uncached_input as f64 / 1000.0 * input_per_1k
+        + usage.cache_creation_tokens as f64 / 1000.0 * cache_write_per_1k
+        + usage.cached_read_tokens as f64 / 1000.0 * cache_read_per_1k
+        + usage.output_tokens as f64 / 1000.0 * output_per_1k;
+    let naive = usage.input_tokens as f64 / 1000.0 * input_per_1k
+        + usage.output_tokens as f64 / 1000.0 * output_per_1k;
+    (cost, (naive - cost).max(0.0))
 }
 
 /// Like [`chat_completion_text`], but sends a full message history (so the
@@ -2200,11 +2230,14 @@ async fn chat_completion_with_chunks(
             futures_util::pin_mut!(stream);
             while let Some(item) = stream.next().await {
                 let chunk = item.map_err(anyhow::Error::msg)?;
-                // Anthropic reports input tokens on `message_start.message.usage`
-                // and the cumulative output total on `message_delta.usage`.
+                // Anthropic reports input tokens and cache counters on
+                // `message_start.message.usage` and the cumulative output total
+                // on `message_delta.usage` (§10.3).
                 if let Some(start) = &chunk.message {
                     if let Some(reported) = ChatUsage::parse(start.usage.as_ref()) {
                         usage.input_tokens = reported.input_tokens;
+                        usage.cached_read_tokens = reported.cached_read_tokens;
+                        usage.cache_creation_tokens = reported.cache_creation_tokens;
                         if reported.output_tokens > usage.output_tokens {
                             usage.output_tokens = reported.output_tokens;
                         }
@@ -3349,23 +3382,29 @@ mod tests {
                 usage: ChatUsage {
                     input_tokens: 10,
                     output_tokens: 4,
+                    cached_read_tokens: 6,
+                    ..Default::default()
                 },
                 model: "gpt-5.6-luna".into(),
             });
             assert_eq!(stats.input_tokens, 10);
             assert_eq!(stats.output_tokens, 4);
             assert!(stats.cost > 0.0);
+            assert!(stats.savings > 0.0);
             assert_eq!(stats.last_input_tokens, 10);
             assert_eq!(stats.last_output_tokens, 4);
+            assert_eq!(stats.last_savings, stats.savings);
 
             save_session("usage", &transcript, stats).unwrap();
             let (loaded, restored) = load_session("usage");
             assert_eq!(loaded.entries.len(), 0);
             assert_eq!(restored.input_tokens, 10);
             assert_eq!(restored.output_tokens, 4);
-            // Cost is stored too; the last_* fields are transient.
+            // Cost and savings are stored too; the last_* fields are transient.
             assert_eq!(restored.cost, stats.cost);
+            assert_eq!(restored.savings, stats.savings);
             assert_eq!(restored.last_input_tokens, 0);
+            assert_eq!(restored.last_savings, 0.0);
         });
     }
 
@@ -3378,6 +3417,7 @@ mod tests {
                 usage: ChatUsage {
                     input_tokens: input,
                     output_tokens: output,
+                    ..Default::default()
                 },
                 model: "gpt-5.6-luna".into(),
             });
@@ -3388,6 +3428,50 @@ mod tests {
         assert_eq!(stats.last_input_tokens, 150);
         assert_eq!(stats.last_output_tokens, 35);
         assert!(stats.cost > 0.0);
+    }
+
+    #[test]
+    fn estimate_turn_cost_savings_accounts_for_cached_tokens() {
+        // gpt-5.6-luna input is $0.001/1K; cache reads cost 0.1× that. Reading
+        // 8000 cached tokens must cost far less than billing them at full rate.
+        let outcome = ChatOutcome {
+            text: String::new(),
+            usage: ChatUsage {
+                input_tokens: 10_000,
+                output_tokens: 0,
+                cached_read_tokens: 8_000,
+                cache_creation_tokens: 0,
+            },
+            model: "gpt-5.6-luna".to_owned(),
+        };
+        let (cost, savings) = estimate_turn_cost(&outcome);
+        let expected_naive = 10_000.0 / 1000.0 * 0.0010;
+        let expected_cost = 2000.0 / 1000.0 * 0.0010 + 8000.0 / 1000.0 * 0.0001;
+        assert!((cost - expected_cost).abs() < 1e-12, "cost = {cost}");
+        assert!(
+            (savings - (expected_naive - expected_cost)).abs() < 1e-12,
+            "savings = {savings}"
+        );
+        assert!(savings > 0.0);
+    }
+
+    #[test]
+    fn estimate_turn_cost_cache_write_is_billed_at_a_premium() {
+        // Writing tokens to the cache costs 1.25× the input rate, so a
+        // cache-creation-only turn is more expensive than the naive estimate.
+        let outcome = ChatOutcome {
+            text: String::new(),
+            usage: ChatUsage {
+                input_tokens: 1_000,
+                output_tokens: 0,
+                cached_read_tokens: 0,
+                cache_creation_tokens: 1_000,
+            },
+            model: "gpt-5.6-luna".to_owned(),
+        };
+        let (cost, savings) = estimate_turn_cost(&outcome);
+        assert!((cost - 1.25 * 0.0010).abs() < 1e-12, "cost = {cost}");
+        assert_eq!(savings, 0.0);
     }
 
     #[test]

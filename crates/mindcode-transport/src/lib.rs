@@ -301,12 +301,20 @@ pub struct MessageStart {
 pub struct ChatUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Prompt tokens read from the provider cache this request, billed at the
+    /// discounted cache-read rate (§10.3).
+    pub cached_read_tokens: u64,
+    /// Prompt tokens written to the provider cache this request, billed at the
+    /// cache-write rate (§10.3).
+    pub cache_creation_tokens: u64,
 }
 
 impl ChatUsage {
     /// Parse a usage object tolerant of both wire dialects: OpenAI reports
-    /// `prompt_tokens`/`completion_tokens`, Anthropic reports
-    /// `input_tokens`/`output_tokens`.  Missing or non-numeric fields are
+    /// `prompt_tokens`/`completion_tokens` with cached prompt tokens under
+    /// `prompt_tokens_details.cached_tokens`, Anthropic reports
+    /// `input_tokens`/`output_tokens` with `cache_read_input_tokens` and
+    /// `cache_creation_input_tokens`.  Missing or non-numeric fields are
     /// treated as zero so a partial report never poisons the counters.
     pub fn parse(value: Option<&Value>) -> Option<ChatUsage> {
         let object = value?.as_object()?;
@@ -316,9 +324,23 @@ impl ChatUsage {
                 .and_then(|value| value.as_u64())
                 .unwrap_or(0)
         };
+        let cached_read_tokens = object
+            .get("cache_read_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .max(
+                object
+                    .get("prompt_tokens_details")
+                    .and_then(Value::as_object)
+                    .and_then(|details| details.get("cached_tokens"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            );
         Some(ChatUsage {
             input_tokens: number(&["input_tokens", "prompt_tokens"]),
             output_tokens: number(&["output_tokens", "completion_tokens"]),
+            cached_read_tokens,
+            cache_creation_tokens: number(&["cache_creation_input_tokens"]),
         })
     }
 }
@@ -491,7 +513,7 @@ impl Transport {
         impl Stream<Item = Result<MessageChunk, TransportError>> + Send + 'static,
         TransportError,
     > {
-        let body = inject_stream_flag(request)?;
+        let body = inject_messages_body(request)?;
         let url = format!("{}/v1/messages", self.base_url);
         let stream = spawn_sse_stream(
             self.client.clone(),
@@ -575,6 +597,47 @@ fn inject_stream_flag(request: &impl Serialize) -> Result<Value, TransportError>
         object.insert("stream".to_owned(), Value::Bool(true));
     }
     Ok(value)
+}
+
+/// Build the `anthropic-compatible` `/v1/messages` body: force `stream: true`
+/// and mark the newest turn with a `cache_control` breakpoint so the
+/// conversation prefix is cached and read back on later turns (§10.3).
+/// A single-message request is left unmarked: writing a one-shot prompt to the
+/// cache costs more than it can ever save.
+fn inject_messages_body(request: &MessagesRequest) -> Result<Value, TransportError> {
+    let mut value = inject_stream_flag(request)?;
+    apply_anthropic_cache_control(&mut value);
+    Ok(value)
+}
+
+/// Put an Anthropic `cache_control: {"type":"ephemeral"}` breakpoint on the
+/// last message's text content, caching everything before it as a reusable
+/// prefix. Only applied when there is a prior turn worth caching.
+fn apply_anthropic_cache_control(value: &mut Value) {
+    let Some(messages) = value.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    if messages.len() < 2 {
+        return;
+    }
+    let Some(last) = messages.last_mut().and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(content) = last.remove("content") else {
+        return;
+    };
+    let text = match &content {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    last.insert(
+        "content".to_owned(),
+        serde_json::json!([{
+            "type": "text",
+            "text": text,
+            "cache_control": { "type": "ephemeral" },
+        }]),
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -883,5 +946,85 @@ mod tests {
 
         // Absent usage reports nothing; callers keep their defaults.
         assert_eq!(ChatUsage::parse(None), None);
+    }
+
+    #[test]
+    fn chat_usage_parses_cached_tokens_from_both_dialects() {
+        // OpenAI final-chunk dialect: cached tokens nested under details.
+        let openai = serde_json::json!({
+            "prompt_tokens": 12,
+            "completion_tokens": 3,
+            "prompt_tokens_details": { "cached_tokens": 8 },
+        });
+        let parsed = ChatUsage::parse(Some(&openai)).unwrap();
+        assert_eq!(parsed.cached_read_tokens, 8);
+        assert_eq!(parsed.cache_creation_tokens, 0);
+
+        // Anthropic dialect: explicit cache read + creation counters.
+        let anthropic = serde_json::json!({
+            "input_tokens": 40,
+            "output_tokens": 9,
+            "cache_read_input_tokens": 30,
+            "cache_creation_input_tokens": 6,
+        });
+        let parsed = ChatUsage::parse(Some(&anthropic)).unwrap();
+        assert_eq!(parsed.cached_read_tokens, 30);
+        assert_eq!(parsed.cache_creation_tokens, 6);
+
+        // A report without cache fields stays at zero.
+        let plain = serde_json::json!({ "prompt_tokens": 5, "completion_tokens": 1 });
+        let parsed = ChatUsage::parse(Some(&plain)).unwrap();
+        assert_eq!(parsed.cached_read_tokens, 0);
+        assert_eq!(parsed.cache_creation_tokens, 0);
+    }
+
+    #[test]
+    fn messages_body_marks_last_turn_with_cache_control() {
+        let two_turns = inject_messages_body(&MessagesRequest {
+            model: "model-alpha".to_owned(),
+            max_tokens: 16,
+            messages: vec![
+                ChatMessage {
+                    role: "user".to_owned(),
+                    content: "first".to_owned(),
+                },
+                ChatMessage {
+                    role: "user".to_owned(),
+                    content: "second".to_owned(),
+                },
+            ],
+            system: None,
+            temperature: None,
+        })
+        .unwrap();
+        assert_eq!(two_turns["stream"], Value::Bool(true));
+        let messages = two_turns["messages"].as_array().unwrap();
+        // The first turn keeps its plain string content.
+        assert_eq!(messages[0]["content"], Value::String("first".to_owned()));
+        // The last turn is wrapped in a cache_control breakpoint block.
+        let last = messages[1]["content"].as_array().unwrap();
+        assert_eq!(last.len(), 1);
+        assert_eq!(last[0]["type"], Value::String("text".to_owned()));
+        assert_eq!(last[0]["text"], Value::String("second".to_owned()));
+        assert_eq!(
+            last[0]["cache_control"]["type"],
+            Value::String("ephemeral".to_owned())
+        );
+
+        // A single message is left unmarked: nothing to cache, so no
+        // cache-write cost is incurred.
+        let one_turn = inject_messages_body(&MessagesRequest {
+            model: "model-alpha".to_owned(),
+            max_tokens: 16,
+            messages: vec![ChatMessage {
+                role: "user".to_owned(),
+                content: "only".to_owned(),
+            }],
+            system: None,
+            temperature: None,
+        })
+        .unwrap();
+        let messages = one_turn["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["content"], Value::String("only".to_owned()));
     }
 }

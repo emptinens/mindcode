@@ -202,6 +202,12 @@ pub struct UiTelemetrySnapshot {
     /// Estimated USD cost of the most recent request (§10.3).
     #[serde(default)]
     pub last_cost: f64,
+    /// Estimated USD saved by prompt caching on the most recent request (§10.3).
+    #[serde(default)]
+    pub last_savings: f64,
+    /// Cumulative USD saved by prompt caching this session (§10.3).
+    #[serde(default)]
+    pub savings: f64,
     pub cached_tokens: u64,
     pub reasoning_tokens: u64,
     pub credits: f64,
@@ -1845,6 +1851,8 @@ mod tests {
             last_input_tokens: 0,
             last_output_tokens: 0,
             last_cost: 0.0,
+            last_savings: 0.0,
+            savings: 0.0,
             cached_tokens: 0,
             reasoning_tokens: 0,
             credits: 4.419,

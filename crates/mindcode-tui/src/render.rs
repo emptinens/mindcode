@@ -1064,6 +1064,9 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &RenderState<'_>) {
     if telemetry.credits > 0.0 {
         counters.push(format!("Σ {}", format_cost(telemetry.credits)));
     }
+    if telemetry.savings > 0.0 {
+        counters.push(format!("saved {}", format_cost(telemetry.savings)));
+    }
     let mut right = String::new();
     loop {
         right.clear();

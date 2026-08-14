@@ -2618,6 +2618,8 @@ mod tests {
                 last_input_tokens: 0,
                 last_output_tokens: 0,
                 last_cost: 0.0,
+                last_savings: 0.0,
+                savings: 0.0,
                 cached_tokens: 500,
                 reasoning_tokens: 900,
                 credits: 4.419,

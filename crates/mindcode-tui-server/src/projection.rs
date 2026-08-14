@@ -81,6 +81,8 @@ pub struct TelemetryInput {
     pub last_input_tokens: Option<u64>,
     pub last_output_tokens: Option<u64>,
     pub last_cost: Option<f64>,
+    pub last_savings: Option<f64>,
+    pub savings: Option<f64>,
     pub cached_tokens: Option<u64>,
     pub reasoning_tokens: Option<u64>,
     pub credits: Option<f64>,
@@ -527,6 +529,8 @@ pub fn project_telemetry(input: &TelemetryInput) -> Result<UiTelemetrySnapshot, 
         last_input_tokens: input.last_input_tokens.unwrap_or(0),
         last_output_tokens: input.last_output_tokens.unwrap_or(0),
         last_cost: finite_number(input.last_cost.unwrap_or(0.0), "telemetry.last_cost")?,
+        last_savings: finite_number(input.last_savings.unwrap_or(0.0), "telemetry.last_savings")?,
+        savings: finite_number(input.savings.unwrap_or(0.0), "telemetry.savings")?,
         cached_tokens: input.cached_tokens.unwrap_or(0),
         reasoning_tokens: input.reasoning_tokens.unwrap_or(0),
         credits: finite_number(input.credits.unwrap_or(0.0), "telemetry.credits")?,
@@ -1854,6 +1858,23 @@ mod tests {
             ..Default::default()
         };
         assert!(project_telemetry(&input).is_err());
+    }
+
+    #[test]
+    fn telemetry_projects_cache_savings() {
+        let input = TelemetryInput {
+            last_savings: Some(0.012),
+            savings: Some(0.34),
+            ..Default::default()
+        };
+        let snapshot = project_telemetry(&input).unwrap();
+        assert!((snapshot.last_savings - 0.012).abs() < 1e-12);
+        assert!((snapshot.savings - 0.34).abs() < 1e-12);
+
+        // Defaults stay at zero when the native layer reports nothing.
+        let default = project_telemetry(&TelemetryInput::default()).unwrap();
+        assert_eq!(default.last_savings, 0.0);
+        assert_eq!(default.savings, 0.0);
     }
 
     #[test]
