@@ -31,10 +31,10 @@ use mindcode_vexzy::{
     eligible_worker_models, parse_vexzy_model_catalog, VexzyModel, VexzyModelCatalog, WorkerEffort,
 };
 use mindcode_worker::{
-    ApprovalDecision, ApprovalGate, ApprovalRequest, DecisionFuture, HookSet, ModelClient,
-    ModelTurn, OwnershipGuard, PermissionTier, PoolOutcome, ResolvedToolCall, WorkerAgent,
-    WorkerError, WorkerPool, WorkerReport, WorkerResult, WorkerScope, WorkerStatus, WorkerUsage,
-    DEFAULT_MAX_CONCURRENT,
+    bwrap_available, ApprovalDecision, ApprovalGate, ApprovalRequest, DecisionFuture, HookSet,
+    ModelClient, ModelTurn, OwnershipGuard, PermissionTier, PoolOutcome, ResolvedToolCall,
+    WorkerAgent, WorkerError, WorkerPool, WorkerReport, WorkerResult, WorkerScope, WorkerStatus,
+    WorkerUsage, DEFAULT_MAX_CONCURRENT,
 };
 use mindcoded::{Daemon, DaemonConfig};
 use serde_json::{json, Value};
@@ -1192,6 +1192,27 @@ fn status_line(stats: &SessionStats) -> String {
     lines.join("\n")
 }
 
+/// Secret-free sandbox status appended to `/status` (§13.1): the session-wide
+/// shell-isolation flags plus whether bwrap is available to back them. Never
+/// prints a credential or path.
+fn sandbox_status_line(allow_unsafe_shell: bool, allow_network: bool) -> String {
+    let mode = if allow_unsafe_shell {
+        "unsandboxed (--allow-unsafe-shell)"
+    } else if bwrap_available() {
+        "sandboxed (bwrap)"
+    } else {
+        "sandboxed, but bwrap missing (risky shell fails closed)"
+    };
+    let network = if allow_network {
+        "allowed (--allow-network)"
+    } else {
+        "offline"
+    };
+    format!(
+        "worker shell: {mode}\nnetwork: {network}\nrlimits: nofile=256 fsize=1GiB (nproc left to pid-ns)"
+    )
+}
+
 /// Effective `/colors` palette (§11.6): the frozen default merged with any
 /// secret-free `color_overrides` from settings.
 fn effective_palette(settings: &NativeSettings) -> PaletteSpec {
@@ -1453,7 +1474,11 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
                         // status (§12.3); handled here for access to the stats.
                         if let Some(("status", _)) = slash_command(&text) {
                             let current = *processor_stats.lock().unwrap();
-                            transcript.push("system", status_line(&current));
+                            let sandbox = sandbox_status_line(allow_unsafe_shell, allow_network);
+                            transcript.push(
+                                "system",
+                                format!("{}\n{sandbox}", status_line(&current)),
+                            );
                             let current = *processor_stats.lock().unwrap();
                             let permissions = pending_permission_inputs(&pending);
                             let _ = processor_server
@@ -5454,6 +5479,7 @@ mod tests {
             let user_facing = [
                 TUI_HELP.to_owned(),
                 status_line(&SessionStats::default()),
+                sandbox_status_line(false, false),
                 worker_report_text(&WorkerReport {
                     status: WorkerStatus::Success,
                     summary: "fixed the parser bug".to_owned(),
@@ -5473,6 +5499,26 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[test]
+    fn sandbox_status_reflects_flags_without_secrets() {
+        let sandboxed = sandbox_status_line(false, false);
+        assert!(sandboxed.contains("worker shell: sandboxed"));
+        assert!(sandboxed.contains("network: offline"));
+
+        let unsandboxed = sandbox_status_line(true, true);
+        assert!(unsandboxed.contains("--allow-unsafe-shell"));
+        assert!(unsandboxed.contains("--allow-network"));
+
+        // Secret-free: no credential-shaped value and no internal jargon.
+        for text in [&sandboxed, &unsandboxed] {
+            assert!(!text.contains("forge-"));
+            assert!(!text.contains("credentials"));
+            for word in ["gate", "armed", "dispatch", "continuation"] {
+                assert!(!text.contains(word), "jargon '{word}' leaked: {text}");
+            }
+        }
     }
 
     #[test]
