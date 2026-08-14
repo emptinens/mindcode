@@ -282,6 +282,57 @@ where
     })
 }
 
+/// Slash commands offered by tab completion, ordered for the bare-`/` cycle.
+const SLASH_COMMANDS: [&str; 14] = [
+    "model",
+    "settings",
+    "provider",
+    "effort",
+    "permissions",
+    "work",
+    "help",
+    "auth",
+    "eligible",
+    "allowlist",
+    "chat",
+    "doctor",
+    "setup-token",
+    "update",
+];
+
+/// What kind of completion is in flight (slash command name vs model id).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompletionKind {
+    Command,
+    Model,
+}
+
+/// Remembers the last applied completion so repeated Tab presses cycle through
+/// the candidate list without the user retyping the prefix.
+#[derive(Clone, Debug)]
+struct CompletionState {
+    kind: CompletionKind,
+    /// The buffer exactly as produced by the last completion (used to detect
+    /// that the user pressed Tab again without typing in between).
+    buffer: String,
+    /// The byte span that the last completion filled; cycling replaces it with
+    /// the next candidate.
+    replace_start: usize,
+    replace_end: usize,
+    candidates: Vec<String>,
+    /// Index of the candidate currently present in `buffer`.
+    index: usize,
+}
+
+/// Owned fresh-completion context returned by [`App::fresh_completion`].
+#[derive(Clone)]
+struct FreshCompletion {
+    kind: CompletionKind,
+    replace_start: usize,
+    replace_end: usize,
+    candidates: Vec<String>,
+}
+
 #[derive(Debug)]
 pub struct App {
     latest_snapshot: Option<UiRenderSnapshot>,
@@ -315,6 +366,7 @@ pub struct App {
     provider_form: Option<ProviderForm>,
     model_selection: usize,
     effort_selection: usize,
+    completion_last: Option<CompletionState>,
     providers_auto_opened: bool,
 }
 
@@ -395,6 +447,7 @@ impl App {
             provider_form: None,
             model_selection: 0,
             effort_selection: 0,
+            completion_last: None,
             providers_auto_opened: false,
         }
     }
@@ -542,6 +595,107 @@ impl App {
 
     fn selected_effort(&self) -> Option<&'static str> {
         EFFORT_LEVELS.get(self.effort_selection).copied()
+    }
+
+    /// Tab-complete the composer buffer.  A leading `/` completes the slash
+    /// command name; `/model <partial>` completes the model id against the
+    /// active provider's allowlist.  Repeated Tab cycles candidates; typing in
+    /// between restarts the completion.
+    fn complete_composer_input(&mut self) -> bool {
+        let Some(fresh) = self.fresh_completion() else {
+            self.completion_last = None;
+            return false;
+        };
+        if let Some(last) = &self.completion_last {
+            if last.buffer == self.input_buffer && last.kind == fresh.kind {
+                let next = (last.index + 1) % last.candidates.len();
+                let mut buffer = last.buffer.clone();
+                buffer.replace_range(last.replace_start..last.replace_end, &last.candidates[next]);
+                self.input_buffer = buffer.clone();
+                self.input_cursor = self.input_buffer.len();
+                self.completion_last = Some(CompletionState {
+                    kind: last.kind,
+                    replace_start: last.replace_start,
+                    // The completed region runs to the end of the buffer, so
+                    // track the *new* length for the next cycle.
+                    replace_end: buffer.len(),
+                    candidates: last.candidates.clone(),
+                    index: next,
+                    buffer,
+                });
+                return true;
+            }
+        }
+        let mut buffer = self.input_buffer.clone();
+        buffer.replace_range(fresh.replace_start..fresh.replace_end, &fresh.candidates[0]);
+        self.input_buffer = buffer.clone();
+        self.input_cursor = self.input_buffer.len();
+        self.completion_last = Some(CompletionState {
+            kind: fresh.kind,
+            buffer,
+            replace_start: fresh.replace_start,
+            // The completed region always runs to the end of the buffer, so
+            // cycling replaces the whole token/argument next time.
+            replace_end: self.input_buffer.len(),
+            candidates: fresh.candidates,
+            index: 0,
+        });
+        true
+    }
+
+    /// Compute a fresh completion context for the current buffer: the kind,
+    /// the byte span to replace, and the ordered candidate list.  Returns
+    /// `None` when the buffer is not in a completable position.
+    fn fresh_completion(&self) -> Option<FreshCompletion> {
+        let slash = self.input_buffer.find('/')?;
+        if !self.input_buffer[..slash].trim().is_empty() {
+            return None;
+        }
+        let rest = &self.input_buffer[slash + 1..];
+        let token_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let token = &rest[..token_end];
+        let tail = &rest[token_end..];
+        let arg = tail.trim_start();
+        // Model completion needs the command token plus trailing whitespace
+        // (`/model ` or `/model <partial>`), so a bare `/model` still cycles
+        // as a command name instead of trapping the completion.
+        if token == "model" && !tail.is_empty() {
+            let candidates = self.active_models().to_vec();
+            if candidates.is_empty() {
+                return None;
+            }
+            let matches: Vec<String> = candidates
+                .into_iter()
+                .filter(|model| model.starts_with(arg))
+                .collect();
+            if matches.is_empty() {
+                return None;
+            }
+            let replace_start = slash + 1 + token_end + (tail.len() - arg.len());
+            Some(FreshCompletion {
+                kind: CompletionKind::Model,
+                replace_start,
+                replace_end: self.input_buffer.len(),
+                candidates: matches,
+            })
+        } else if arg.is_empty() {
+            let matches: Vec<String> = SLASH_COMMANDS
+                .iter()
+                .filter(|command| command.starts_with(token))
+                .map(|command| (*command).to_owned())
+                .collect();
+            if matches.is_empty() {
+                return None;
+            }
+            Some(FreshCompletion {
+                kind: CompletionKind::Command,
+                replace_start: slash + 1,
+                replace_end: slash + 1 + token.len(),
+                candidates: matches,
+            })
+        } else {
+            None
+        }
     }
 
     fn clamp_provider_selection(&mut self) {
@@ -799,7 +953,13 @@ impl App {
                     consumed = true;
                 }
                 LocalIntent::CycleFocus { reverse } => {
-                    if self.overlay == OverlayView::None {
+                    // Plain Tab in the composer completes the in-progress slash
+                    // command or model name; Shift+Tab keeps focus cycling.
+                    let completed = !*reverse
+                        && self.overlay == OverlayView::None
+                        && self.focus == PanelFocus::Composer
+                        && self.complete_composer_input();
+                    if !completed && self.overlay == OverlayView::None {
                         self.cycle_focus(*reverse);
                     }
                     consumed = true;
@@ -3065,6 +3225,72 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn tab_completes_partial_slash_command_to_full_command() {
+        let mut app = app_with_providers();
+        app.push_input("/mo");
+        assert!(app.complete_composer_input());
+        assert_eq!(app.input_buffer, "/model");
+        assert_eq!(app.input_cursor, app.input_buffer.len());
+    }
+
+    #[test]
+    fn tab_completes_model_name_after_model_command() {
+        let mut app = app_with_providers();
+        app.push_input("/model ");
+        assert!(app.complete_composer_input());
+        assert_eq!(app.input_buffer, "/model gpt-5.6-luna");
+
+        // A partial model id narrows to the prefix, then cycles the matches.
+        let mut custom = snapshot(1);
+        custom.providers[0].active = false;
+        custom
+            .providers
+            .push(mindcode_protocol::ui::UiProviderSnapshot {
+                id: "custom-a".into(),
+                name: "Custom A".into(),
+                protocol: "openai-compatible".into(),
+                base_url: "https://custom.example/v1".into(),
+                active: true,
+                credential: Some("env:CUSTOM_KEY".into()),
+                configured: true,
+                allowlist: vec!["model-a".into(), "model-b".into()],
+            });
+        let mut app = App::default();
+        app.apply_message(render_message(custom, "models"));
+        app.push_input("/model ");
+        assert!(app.complete_composer_input());
+        assert_eq!(app.input_buffer, "/model model-a");
+        assert!(app.complete_composer_input());
+        assert_eq!(app.input_buffer, "/model model-b");
+        assert!(app.complete_composer_input());
+        assert_eq!(app.input_buffer, "/model model-a");
+    }
+
+    #[test]
+    fn tab_cycles_through_commands_on_bare_slash() {
+        let mut app = App::default();
+        app.push_input("/");
+        assert!(app.complete_composer_input());
+        assert_eq!(app.input_buffer, "/model");
+        assert!(app.complete_composer_input());
+        assert_eq!(app.input_buffer, "/settings");
+        assert!(app.complete_composer_input());
+        assert_eq!(app.input_buffer, "/provider");
+    }
+
+    #[test]
+    fn tab_does_not_complete_plain_text_or_mid_sentence_slash() {
+        let mut app = App::default();
+        app.push_input("hello");
+        assert!(!app.complete_composer_input());
+        assert_eq!(app.input_buffer, "hello");
+
+        app.push_input(" run /mo");
+        assert!(!app.complete_composer_input());
+        assert_eq!(app.input_buffer, "hello run /mo");
     }
 
     #[test]

@@ -1026,7 +1026,7 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &RenderState<'_>) {
     let value = if observer {
         "Read-only — request writer control to send messages."
     } else if state.input.is_empty() {
-        "Type a prompt or / command — /model /settings /help /work"
+        "Type a prompt or / command · Tab completes · /model /settings /help /work"
     } else {
         state.input
     };

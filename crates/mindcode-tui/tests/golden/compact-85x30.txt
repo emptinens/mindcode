@@ -27,6 +27,6 @@ style 1d06004842b8a1f8
 |│                                                                                   │|
 |╰───────────────────────────────────────────────────────────────────────────────────╯|
 |╭ Composer · VEXZY · gpt-5.6-luna · Enter send · Shift+Enter newline ───────────────╮|
-|│> Type a prompt or / command — /model /settings /help /work                        │|
+|│> Type a prompt or / command · Tab completes · /model /settings /help /work        │|
 |╰───────────────────────────────────────────────────────────────────────────────────╯|
 | Enter send · Ctrl+P providers · /help                              Σ $4.42 ·  VEXZY |

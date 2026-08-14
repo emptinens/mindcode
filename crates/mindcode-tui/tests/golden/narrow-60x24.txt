@@ -21,6 +21,6 @@ style 19c7c4710c34eecf
 |│                                                          │|
 |╰──────────────────────────────────────────────────────────╯|
 |╭ Composer · VEXZY · gpt-5.6-luna · Enter send · Shift+Ente╮|
-|│> Type a prompt or / command — /model /settings /help     │|
+|│> Type a prompt or / command · Tab completes · /model     │|
 |╰──────────────────────────────────────────────────────────╯|
 | Enter send · Ctrl+P providers · /help     Σ $4.42 ·  VEXZY |
