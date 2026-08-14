@@ -23,6 +23,23 @@ pub use session_index::{
     SessionIndex, SessionIndexConfig, SessionListOptions, SessionRecord, SessionSearchOptions,
 };
 
+pub mod harness_import;
+pub use harness_import::{
+    import_session, HarnessImportError, ImportedMessage, ImportedSession, ResumeTarget,
+};
+
+pub mod dag_preset;
+pub use dag_preset::{
+    fix_node_for, validate_dag, DagNode, DagPreset, DagValidationError, NodeKind, NodeStatus,
+    VerifyArtifact,
+};
+
+pub mod memory_graph;
+pub use memory_graph::{
+    contains_credential_shaped, Embedder, HashingEmbedder, MemoryError, MemoryRecord, MemoryScope,
+    MemoryStore, MemoryType,
+};
+
 pub const TASK_GRAPH_SCHEMA_VERSION: u64 = 3;
 pub const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 pub const DEFAULT_LEASE_TTL_MS: u64 = 30_000;
