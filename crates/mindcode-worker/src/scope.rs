@@ -15,6 +15,7 @@ pub struct ScopeError {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WorkerScope {
     entries: Vec<PathBuf>,
+    all: bool,
 }
 
 impl WorkerScope {
@@ -28,7 +29,16 @@ impl WorkerScope {
         }
         Ok(Self {
             entries: normalized,
+            all: false,
         })
+    }
+
+    /// A scope covering the entire workspace (a single non-disjoint worker).
+    pub fn all() -> Self {
+        Self {
+            entries: Vec::new(),
+            all: true,
+        }
     }
 
     pub fn entries(&self) -> &[PathBuf] {
@@ -36,25 +46,29 @@ impl WorkerScope {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        !self.all && self.entries.is_empty()
     }
 
     /// Whether the workspace-relative `rel` path is covered by this scope.
     pub fn contains(&self, rel: &Path) -> bool {
-        self.entries
-            .iter()
-            .any(|entry| entry == rel || rel.starts_with(entry))
+        self.all
+            || self
+                .entries
+                .iter()
+                .any(|entry| entry == rel || rel.starts_with(entry))
     }
 
     /// Whether this scope overlaps another (neither must be dispatched while
     /// the other is active).
     pub fn intersects(&self, other: &WorkerScope) -> bool {
-        self.entries.iter().any(|a| {
-            other
-                .entries
-                .iter()
-                .any(|b| a.starts_with(b) || b.starts_with(a))
-        })
+        self.all
+            || other.all
+            || self.entries.iter().any(|a| {
+                other
+                    .entries
+                    .iter()
+                    .any(|b| a.starts_with(b) || b.starts_with(a))
+            })
     }
 }
 
@@ -139,5 +153,15 @@ mod tests {
         assert!(b.intersects(&a));
         assert!(!a.intersects(&c));
         assert!(!c.intersects(&b));
+    }
+
+    #[test]
+    fn whole_workspace_scope_covers_everything_and_intersects_all() {
+        let all = WorkerScope::all();
+        assert!(all.contains(Path::new("crates/foo/a.rs")));
+        assert!(all.contains(Path::new("src/lib.rs")));
+        assert!(!all.is_empty());
+        assert!(all.intersects(&scope(&["crates/foo"])));
+        assert!(scope(&["crates/foo"]).intersects(&all));
     }
 }

@@ -15,23 +15,42 @@ use mindcode_provider::{
 };
 use mindcode_settings::{default_settings_path, load_settings, save_settings, NativeSettings};
 use mindcode_transport::{
-    ChatCompletionsRequest, ChatMessage, ChatUsage, MessagesRequest, Transport,
+    ChatCompletionsRequest, ChatMessage, ChatUsage, MessagesRequest, ToolSpec, Transport,
 };
 use mindcode_tui::TuiConfig;
 use mindcode_tui_server::{
-    ConnectionInput, ControlServer, ControlServerConfig, InputHandler, ProjectionInput,
-    ProviderInput, StatusInput, TelemetryInput, TranscriptInput, WriterInput,
+    ConnectionInput, ControlServer, ControlServerConfig, InputHandler, PermissionInput,
+    ProjectionInput, ProviderInput, StatusInput, TelemetryInput, TranscriptInput, WriterInput,
 };
 use mindcode_vexzy::{
     eligible_worker_models, parse_vexzy_model_catalog, VexzyModel, VexzyModelCatalog, WorkerEffort,
 };
-use mindcode_worker::PermissionTier;
+use mindcode_worker::{
+    ApprovalDecision, ApprovalGate, ApprovalRequest, DecisionFuture, ModelClient, ModelTurn,
+    OwnershipGuard, PermissionTier, PoolOutcome, ResolvedToolCall, WorkerAgent, WorkerError,
+    WorkerPool, WorkerReport, WorkerResult, WorkerScope, WorkerStatus, WorkerUsage,
+    DEFAULT_MAX_CONCURRENT,
+};
 use mindcoded::{Daemon, DaemonConfig};
 use serde_json::{json, Value};
 use std::{
-    env, ffi::OsString, fs, io, io::BufRead, path::PathBuf, process, sync::Arc, time::Duration,
+    collections::BTreeMap,
+    env,
+    ffi::OsString,
+    fs,
+    future::Future,
+    io,
+    io::BufRead,
+    path::{Path, PathBuf},
+    pin::Pin,
+    process,
+    sync::atomic::{AtomicU64, Ordering},
+    sync::{Arc, Mutex},
+    time::Duration,
     time::Instant,
 };
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 const VERSION: &str = "0.1.3";
 const API_KEY_ENV: &str = "VEXZY_API_KEY";
@@ -1166,82 +1185,163 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
     let stats = Arc::new(std::sync::Mutex::new(loaded_stats));
     let initial_stats = *stats.lock().unwrap();
     let _ = server
-        .publish(&tui_snapshot(&transcript.entries, initial_stats))
+        .publish(&tui_snapshot(&transcript.entries, initial_stats, &[]))
         .await;
 
     let processor_server = server.clone();
     let processor_session_id = session_id.clone();
     let processor_stats = stats.clone();
+    // Shared approval registry: worker agents register a permission request
+    // here and the processor loop publishes it + forwards the user's decision.
+    let pending: Arc<Mutex<PendingApprovals>> = Arc::new(Mutex::new(PendingApprovals::default()));
+    // Worker events: a worker finished, or a worker asked for permission and
+    // the processor must republish the snapshot with the pending request.
+    let (worker_event_tx, mut worker_event_rx) = mpsc::unbounded_channel::<WorkerEvent>();
+    let worker_pool = WorkerPool::with_defaults(DEFAULT_MAX_CONCURRENT)
+        .map_err(|error| anyhow!(error.to_string()))?;
     let processor = tokio::spawn(async move {
         // Session-scoped worker permission tier (§10.4.2); default is the
         // safest (ask-everything) and it resets on every TUI launch.
         let mut tier = PermissionTier::default();
-        while let Some(action) = action_rx.recv().await {
-            if action.action == "composer_submit" {
-                let Some(text) = action.value else { continue };
-                // Republish a fresh snapshot as the assistant turn streams so
-                // tokens appear incrementally, throttled so the socket is not
-                // flooded on every delta.
-                let republish = {
-                    let server = processor_server.clone();
-                    let stats = processor_stats.clone();
-                    let mut last_publish = Instant::now() - STREAM_REPUBLISH_INTERVAL;
-                    move |transcript: &TuiTranscript| {
-                        let now = Instant::now();
-                        if now.duration_since(last_publish) >= STREAM_REPUBLISH_INTERVAL {
-                            last_publish = now;
-                            // Fire-and-forget: the projection revision is
-                            // monotonic, so the client drops any intermediate
-                            // snapshot that lands after the final one.
-                            let current = *stats.lock().unwrap();
-                            let snapshot = tui_streaming_snapshot(&transcript.entries, current);
-                            let server = server.clone();
-                            tokio::spawn(async move {
-                                let _ = server.publish(&snapshot).await;
-                            });
+        loop {
+            tokio::select! {
+                Some(action) = action_rx.recv() => {
+                    if action.action == "permission_decision" {
+                        let decision = match action.value.as_deref() {
+                            Some("once") => ApprovalDecision::AllowOnce,
+                            Some("project") => ApprovalDecision::AllowWorker,
+                            _ => ApprovalDecision::Deny,
+                        };
+                        if let Some(id) = action.target.as_deref() {
+                            if let Some(request) = pending.lock().unwrap().requests.remove(id) {
+                                let _ = request.sender.send(decision);
+                            }
                         }
-                    }
-                };
-                let outcome =
-                    dispatch_tui_input_streaming(&text, &mut transcript, republish, &mut tier)
-                        .await;
-                match outcome {
-                    Ok((true, Some(turn))) => {
-                        processor_stats.lock().unwrap().record(&turn);
                         let current = *processor_stats.lock().unwrap();
+                        let permissions = pending_permission_inputs(&pending);
                         let _ = processor_server
-                            .publish(&tui_snapshot(&transcript.entries, current))
+                            .publish(&tui_snapshot(&transcript.entries, current, &permissions))
                             .await;
-                        let _ = save_session(&processor_session_id, &transcript, current);
+                        continue;
                     }
-                    Ok((true, None)) => {
-                        let current = *processor_stats.lock().unwrap();
-                        let _ = processor_server
-                            .publish(&tui_snapshot(&transcript.entries, current))
-                            .await;
-                        let _ = save_session(&processor_session_id, &transcript, current);
+                    if action.action == "composer_submit" {
+                        let Some(text) = action.value else { continue };
+                        // `/work` spawns a worker agent and returns immediately;
+                        // it needs the server + approval registry, so it is
+                        // handled here rather than in the generic dispatcher.
+                        if let Some(("work", task)) = slash_command(&text) {
+                            if task.is_empty() {
+                                transcript.push("system", "usage: /work <task>");
+                            } else {
+                                match spawn_worker(
+                                    task,
+                                    tier,
+                                    pending.clone(),
+                                    worker_event_tx.clone(),
+                                    worker_pool.clone(),
+                                ) {
+                                    Ok(message) => transcript.push("system", message),
+                                    Err(error) => {
+                                        transcript.push("system", format!("error: {error:#}"))
+                                    }
+                                }
+                            }
+                            let current = *processor_stats.lock().unwrap();
+                            let permissions = pending_permission_inputs(&pending);
+                            let _ = processor_server
+                                .publish(&tui_snapshot(&transcript.entries, current, &permissions))
+                                .await;
+                            continue;
+                        }
+                        // Republish a fresh snapshot as the assistant turn streams so
+                        // tokens appear incrementally, throttled so the socket is not
+                        // flooded on every delta.
+                        let republish = {
+                            let server = processor_server.clone();
+                            let stats = processor_stats.clone();
+                            let pending = pending.clone();
+                            let mut last_publish = Instant::now() - STREAM_REPUBLISH_INTERVAL;
+                            move |transcript: &TuiTranscript| {
+                                let now = Instant::now();
+                                if now.duration_since(last_publish) >= STREAM_REPUBLISH_INTERVAL {
+                                    last_publish = now;
+                                    // Fire-and-forget: the projection revision is
+                                    // monotonic, so the client drops any intermediate
+                                    // snapshot that lands after the final one.
+                                    let current = *stats.lock().unwrap();
+                                    let permissions = pending_permission_inputs(&pending);
+                                    let snapshot = tui_streaming_snapshot(
+                                        &transcript.entries,
+                                        current,
+                                        &permissions,
+                                    );
+                                    let server = server.clone();
+                                    tokio::spawn(async move {
+                                        let _ = server.publish(&snapshot).await;
+                                    });
+                                }
+                            }
+                        };
+                        let outcome =
+                            dispatch_tui_input_streaming(&text, &mut transcript, republish, &mut tier)
+                                .await;
+                        match outcome {
+                            Ok((true, Some(turn))) => {
+                                processor_stats.lock().unwrap().record(&turn);
+                                let current = *processor_stats.lock().unwrap();
+                                let permissions = pending_permission_inputs(&pending);
+                                let _ = processor_server
+                                    .publish(&tui_snapshot(&transcript.entries, current, &permissions))
+                                    .await;
+                                let _ = save_session(&processor_session_id, &transcript, current);
+                            }
+                            Ok((true, None)) => {
+                                let current = *processor_stats.lock().unwrap();
+                                let permissions = pending_permission_inputs(&pending);
+                                let _ = processor_server
+                                    .publish(&tui_snapshot(&transcript.entries, current, &permissions))
+                                    .await;
+                                let _ = save_session(&processor_session_id, &transcript, current);
+                            }
+                            Ok((false, _)) => {}
+                            Err(error) => {
+                                transcript.push("system", format!("error: {error:#}"));
+                                let current = *processor_stats.lock().unwrap();
+                                let permissions = pending_permission_inputs(&pending);
+                                let _ = processor_server
+                                    .publish(&tui_snapshot(&transcript.entries, current, &permissions))
+                                    .await;
+                                let _ = save_session(&processor_session_id, &transcript, current);
+                            }
+                        }
+                        continue;
                     }
-                    Ok((false, _)) => {}
-                    Err(error) => {
-                        transcript.push("system", format!("error: {error:#}"));
-                        let current = *processor_stats.lock().unwrap();
-                        let _ = processor_server
-                            .publish(&tui_snapshot(&transcript.entries, current))
-                            .await;
-                        let _ = save_session(&processor_session_id, &transcript, current);
+                    match apply_tui_action(&action) {
+                        Ok(true) => {
+                            let current = *processor_stats.lock().unwrap();
+                            let permissions = pending_permission_inputs(&pending);
+                            let _ = processor_server
+                                .publish(&tui_snapshot(&transcript.entries, current, &permissions))
+                                .await;
+                        }
+                        Ok(false) => {}
+                        Err(error) => eprintln!("mindcode: {error:#}"),
                     }
                 }
-                continue;
-            }
-            match apply_tui_action(&action) {
-                Ok(true) => {
+                Some(event) = worker_event_rx.recv() => {
+                    if let WorkerEvent::Finished(report) = event {
+                        processor_stats.lock().unwrap().record_worker(&report.usage);
+                        transcript.push("system", worker_report_text(&report));
+                        let current = *processor_stats.lock().unwrap();
+                        let _ = save_session(&processor_session_id, &transcript, current);
+                    }
                     let current = *processor_stats.lock().unwrap();
+                    let permissions = pending_permission_inputs(&pending);
                     let _ = processor_server
-                        .publish(&tui_snapshot(&transcript.entries, current))
+                        .publish(&tui_snapshot(&transcript.entries, current, &permissions))
                         .await;
                 }
-                Ok(false) => {}
-                Err(error) => eprintln!("mindcode: {error:#}"),
+                else => break,
             }
         }
     });
@@ -1325,7 +1425,11 @@ fn tui_hint() -> TranscriptInput {
 /// `/effort` and `/provider use` changes surface immediately) carrying the
 /// current conversation transcript.  An empty conversation keeps the start
 /// hint so the dashboard never opens blank.
-fn tui_snapshot(transcript: &[TranscriptInput], stats: SessionStats) -> ProjectionInput {
+fn tui_snapshot(
+    transcript: &[TranscriptInput],
+    stats: SessionStats,
+    permissions: &[PermissionInput],
+) -> ProjectionInput {
     let mut input = tui_initial_input();
     input.transcript = if transcript.is_empty() {
         vec![tui_hint()]
@@ -1340,13 +1444,18 @@ fn tui_snapshot(transcript: &[TranscriptInput], stats: SessionStats) -> Projecti
     input.telemetry.last_cost = Some(stats.last_cost);
     input.telemetry.last_savings = Some(stats.last_savings);
     input.telemetry.savings = Some(stats.savings);
+    input.permissions = permissions.to_vec();
     input
 }
 
 /// A snapshot published mid-stream: the last assistant turn is marked
 /// `streaming` so the renderer shows the shimmer + cursor (§10.2).
-fn tui_streaming_snapshot(transcript: &[TranscriptInput], stats: SessionStats) -> ProjectionInput {
-    let mut input = tui_snapshot(transcript, stats);
+fn tui_streaming_snapshot(
+    transcript: &[TranscriptInput],
+    stats: SessionStats,
+    permissions: &[PermissionInput],
+) -> ProjectionInput {
+    let mut input = tui_snapshot(transcript, stats, permissions);
     input.streaming = true;
     input
 }
@@ -1471,6 +1580,7 @@ Commands (type and press Enter):
   /allowlist <id> <m,…> set a profile's Worker model allowlist (empty clears)
   /settings             show settings summary
   /permissions [<tier>] show or set worker access (ask-everything|workspace|full-access)
+  /work <task>          spawn a worker agent (bounded pool, approval-gated tools)
   /auth                 show active provider auth status
   /eligible             show eligible Worker models of the active provider
   /doctor               native health check
@@ -2112,6 +2222,19 @@ impl SessionStats {
         self.last_cost = turn_cost;
         self.last_savings = turn_savings;
     }
+
+    /// Fold one finished worker's usage into the running session counters
+    /// (§10.4.7).  The worker's `cost` is already cache-aware, so it is added
+    /// verbatim; per-worker savings are not tracked in this release.
+    fn record_worker(&mut self, usage: &WorkerUsage) {
+        self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
+        self.cost += usage.cost;
+        self.last_input_tokens = usage.input_tokens;
+        self.last_output_tokens = usage.output_tokens;
+        self.last_cost = usage.cost;
+        self.last_savings = 0.0;
+    }
 }
 
 /// Estimated per-1K-token price (input, output) in USD.  The optional
@@ -2294,6 +2417,425 @@ async fn chat_completion_with_chunks(
         usage,
         model: model.to_owned(),
     })
+}
+
+/// The active-provider model client that powers worker agents (§10.4).  It
+/// resolves the active profile once, then streams each model turn over the
+/// matching protocol, accumulating text, tool calls, and token usage.
+struct TransportModelClient {
+    provider: ProviderConfig,
+    key: SecretKey,
+    model: String,
+}
+
+impl TransportModelClient {
+    /// Resolve the active provider, its credential (env -> store ->
+    /// fail-closed), and model — the same resolution as a chat turn.
+    fn resolve(settings: &NativeSettings) -> Result<Self> {
+        let provider = run_active_provider_config(settings, None)
+            .ok_or_else(|| anyhow!("no active provider is configured"))?;
+        let store = load_store(&native_store_path()?).map_err(anyhow::Error::msg)?;
+        let key = store
+            .resolve(&provider.credential, |name| env::var(name).ok())
+            .map_err(|_| {
+                anyhow!(
+                    "credential for provider '{}' is not configured ({})",
+                    provider.id,
+                    credential_ref_kind(provider)
+                )
+            })?;
+        let model = select_chat_model(settings, provider, None)?;
+        Ok(Self {
+            provider: provider.clone(),
+            key,
+            model,
+        })
+    }
+}
+
+impl ModelClient for TransportModelClient {
+    fn turn(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = WorkerResult<ModelTurn>> + Send>> {
+        let provider = self.provider.clone();
+        let key = self.key.clone();
+        let model = self.model.clone();
+        let messages = messages.to_vec();
+        let tools = tools.to_vec();
+        Box::pin(async move {
+            let transport = Transport::new(&provider.base_url)
+                .map_err(|error| WorkerError::Io(error.to_string()))?;
+            let (text, tool_calls, usage) = match provider.protocol {
+                Protocol::OpenAiCompatible => {
+                    let request = ChatCompletionsRequest {
+                        model: model.clone(),
+                        messages,
+                        max_tokens: None,
+                        temperature: None,
+                        tools,
+                    };
+                    let stream = transport
+                        .chat_completions(&key, &request)
+                        .map_err(|error| WorkerError::Io(error.to_string()))?;
+                    futures_util::pin_mut!(stream);
+                    let mut text = String::new();
+                    let mut usage = ChatUsage::default();
+                    // (id, name, accumulated arguments) grouped by tool-call index.
+                    let mut calls: BTreeMap<u64, (String, String, String)> = BTreeMap::new();
+                    while let Some(item) = stream.next().await {
+                        if cancel.is_cancelled() {
+                            return Err(WorkerError::Cancelled);
+                        }
+                        let chunk = item.map_err(|error| WorkerError::Io(error.to_string()))?;
+                        if let Some(reported) = ChatUsage::parse(chunk.usage.as_ref()) {
+                            if reported.input_tokens > 0 || reported.output_tokens > 0 {
+                                usage = reported;
+                            }
+                        }
+                        for choice in chunk.choices {
+                            if let Some(content) = choice.delta.content {
+                                text.push_str(&content);
+                            }
+                            for call in choice.delta.tool_calls {
+                                let entry = calls.entry(call.index).or_default();
+                                if let Some(id) = call.id {
+                                    if !id.is_empty() {
+                                        entry.0 = id;
+                                    }
+                                }
+                                if let Some(function) = call.function {
+                                    if let Some(name) = function.name {
+                                        if !name.is_empty() {
+                                            entry.1 = name;
+                                        }
+                                    }
+                                    if let Some(arguments) = function.arguments {
+                                        entry.2.push_str(&arguments);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let tool_calls = calls
+                        .into_iter()
+                        .map(|(_, (id, name, arguments))| ResolvedToolCall {
+                            id,
+                            name,
+                            arguments: serde_json::from_str(&arguments)
+                                .unwrap_or(Value::String(arguments)),
+                        })
+                        .collect();
+                    (text, tool_calls, usage)
+                }
+                Protocol::AnthropicCompatible => {
+                    let request = MessagesRequest {
+                        model: model.clone(),
+                        max_tokens: 1024,
+                        messages,
+                        system: None,
+                        temperature: None,
+                        tools,
+                    };
+                    let stream = transport
+                        .messages(&key, &request)
+                        .map_err(|error| WorkerError::Io(error.to_string()))?;
+                    futures_util::pin_mut!(stream);
+                    let mut text = String::new();
+                    let mut usage = ChatUsage::default();
+                    // (id, name, accumulated partial_json) grouped by block index.
+                    let mut calls: BTreeMap<u64, (String, String, String)> = BTreeMap::new();
+                    while let Some(item) = stream.next().await {
+                        if cancel.is_cancelled() {
+                            return Err(WorkerError::Cancelled);
+                        }
+                        let chunk = item.map_err(|error| WorkerError::Io(error.to_string()))?;
+                        if let Some(start) = &chunk.message {
+                            if let Some(reported) = ChatUsage::parse(start.usage.as_ref()) {
+                                usage.input_tokens = reported.input_tokens;
+                                usage.cached_read_tokens = reported.cached_read_tokens;
+                                usage.cache_creation_tokens = reported.cache_creation_tokens;
+                                if reported.output_tokens > usage.output_tokens {
+                                    usage.output_tokens = reported.output_tokens;
+                                }
+                            }
+                        }
+                        if let Some(reported) = ChatUsage::parse(chunk.usage.as_ref()) {
+                            if reported.output_tokens > usage.output_tokens {
+                                usage.output_tokens = reported.output_tokens;
+                            }
+                        }
+                        let index = chunk.index.unwrap_or(0);
+                        if let Some(block) = chunk.content_block {
+                            if block.r#type == "tool_use" {
+                                let entry = calls.entry(index).or_default();
+                                if let Some(id) = block.id {
+                                    if !id.is_empty() {
+                                        entry.0 = id;
+                                    }
+                                }
+                                if let Some(name) = block.name {
+                                    if !name.is_empty() {
+                                        entry.1 = name;
+                                    }
+                                }
+                            } else if let Some(content) = block.text {
+                                text.push_str(&content);
+                            }
+                        }
+                        if let Some(delta) = chunk.delta {
+                            if let Some(content) = delta.text {
+                                text.push_str(&content);
+                            }
+                            if let Some(partial_json) = delta.partial_json {
+                                calls.entry(index).or_default().2.push_str(&partial_json);
+                            }
+                        }
+                    }
+                    let tool_calls = calls
+                        .into_iter()
+                        .map(|(_, (id, name, arguments))| ResolvedToolCall {
+                            id,
+                            name,
+                            arguments: serde_json::from_str(&arguments)
+                                .unwrap_or(Value::String(arguments)),
+                        })
+                        .collect();
+                    (text, tool_calls, usage)
+                }
+            };
+            let cost = estimate_turn_cost(&ChatOutcome {
+                text: String::new(),
+                usage,
+                model,
+            })
+            .0;
+            Ok(ModelTurn {
+                text,
+                tool_calls,
+                usage,
+                cost,
+            })
+        })
+    }
+}
+
+/// One registered-but-unanswered worker permission request (§10.4.2).
+struct PendingApproval {
+    worker_id: String,
+    tool: String,
+    target: String,
+    requested_at_ms: u64,
+    sender: oneshot::Sender<ApprovalDecision>,
+}
+
+/// The shared approval registry keyed by request id (stable `perm-N` ids are
+/// what the TUI sends back in `permission_decision.target`).
+#[derive(Default)]
+struct PendingApprovals {
+    requests: BTreeMap<String, PendingApproval>,
+    next_id: u64,
+}
+
+/// Internal worker-to-processor events: a worker wants its pending permission
+/// republished, or a worker finished and its report must reach the transcript.
+enum WorkerEvent {
+    PermissionRequested,
+    Finished(Box<WorkerReport>),
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
+/// Project the currently-pending approvals into secret-free `PermissionInput`
+/// entries (status `pending`) for the renderer's permission overlay.
+fn pending_permission_inputs(pending: &Mutex<PendingApprovals>) -> Vec<PermissionInput> {
+    let guard = pending.lock().unwrap();
+    guard
+        .requests
+        .iter()
+        .map(|(id, request)| PermissionInput {
+            id: Some(id.clone()),
+            tool: Some(request.tool.clone()),
+            action: Some("request".to_owned()),
+            resource: Some(request.target.clone()),
+            reason: Some(format!(
+                "worker {} wants to use {} on {}",
+                request.worker_id, request.tool, request.target
+            )),
+            status: Some("pending".to_owned()),
+            requested_at_ms: Some(request.requested_at_ms),
+            expires_at_ms: None,
+            task_id: Some(request.worker_id.clone()),
+            agent_id: Some(request.worker_id.clone()),
+        })
+        .collect()
+}
+
+/// Split a composer submission into its slash command and argument, mirroring
+/// the dispatcher's parsing (without the leading `/`).  Returns `None` for
+/// non-slash input.
+fn slash_command(text: &str) -> Option<(&str, &str)> {
+    let rest = text.trim().strip_prefix('/')?;
+    let mut tokens = rest.splitn(2, char::is_whitespace);
+    let command = tokens.next().unwrap_or("").trim();
+    let argument = tokens.next().map(str::trim).unwrap_or("");
+    Some((command, argument))
+}
+
+/// Compact, secret-free rendering of a finished worker report for the
+/// transcript (§10.4.5).
+fn worker_report_text(report: &WorkerReport) -> String {
+    let mut lines = vec![format!(
+        "worker {}: {} in {:.1}s",
+        report.id,
+        match report.status {
+            WorkerStatus::Success => "done",
+            WorkerStatus::Failed => "failed",
+            WorkerStatus::Cancelled => "cancelled",
+            WorkerStatus::Timeout => "timed out",
+        },
+        report.elapsed_ms as f64 / 1000.0
+    )];
+    if !report.summary.is_empty() {
+        lines.push(format!("  summary: {}", report.summary));
+    }
+    if !report.files_read.is_empty() {
+        lines.push(format!("  read: {}", report.files_read.join(", ")));
+    }
+    if !report.files_changed.is_empty() {
+        lines.push(format!("  changed: {}", report.files_changed.join(", ")));
+    }
+    if !report.commands_run.is_empty() {
+        let commands = report
+            .commands_run
+            .iter()
+            .map(|run| run.command.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("  commands: {commands}"));
+    }
+    if !report.deviations.is_empty() {
+        lines.push(format!("  deviations: {}", report.deviations.join("; ")));
+    }
+    if !report.risks.is_empty() {
+        lines.push(format!("  risks: {}", report.risks.join("; ")));
+    }
+    lines.push(format!(
+        "  usage: ↑{} ↓{} · ${:.6}",
+        report.usage.input_tokens, report.usage.output_tokens, report.usage.cost
+    ));
+    lines.join("\n")
+}
+
+/// The interactive approval gate for worker tool calls (§10.4.2).  A worker
+/// registering an approval publishes a pending request and waits on a oneshot
+/// that the processor loop resolves from the TUI's `permission_decision`.
+struct TuiApprovalGate {
+    pending: Arc<Mutex<PendingApprovals>>,
+    worker_event_tx: mpsc::UnboundedSender<WorkerEvent>,
+}
+
+impl ApprovalGate for TuiApprovalGate {
+    fn decide(&self, request: ApprovalRequest) -> DecisionFuture {
+        let rx = {
+            let mut pending = self.pending.lock().unwrap();
+            let id = format!("perm-{}", pending.next_id);
+            pending.next_id += 1;
+            let (sender, receiver) = oneshot::channel();
+            pending.requests.insert(
+                id,
+                PendingApproval {
+                    worker_id: request.worker_id,
+                    tool: request.tool,
+                    target: request.target,
+                    requested_at_ms: now_ms(),
+                    sender,
+                },
+            );
+            receiver
+        };
+        let _ = self.worker_event_tx.send(WorkerEvent::PermissionRequested);
+        Box::pin(async move { rx.await.unwrap_or(ApprovalDecision::Deny) })
+    }
+}
+
+/// Monotonic worker id source (session-local; resets on each TUI launch).
+static NEXT_WORKER_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Resolve the active provider into a worker model client, build an ownership
+/// guard around the launch directory, and spawn the agent on the bounded pool.
+/// Returns the transcript confirmation line; the report arrives later through
+/// `worker_event_tx` as [`WorkerEvent::Finished`].
+fn spawn_worker(
+    task: &str,
+    tier: PermissionTier,
+    pending: Arc<Mutex<PendingApprovals>>,
+    worker_event_tx: mpsc::UnboundedSender<WorkerEvent>,
+    pool: WorkerPool,
+) -> Result<String> {
+    let settings = load_native_settings()?;
+    let client = TransportModelClient::resolve(&settings)?;
+    let worker_id = format!("worker-{}", NEXT_WORKER_ID.fetch_add(1, Ordering::SeqCst));
+    let gate = TuiApprovalGate {
+        pending: pending.clone(),
+        worker_event_tx: worker_event_tx.clone(),
+    };
+    let scope = WorkerScope::all();
+    let config_home = native_settings_path()?
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow!("MindCode config home is unavailable"))?;
+    let guard = OwnershipGuard::new(
+        env::current_dir().map_err(anyhow::Error::msg)?,
+        config_home,
+        tier,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let agent = Arc::new(WorkerAgent::new(
+        worker_id.clone(),
+        Arc::new(client),
+        Arc::new(gate),
+        scope,
+        guard,
+    ));
+    let task = task.to_owned();
+    let confirmation = format!("spawned {worker_id}: {task}");
+    let cancel = CancellationToken::new();
+    tokio::spawn(async move {
+        let run_cancel = cancel.clone();
+        let outcome = pool
+            .run(run_cancel, {
+                let task = task.clone();
+                let cancel = cancel.clone();
+                let agent = Arc::clone(&agent);
+                move || {
+                    let task = task.clone();
+                    let cancel = cancel.clone();
+                    let agent = Arc::clone(&agent);
+                    async move { agent.run(&task, cancel).await }
+                }
+            })
+            .await;
+        let report = match outcome {
+            PoolOutcome {
+                report: Some(report),
+                ..
+            } => report,
+            PoolOutcome {
+                cancelled: true, ..
+            } => WorkerReport::cancelled(worker_id.clone()),
+            _ => WorkerReport::timed_out(worker_id.clone()),
+        };
+        let _ = worker_event_tx.send(WorkerEvent::Finished(Box::new(report)));
+    });
+    Ok(confirmation)
 }
 
 /// CLI wrapper around [`chat_completion_text`]: stream a completion to stdout,
@@ -4133,7 +4675,7 @@ mod tests {
     fn tui_snapshot_keeps_hint_until_first_turn() {
         with_sandbox_env(|dir| {
             seed_builtin_active(dir);
-            let empty = tui_snapshot(&[], SessionStats::default());
+            let empty = tui_snapshot(&[], SessionStats::default(), &[]);
             assert_eq!(empty.transcript.len(), 1);
             let TranscriptInput::Entry { role, text, .. } = &empty.transcript[0] else {
                 panic!("expected hint entry");
@@ -4144,7 +4686,7 @@ mod tests {
 
             let mut transcript = TuiTranscript::default();
             transcript.push("user", "hi");
-            let populated = tui_snapshot(&transcript.entries, SessionStats::default());
+            let populated = tui_snapshot(&transcript.entries, SessionStats::default(), &[]);
             assert_eq!(populated.transcript.len(), 1);
         });
     }
@@ -4157,7 +4699,7 @@ mod tests {
             // the native TUI is always the writer, otherwise the composer is
             // rendered read-only and input is rejected.
             assert_eq!(
-                tui_snapshot(&[], SessionStats::default())
+                tui_snapshot(&[], SessionStats::default(), &[])
                     .writer
                     .mode
                     .as_deref(),
@@ -4440,6 +4982,77 @@ mod tests {
         });
     }
 
+    #[test]
+    fn slash_command_parses_work_and_ignores_plain_input() {
+        assert_eq!(
+            slash_command("/work migrate the crate"),
+            Some(("work", "migrate the crate"))
+        );
+        assert_eq!(slash_command(" /work  x "), Some(("work", "x")));
+        assert_eq!(
+            slash_command("/permissions workspace"),
+            Some(("permissions", "workspace"))
+        );
+        assert_eq!(slash_command("plain prompt"), None);
+        assert_eq!(slash_command(""), None);
+    }
+
+    #[test]
+    fn pending_permission_inputs_projects_registered_requests_as_pending() {
+        let pending = Arc::new(Mutex::new(PendingApprovals::default()));
+        let (sender, _receiver) = oneshot::channel();
+        pending.lock().unwrap().requests.insert(
+            "perm-0".to_owned(),
+            PendingApproval {
+                worker_id: "worker-1".to_owned(),
+                tool: "shell".to_owned(),
+                target: "cargo test".to_owned(),
+                requested_at_ms: 42,
+                sender,
+            },
+        );
+        let inputs = pending_permission_inputs(&pending);
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].id.as_deref(), Some("perm-0"));
+        assert_eq!(inputs[0].status.as_deref(), Some("pending"));
+        assert_eq!(inputs[0].tool.as_deref(), Some("shell"));
+        // Secret-free: no credential material can appear in a permission prompt.
+        assert!(!inputs[0].reason.as_deref().unwrap_or("").contains("sk-"));
+    }
+
+    #[test]
+    fn worker_report_text_renders_a_structured_secret_free_summary() {
+        use mindcode_worker::CommandRun;
+        let report = WorkerReport {
+            id: "worker-7".into(),
+            status: WorkerStatus::Success,
+            summary: "migrated".into(),
+            files_read: vec!["src/a.rs".into()],
+            files_changed: vec!["src/b.rs".into()],
+            commands_run: vec![CommandRun {
+                command: "cargo fmt".into(),
+                exit_code: Some(0),
+                output_len: 12,
+            }],
+            deviations: vec!["none".into()],
+            risks: Vec::new(),
+            usage: WorkerUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cached_tokens: 0,
+                cost: 0.25,
+            },
+            elapsed_ms: 1500,
+            ..Default::default()
+        };
+        let text = worker_report_text(&report);
+        assert!(text.contains("worker-7"));
+        assert!(text.contains("done in 1.5s"));
+        assert!(text.contains("↑10 ↓5"));
+        assert!(text.contains("changed: src/b.rs"));
+        assert!(!text.contains("sk-"));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn tui_control_server_serves_snapshot_over_a_unix_socket() {
         use mindcode_protocol::ui::{
@@ -4551,7 +5164,7 @@ mod tests {
                 .unwrap();
                 server.start().await.unwrap();
                 let _ = server
-                    .publish(&tui_snapshot(&[], SessionStats::default()))
+                    .publish(&tui_snapshot(&[], SessionStats::default(), &[]))
                     .await;
 
                 let processor_server = server.clone();
@@ -4565,6 +5178,7 @@ mod tests {
                                 .publish(&tui_snapshot(
                                     &transcript.entries,
                                     SessionStats::default(),
+                                    &[],
                                 ))
                                 .await;
                         }
