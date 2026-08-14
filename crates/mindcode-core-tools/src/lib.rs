@@ -3,6 +3,7 @@
 mod error;
 mod git;
 mod js_runtime;
+mod plugin;
 mod process;
 mod redact;
 mod sandbox;
@@ -14,6 +15,9 @@ pub use git::{
     GitStatusRequest, GitStatusResult,
 };
 pub use js_runtime::{JsRuntime, JsRuntimeKind};
+pub use plugin::{
+    run_plugin_sandboxed, PluginError, PluginManifest, ALLOWED_HOOKS, PLUGIN_API_VERSION,
+};
 pub use process::{process_run, ProcessRunRequest, ProcessRunResult, ResourceLimits};
 pub use redact::redact_secrets;
 pub use sandbox::{
