@@ -13,11 +13,16 @@ use mindcode_provider::{
     default_store_path, load_store, save_store, CredentialRef, ModelId, Protocol, ProviderConfig,
     ProviderId, SecretKey,
 };
-use mindcode_settings::{default_settings_path, load_settings, save_settings, NativeSettings};
+use mindcode_settings::{
+    default_settings_path, load_settings, save_settings, CredState, NativeSettings,
+};
 use mindcode_transport::{
     ChatCompletionsRequest, ChatMessage, ChatUsage, MessagesRequest, ToolSpec, Transport,
 };
 use mindcode_tui::TuiConfig;
+use mindcode_tui::debug_visual::{sanitize_frame_text, FrameDump, FrameRecorder};
+use mindcode_tui::terminal_caps::{terminal_setup_report, TerminalProbe};
+use mindcode_tui::ui::{default_graphite_sakura, generate_palette, score_palette, PaletteSpec, Rgb, Role};
 use mindcode_tui_server::{
     ConnectionInput, ControlServer, ControlServerConfig, InputHandler, PermissionInput,
     ProjectionInput, ProviderInput, StatusInput, TelemetryInput, TranscriptInput, WriterInput,
@@ -26,9 +31,9 @@ use mindcode_vexzy::{
     eligible_worker_models, parse_vexzy_model_catalog, VexzyModel, VexzyModelCatalog, WorkerEffort,
 };
 use mindcode_worker::{
-    ApprovalDecision, ApprovalGate, ApprovalRequest, DecisionFuture, ModelClient, ModelTurn,
-    OwnershipGuard, PermissionTier, PoolOutcome, ResolvedToolCall, WorkerAgent, WorkerError,
-    WorkerPool, WorkerReport, WorkerResult, WorkerScope, WorkerStatus, WorkerUsage,
+    ApprovalDecision, ApprovalGate, ApprovalRequest, DecisionFuture, HookSet, ModelClient,
+    ModelTurn, OwnershipGuard, PermissionTier, PoolOutcome, ResolvedToolCall, WorkerAgent,
+    WorkerError, WorkerPool, WorkerReport, WorkerResult, WorkerScope, WorkerStatus, WorkerUsage,
     DEFAULT_MAX_CONCURRENT,
 };
 use mindcoded::{Daemon, DaemonConfig};
@@ -60,10 +65,11 @@ const SETTINGS_KEY_CONFIRMATION: &str = "configured";
 /// Minimum delay between TUI snapshot republishes while a chat turn streams;
 /// tokens still accumulate locally between publishes.
 const STREAM_REPUBLISH_INTERVAL: Duration = Duration::from_millis(120);
-/// Default conversation-memory budget in estimated tokens (§10.1).  The
+/// Default conversation-memory budget in estimated tokens (§11.3).  The
 /// estimate is a cheap local heuristic (`chars/4`); real usage comes from
-/// the provider response.
-const CONTEXT_TOKEN_BUDGET: usize = 16_000;
+/// the provider response.  The base is 200K always; a settings override may
+/// raise or lower it.
+const CONTEXT_TOKEN_BUDGET: usize = 200_000;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -1117,6 +1123,192 @@ fn provider_credential_configured(provider: &ProviderConfig) -> bool {
         .is_ok()
 }
 
+/// Secret-free credential source for `/status` (§12.3): `env`, `store`, or
+/// `missing`. The credential value is never read into this string.
+fn credential_source(provider: &ProviderConfig) -> &'static str {
+    let name = provider.credential.name();
+    if env::var(name).map(|value| !value.is_empty()).unwrap_or(false) {
+        return "env";
+    }
+    match native_store_path().ok().and_then(|path| load_store(&path).ok()) {
+        Some(store) if store.resolve(&provider.credential, |_| None).is_ok() => "store",
+        _ => "missing",
+    }
+}
+
+/// The onboarding state (§12.4) derivable without a network call: `Present`
+/// when a credential resolves, otherwise `Absent`. `Verified`/`Stale`/
+/// `Rejected` require a provider round-trip and are folded in by the transport
+/// error path.
+fn credential_state(provider: &ProviderConfig) -> CredState {
+    if provider_credential_configured(provider) {
+        CredState::Present
+    } else {
+        CredState::Absent
+    }
+}
+
+/// Secret-free `/status` transcript line (§12.3): session usage, cost, and the
+/// active provider's credential source + context budget. No credential value.
+fn status_line(stats: &SessionStats) -> String {
+    let settings = load_native_settings().ok();
+    let provider = settings
+        .as_ref()
+        .and_then(|settings| settings.active_provider_config())
+        .cloned();
+    let budget = settings
+        .as_ref()
+        .and_then(|settings| settings.context_token_budget)
+        .map(|budget| budget.to_string())
+        .unwrap_or_else(|| "200000".to_owned());
+    let mut lines = vec![
+        format!(
+            "session: {} in · {} out tokens",
+            stats.input_tokens, stats.output_tokens
+        ),
+        format!("cost: ${:.4} (saved ${:.4})", stats.cost, stats.savings),
+        format!("context budget: {budget} tokens (base 200000)"),
+    ];
+    match provider {
+        Some(provider) => lines.push(format!(
+            "provider: {} ({} · {} · credential: {}/{})",
+            provider.id,
+            provider.protocol,
+            provider.base_url,
+            credential_source(&provider),
+            credential_state(&provider).as_str(),
+        )),
+        None => lines.push("provider: none configured".to_owned()),
+    }
+    lines.join("\n")
+}
+
+/// Effective `/colors` palette (§11.6): the frozen default merged with any
+/// secret-free `color_overrides` from settings.
+fn effective_palette(settings: &NativeSettings) -> PaletteSpec {
+    let mut palette = default_graphite_sakura();
+    if let Some(overrides) = &settings.color_overrides {
+        for (label, hex) in overrides {
+            let (Some(role), Ok(color)) = (Role::from_label(label), Rgb::from_hex(hex)) else {
+                continue;
+            };
+            palette = palette.with_override(role, color);
+        }
+    }
+    palette
+}
+
+/// `/colors` command (§11.6): `list` | `set <role> <#rrggbb>` | `generate
+/// <#rrggbb>` | `harmony` | `export` | `reset`.  All output is secret-free;
+/// overrides are metadata stored in `settings.json`.
+fn colors_command(argument: &str) -> Result<String> {
+    let mut tokens = argument.split_whitespace();
+    let sub = tokens.next().unwrap_or("list");
+    let mut settings = load_native_settings()?;
+    match sub {
+        "list" => {
+            let palette = effective_palette(&settings);
+            let mut lines = vec!["palette roles:".to_owned()];
+            for role in Role::ALL {
+                lines.push(format!("  {:<15} {}", role.label(), palette.color(role).to_hex()));
+            }
+            Ok(lines.join("\n"))
+        }
+        "generate" => {
+            let Some(hex) = tokens.next() else {
+                return Err(anyhow!("usage: /colors generate <#rrggbb>"));
+            };
+            let seed = Rgb::from_hex(hex).map_err(anyhow::Error::msg)?;
+            let palette = generate_palette(seed);
+            let report = score_palette(&palette);
+            let mut lines = vec![format!("generated from {}:", seed.to_hex()), palette.to_toml()];
+            lines.push(format!(
+                "harmony: {:.3} (readability {:.2}, distinctness {:.2}, colourblind {:.2})",
+                report.score, report.readability, report.distinctness, report.colourblind
+            ));
+            Ok(lines.join("\n"))
+        }
+        "harmony" => {
+            let palette = effective_palette(&settings);
+            let report = score_palette(&palette);
+            Ok(format!(
+                "harmony {:.3}: readability {:.2} · distinctness {:.2} · hue {:.2} · chroma {:.2} · colourblind {:.2}",
+                report.score,
+                report.readability,
+                report.distinctness,
+                report.hue_harmony,
+                report.chroma_coherence,
+                report.colourblind,
+            ))
+        }
+        "export" => Ok(effective_palette(&settings).to_toml()),
+        "reset" => {
+            settings.color_overrides = None;
+            save_native_settings(&settings)?;
+            Ok("palette reset to the default".to_owned())
+        }
+        "set" => {
+            let Some(label) = tokens.next() else {
+                return Err(anyhow!("usage: /colors set <role> <#rrggbb>"));
+            };
+            let Some(hex) = tokens.next() else {
+                return Err(anyhow!("usage: /colors set <role> <#rrggbb>"));
+            };
+            let role = Role::from_label(label).ok_or_else(|| anyhow!("unknown role '{label}'"))?;
+            let color = Rgb::from_hex(hex).map_err(anyhow::Error::msg)?;
+            settings
+                .color_overrides
+                .get_or_insert_with(Default::default)
+                .insert(role.label().to_owned(), color.to_hex());
+            save_native_settings(&settings)?;
+            Ok(format!("{} set to {}", role.label(), color.to_hex()))
+        }
+        other => Err(anyhow!(
+            "unknown /colors subcommand '{other}' (list|set|generate|harmony|export|reset)"
+        )),
+    }
+}
+
+/// `/debug-visual` frame dump (§11.8): record the current transcript as one
+/// sanitized frame into `~/.config/mindcode/debug/frames-<session>.jsonl` and
+/// report the path.  The file is only created when the command runs.
+fn debug_visual_dump(session_id: &str, transcript: &TuiTranscript) -> Result<String> {
+    let dir = sessions_dir()?.parent().map(Path::to_path_buf).ok_or_else(|| {
+        anyhow!("MindCode config home is unavailable")
+    })?;
+    let path = dir.join("debug").join(format!("frames-{session_id}.jsonl"));
+    let render_text = transcript
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptInput::Entry { role, text, .. } => {
+                Some(format!("{}: {}", role, text.trim_end()))
+            }
+            TranscriptInput::Block(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut recorder = FrameRecorder::new(100);
+    recorder.record(FrameDump {
+        frame_id: 0,
+        timestamp_ms: now_unix_millis(),
+        terminal_size: None,
+        render_text: sanitize_frame_text(&render_text),
+        state: serde_json::json!({ "session_id": session_id, "entries": transcript.entries.len() }),
+        timing_ms: 0,
+        anomalies: Vec::new(),
+    });
+    recorder.write_jsonl(&path).map_err(anyhow::Error::msg)?;
+    Ok(format!("frame dump appended: {}", path.display()))
+}
+
+fn now_unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Secret-free initial snapshot published once on start so the renderer has
 /// state to show before any live session data exists.
 fn tui_initial_input() -> ProjectionInput {
@@ -1243,6 +1435,33 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
                         // `/work` spawns a worker agent and returns immediately;
                         // it needs the server + approval registry, so it is
                         // handled here rather than in the generic dispatcher.
+                        // `/status` shows session usage + provider credential
+                        // status (§12.3); handled here for access to the stats.
+                        if let Some(("status", _)) = slash_command(&text) {
+                            let current = *processor_stats.lock().unwrap();
+                            transcript.push("system", status_line(&current));
+                            let current = *processor_stats.lock().unwrap();
+                            let permissions = pending_permission_inputs(&pending);
+                            let _ = processor_server
+                                .publish(&tui_snapshot(&transcript.entries, current, &permissions))
+                                .await;
+                            continue;
+                        }
+                        // `/debug-visual` dumps the current transcript as a
+                        // sanitized frame for offline visual debugging (§11.8).
+                        if let Some(("debug-visual", _)) = slash_command(&text) {
+                            let message = match debug_visual_dump(&processor_session_id, &transcript) {
+                                Ok(ok) => ok,
+                                Err(error) => format!("debug dump failed: {error:#}"),
+                            };
+                            transcript.push("system", message);
+                            let current = *processor_stats.lock().unwrap();
+                            let permissions = pending_permission_inputs(&pending);
+                            let _ = processor_server
+                                .publish(&tui_snapshot(&transcript.entries, current, &permissions))
+                                .await;
+                            continue;
+                        }
                         if let Some(("work", task)) = slash_command(&text) {
                             if task.is_empty() {
                                 transcript.push("system", "usage: /work <task>");
@@ -1511,13 +1730,17 @@ fn save_session(
             _ => None,
         })
         .collect();
-    let updated_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
+    let message_count = messages.len();
+    let now = now_unix_seconds();
+    let created_at = existing_created_at(&path).unwrap_or(now);
+    let title = session_title_from_transcript(session_id, transcript);
     let value = serde_json::json!({
         "id": session_id,
-        "updated_at": updated_at,
+        // Auto-name from the first user prompt (§11.2); metadata only, no
+        // message text is duplicated outside `messages`.
+        "title": title,
+        "created_at": created_at,
+        "updated_at": now,
         "messages": messages,
         // Secret-free counters so a resumed session keeps its running totals
         // (§10.3); the per-turn `last_*` values are transient and not stored.
@@ -1529,6 +1752,7 @@ fn save_session(
         },
     });
     fs::write(&path, serde_json::to_vec_pretty(&value)?)?;
+    update_session_index(session_id, &title, created_at, now, message_count)?;
     Ok(())
 }
 
@@ -1582,6 +1806,106 @@ fn load_session(session_id: &str) -> (TuiTranscript, SessionStats) {
     (transcript, stats)
 }
 
+fn now_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn existing_created_at(path: &Path) -> Option<u64> {
+    let raw = fs::read(path).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    value.get("created_at").and_then(serde_json::Value::as_u64)
+}
+
+/// Auto-name for a session (§11.2): the first user prompt trimmed to 60 chars,
+/// or a stable `session-<id>` fallback when there is no user turn yet.
+fn session_title_from_transcript(session_id: &str, transcript: &TuiTranscript) -> String {
+    for entry in &transcript.entries {
+        if let TranscriptInput::Entry { role, text, .. } = entry {
+            if role == "user" && !text.trim().is_empty() {
+                let trimmed = text.trim();
+                let mut title: String = trimmed.chars().take(60).collect();
+                if trimmed.chars().count() > 60 {
+                    title.push('…');
+                }
+                return title;
+            }
+        }
+    }
+    format!("session-{session_id}")
+}
+
+/// Maintain the secret-free session index (`sessions/index.json`, §11.2): one
+/// metadata row per session, no message text and no credentials.
+fn update_session_index(
+    session_id: &str,
+    title: &str,
+    created_at: u64,
+    updated_at: u64,
+    message_count: usize,
+) -> Result<(), anyhow::Error> {
+    let dir = sessions_dir()?;
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("index.json");
+    let mut entries: Vec<serde_json::Value> = match fs::read_to_string(&path) {
+        Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    let provider_id = load_native_settings()
+        .ok()
+        .and_then(|settings| settings.active_provider)
+        .map(|id| id.to_string());
+    entries.retain(|entry| {
+        entry.get("id").and_then(serde_json::Value::as_str) != Some(session_id)
+    });
+    entries.push(serde_json::json!({
+        "id": session_id,
+        "title": title,
+        "provider_id": provider_id,
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "message_count": message_count,
+    }));
+    entries.sort_by(|a, b| {
+        let a = a.get("updated_at").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let b = b.get("updated_at").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        b.cmp(&a)
+    });
+    fs::write(&path, serde_json::to_vec_pretty(&entries)?)?;
+    Ok(())
+}
+
+/// Render the session index as a `/sessions` transcript list (§11.2).
+fn sessions_index_summary() -> Result<Option<String>, anyhow::Error> {
+    let path = sessions_dir()?.join("index.json");
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(_) => return Ok(None),
+    };
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap_or_default();
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let lines = entries
+        .iter()
+        .filter_map(|entry| {
+            let id = entry.get("id").and_then(serde_json::Value::as_str)?;
+            let title = entry
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(id);
+            let count = entry
+                .get("message_count")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            Some(format!("- {title} [{id}] ({count} messages)"))
+        })
+        .collect::<Vec<_>>();
+    Ok(Some(format!("sessions:\n{}", lines.join("\n"))))
+}
+
 const TUI_HELP: &str = "\
 Commands (type and press Enter):
   <text>                chat with the active provider
@@ -1596,12 +1920,17 @@ Commands (type and press Enter):
   /allowlist <id> <m,…> set a profile's Worker model allowlist (empty clears)
   /settings             open the settings popup
   /permissions [<tier>] show or set worker access (ask-everything|workspace|full-access)
-  /work <task>          spawn a worker agent (bounded pool, approval-gated tools)
+  /work <task>          run a task with a worker agent (asks before risky tools)
+  /status               show session usage and provider status
   /auth                 show active provider auth status
   /eligible             show eligible Worker models of the active provider
   /doctor               native health check
   /setup-token          credential setup instructions
   /update               update instructions
+  /sessions             list saved sessions (auto-named)
+  /colors <sub>          list/set/generate/harmony/export/reset palette
+  /terminal-setup       diagnose Shift+Enter / kitty keyboard support
+  /debug-visual         dump a sanitized frame for offline visual debugging
   /help                 show this help
   Ctrl+P                provider setup screen (add / remove / switch)";
 
@@ -1641,6 +1970,25 @@ async fn dispatch_tui_input_streaming(
     match command {
         "help" => {
             transcript.push("system", TUI_HELP);
+            Ok((true, None))
+        }
+        "sessions" => {
+            let message = match sessions_index_summary() {
+                Ok(Some(text)) => text,
+                Ok(None) => "no sessions found (type a message to start one)".to_owned(),
+                Err(error) => format!("sessions unavailable: {error:#}"),
+            };
+            transcript.push("system", message);
+            Ok((true, None))
+        }
+        "colors" => {
+            let message = colors_command(argument)?;
+            transcript.push("system", message);
+            Ok((true, None))
+        }
+        "terminal-setup" => {
+            let probe = TerminalProbe::from_env();
+            transcript.push("system", terminal_setup_report(&probe));
             Ok((true, None))
         }
         "model" => {
@@ -1842,7 +2190,7 @@ async fn chat_tui_turn(
     transcript.push("assistant", String::new());
     // Send the dialog history (trimmed to the token budget) so the model
     // sees prior turns; system/UI lines never enter the request (§10.1).
-    let messages = conversation_messages(&transcript.entries, CONTEXT_TOKEN_BUDGET);
+    let messages = conversation_messages(&transcript.entries, effective_context_budget());
     let outcome = chat_completion_with_chunks(&messages, None, None, |delta| {
         transcript.append_last(delta);
         on_progress(transcript);
@@ -1924,6 +2272,16 @@ fn truncate_to_estimate(text: String, max_estimate: usize) -> String {
         truncated.push('…');
     }
     truncated
+}
+
+/// Resolve the conversation-memory budget: the settings override when present,
+/// otherwise the 200K base (§11.3).  An unreadable settings file falls back to
+/// the base rather than failing the turn.
+fn effective_context_budget() -> usize {
+    load_native_settings()
+        .ok()
+        .and_then(|settings| settings.context_token_budget)
+        .unwrap_or(CONTEXT_TOKEN_BUDGET)
 }
 
 /// Secret-free settings summary rendered as a `/settings` transcript line.
@@ -2830,19 +3188,24 @@ fn spawn_worker(
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| anyhow!("MindCode config home is unavailable"))?;
-    let guard = OwnershipGuard::new(
-        env::current_dir().map_err(anyhow::Error::msg)?,
-        config_home,
-        tier,
-    )
-    .map_err(anyhow::Error::msg)?;
-    let agent = Arc::new(WorkerAgent::new(
-        worker_id.clone(),
-        Arc::new(client),
-        Arc::new(gate),
-        scope,
-        guard,
-    ));
+    let cwd = env::current_dir().map_err(anyhow::Error::msg)?;
+    // §11.4: shell hooks live globally and project-locally; project-local
+    // scripts shadow the global ones by name.
+    let hooks = HookSet {
+        global: Some(config_home.join("hooks")),
+        project: Some(cwd.join(".mindcode").join("hooks")),
+    };
+    let guard = OwnershipGuard::new(cwd, config_home, tier).map_err(anyhow::Error::msg)?;
+    let agent = Arc::new(
+        WorkerAgent::new(
+            worker_id.clone(),
+            Arc::new(client),
+            Arc::new(gate),
+            scope,
+            guard,
+        )
+        .with_hooks(hooks),
+    );
     let task = task.to_owned();
     let confirmation = format!("spawned {worker_id}: {task}");
     let cancel = CancellationToken::new();
@@ -3982,7 +4345,7 @@ mod tests {
                 text: String::new(),
             },
         ];
-        let messages = conversation_messages(&entries, 16_000);
+        let messages = conversation_messages(&entries, CONTEXT_TOKEN_BUDGET);
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[0].content, "hello");
@@ -5056,6 +5419,39 @@ mod tests {
                 };
                 assert!(text.contains("unknown command"));
             });
+        });
+    }
+
+    /// §11.5 MESSAGE_VOICE: user-facing strings stay in the user's terms.  The
+    /// internal machinery (approval gates, dispatch, tiers) keeps its precise
+    /// names in logs and code, but the transcript must not leak them.
+    #[test]
+    fn user_facing_strings_avoid_jargon() {
+        // `status_line` reads settings, so pin it to a sandbox to avoid leaking
+        // a real profile id/base_url into the jargon assertion.
+        with_sandbox_env(|_dir| {
+            const FORBIDDEN: &[&str] = &["gate", "armed", "dispatch", "continuation", "flag"];
+            let user_facing = [
+                TUI_HELP.to_owned(),
+                status_line(&SessionStats::default()),
+                worker_report_text(&WorkerReport {
+                    status: WorkerStatus::Success,
+                    summary: "fixed the parser bug".to_owned(),
+                    ..Default::default()
+                }),
+            ];
+            for text in user_facing {
+                let lower = text.to_lowercase();
+                for word in FORBIDDEN {
+                    let contains_word = lower
+                        .split(|character: char| !character.is_alphanumeric())
+                        .any(|part| part == *word);
+                    assert!(
+                        !contains_word,
+                        "user-facing text leaks internal jargon '{word}': {text}"
+                    );
+                }
+            }
         });
     }
 
