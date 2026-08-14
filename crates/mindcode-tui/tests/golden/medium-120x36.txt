@@ -1,5 +1,5 @@
 size 120x36
-style b1bb52c43d662b6b
+style 1c68c97aefdd20cb
 | ❀ MindCode                                                                     VEXZY · gpt-5.6-luna · high · connected |
 |                                                                                                                        |
 |────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────|
@@ -32,7 +32,7 @@ style b1bb52c43d662b6b
 |│                                                                                                                      │|
 |│                                                                                                                      │|
 |╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯|
-|╭ Composer · Enter send · Shift+Enter newline ─────────────────────────────────────────────────────────────────────────╮|
-|│> Type a prompt or / command…                                                                                         │|
+|╭ Composer · VEXZY · gpt-5.6-luna · Enter send · Shift+Enter newline ──────────────────────────────────────────────────╮|
+|│> Type a prompt or / command — /model /settings /help /work                                                           │|
 |╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯|
-| Enter send · Shift+Enter newline · Ctrl+P providers · /help commands                                  Σ $4.42 ·  VEXZY |
+| Enter send · Shift+Enter newline · Ctrl+P providers · /model /settings /help /work                    Σ $4.42 ·  VEXZY |

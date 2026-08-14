@@ -82,6 +82,8 @@ pub enum OverlayView {
     Help,
     Permission,
     Providers,
+    Models,
+    Settings,
     Reconnect,
 }
 
@@ -104,6 +106,7 @@ pub struct RenderState<'a> {
     pub selected_change: Option<usize>,
     pub provider_selection: usize,
     pub provider_form: Option<&'a ProviderForm>,
+    pub model_selection: usize,
 }
 
 struct TranscriptView<'a> {
@@ -994,17 +997,34 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &RenderState<'_>) {
         .snapshot
         .is_some_and(|snapshot| snapshot.writer.mode == "observer");
     let title = if observer {
-        "Composer · read-only observer · Request control"
+        "Composer · read-only observer · Request control".to_owned()
     } else {
-        "Composer · Enter send · Shift+Enter newline"
+        let provider = state
+            .snapshot
+            .and_then(|snapshot| snapshot.providers.iter().find(|provider| provider.active))
+            .map(|provider| provider.name.as_str())
+            .filter(|name| !name.is_empty());
+        let model = state
+            .snapshot
+            .map(|snapshot| snapshot.telemetry.model.as_str())
+            .filter(|model| !model.is_empty());
+        match (provider, model) {
+            (Some(provider), Some(model)) => {
+                format!("Composer · {provider} · {model} · Enter send · Shift+Enter newline")
+            }
+            (Some(provider), None) => {
+                format!("Composer · {provider} · Enter send · Shift+Enter newline")
+            }
+            _ => "Composer · Enter send · Shift+Enter newline".to_owned(),
+        }
     };
-    let block = panel_block(title, state.focus == PanelFocus::Composer, theme);
+    let block = panel_block(&title, state.focus == PanelFocus::Composer, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let value = if observer {
         "Read-only — request writer control to send messages."
     } else if state.input.is_empty() {
-        "Type a prompt or / command…"
+        "Type a prompt or / command — /model /settings /help /work"
     } else {
         state.input
     };
@@ -1038,10 +1058,10 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &RenderState<'_>) {
     // token/cost counters for the last request and the whole session on the
     // right (§10.3).  The active provider is always shown; counters are
     // dropped (session sum first) when the hints + counters would overflow.
-    let hints = if area.width < 90 {
+    let hints = if area.width < 100 {
         " Enter send · Ctrl+P providers · /help "
     } else {
-        " Enter send · Shift+Enter newline · Ctrl+P providers · /help commands "
+        " Enter send · Shift+Enter newline · Ctrl+P providers · /model /settings /help /work "
     };
     let provider = snapshot
         .providers
@@ -1137,14 +1157,14 @@ fn render_overlay(frame: &mut Frame<'_>, state: &RenderState<'_>) {
         OverlayView::Activity => render_activity_overlay(frame, state),
         OverlayView::Palette => render_text_modal(
             frame,
-            "Command palette",
+            "Commands",
             &[
-                "/model  Select leader model",
-                "/agents  Agent team",
-                "/tasks  Shared task graph",
-                "/status  Session report",
-                "/copy  Copy latest response",
-                "/copycon  Copy handoff context",
+                "/model       pick the chat model (interactive)",
+                "/settings    open settings",
+                "/provider    manage provider profiles",
+                "/work        spawn a worker agent",
+                "/permissions worker access tier",
+                "/help        full command list",
             ],
             state,
         ),
@@ -1152,18 +1172,19 @@ fn render_overlay(frame: &mut Frame<'_>, state: &RenderState<'_>) {
             frame,
             "Keyboard help",
             &[
-                "Ctrl+K  Command palette",
-                "F1  Help",
-                "Tab  Move focus",
-                "Alt+1…5  Open view",
-                "Alt+Shift+Arrow  Resize panes",
-                "Ctrl+Q  Detach",
-                "Shift+Enter / Ctrl+J  New line",
+                "Enter  send · Shift+Enter / Ctrl+J  new line",
+                "Ctrl+P  provider profiles",
+                "Ctrl+K  commands",
+                "Ctrl+B  sidebar · Ctrl+I  inspector",
+                "Tab  move focus · Esc  close",
+                "Ctrl+C  interrupt · Ctrl+Q  close overlay",
             ],
             state,
         ),
         OverlayView::Permission => render_permission_overlay(frame, state),
         OverlayView::Providers => render_providers_overlay(frame, state),
+        OverlayView::Models => render_models_overlay(frame, state),
+        OverlayView::Settings => render_settings_overlay(frame, state),
         OverlayView::Reconnect => render_text_modal(
             frame,
             "Connection lost",
@@ -1329,6 +1350,162 @@ fn render_provider_modal_lines(frame: &mut Frame<'_>, area: Rect, theme: Theme, 
         .map(|value| Line::from(Span::styled(*value, theme.style(ColorToken::Text))))
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Interactive model picker opened by a bare `/model` submit.  Lists the
+/// active provider's selectable model ids, marks the current model, and lets
+/// the user choose with arrows + Enter.
+fn render_models_overlay(frame: &mut Frame<'_>, state: &RenderState<'_>) {
+    let area = centered_rect(
+        frame.area().width.min(64),
+        frame.area().height.saturating_sub(4).min(26),
+        frame.area(),
+    );
+    frame.render_widget(Clear, area);
+    let theme = state.theme;
+    let block = panel_block("Models", true, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(snapshot) = state.snapshot else {
+        render_provider_modal_lines(
+            frame,
+            inner,
+            theme,
+            &["No model data available.", "[Esc] Close"],
+        );
+        return;
+    };
+    let models = snapshot
+        .providers
+        .iter()
+        .find(|provider| provider.active)
+        .map(|provider| provider.allowlist.as_slice())
+        .unwrap_or(&[]);
+    if models.is_empty() {
+        render_provider_modal_lines(
+            frame,
+            inner,
+            theme,
+            &[
+                "No selectable models for the active provider.",
+                "Custom profiles fail closed on an empty allowlist.",
+                "Set one with /allowlist <id> <model,…>.",
+                "",
+                "[Esc] Close",
+            ],
+        );
+        return;
+    }
+    let current = snapshot.telemetry.model.as_str();
+    let mut lines = Vec::new();
+    for (index, model) in models.iter().enumerate() {
+        let selected = index == state.model_selection;
+        let marker = if selected { "▸" } else { " " };
+        let active = if model == current { "●" } else { " " };
+        let style = if selected {
+            theme.style(ColorToken::Accent)
+        } else if model == current {
+            theme.style(ColorToken::Text).add_modifier(Modifier::BOLD)
+        } else {
+            theme.style(ColorToken::Text)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker} {active} {model}"),
+            style,
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "[↑/↓] choose   [Enter] select   [Esc] close",
+        theme.style(ColorToken::Muted),
+    )));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Read-only settings popup opened by a `/settings` submit.  Rendered from the
+/// latest snapshot: active provider, worker model, effort lock, and the
+/// profile table with credential resolution — all secret-free.
+fn render_settings_overlay(frame: &mut Frame<'_>, state: &RenderState<'_>) {
+    let area = centered_rect(
+        frame.area().width.min(80),
+        frame.area().height.saturating_sub(4).min(32),
+        frame.area(),
+    );
+    frame.render_widget(Clear, area);
+    let theme = state.theme;
+    let block = panel_block("Settings", true, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(snapshot) = state.snapshot else {
+        render_provider_modal_lines(
+            frame,
+            inner,
+            theme,
+            &["No settings data available.", "[Esc] Close"],
+        );
+        return;
+    };
+    let active = snapshot.providers.iter().find(|provider| provider.active);
+    let model = snapshot.telemetry.model.as_str();
+    let model = if model.is_empty() { "not set" } else { model };
+    let effort = snapshot.telemetry.effort.as_str();
+    let effort = if effort.is_empty() { "off" } else { effort };
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Provider  ", theme.style(ColorToken::Muted)),
+            Span::styled(
+                active
+                    .map(|provider| provider.name.as_str())
+                    .unwrap_or("none"),
+                theme.style(ColorToken::Accent).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Model     ", theme.style(ColorToken::Muted)),
+            Span::styled(model, theme.style(ColorToken::Text)),
+        ]),
+        Line::from(vec![
+            Span::styled("Effort    ", theme.style(ColorToken::Muted)),
+            Span::styled(effort, theme.style(ColorToken::Text)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Profiles",
+            theme.style(ColorToken::Text).add_modifier(Modifier::BOLD),
+        )),
+    ];
+    if snapshot.providers.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (none configured)",
+            theme.style(ColorToken::Muted),
+        )));
+    }
+    for provider in &snapshot.providers {
+        let marker = if provider.active { "●" } else { " " };
+        let key_state = if provider.configured {
+            "key ✓"
+        } else {
+            "key ✗"
+        };
+        lines.push(Line::from(vec![
+            Span::raw(format!("  {marker} ")),
+            Span::styled(provider.id.as_str(), theme.style(ColorToken::Text)),
+            Span::styled(
+                format!("  {}", provider.protocol),
+                theme.style(ColorToken::Muted),
+            ),
+            Span::styled(format!("  {key_state}"), theme.style(ColorToken::Muted)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "[/provider] manage profiles   [/model] pick model   [/effort] lock   [/permissions] access tier   [Esc] close",
+        theme.style(ColorToken::Muted),
+    )));
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_activity_overlay(frame: &mut Frame<'_>, state: &RenderState<'_>) {

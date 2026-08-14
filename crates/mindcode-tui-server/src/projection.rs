@@ -14,8 +14,8 @@ use mindcode_protocol::ui::{
     UiTelemetrySnapshot, UiThinkingBlock, UiToolBlock, UiTranscriptBlock, UiTranscriptWindow,
     UiWorkspaceSnapshot, UiWriterState, UI_MAX_ACTIVITY, UI_MAX_ACTIVITY_ID_BYTES,
     UI_MAX_ACTIVITY_MESSAGE_BYTES, UI_MAX_AGENTS, UI_MAX_AGENT_ID_BYTES, UI_MAX_AGENT_NAME_BYTES,
-    UI_MAX_CODE_BYTES, UI_MAX_CONNECTION_BYTES, UI_MAX_DEPENDENCIES, UI_MAX_DIFF_BYTES,
-    UI_MAX_EFFORT_BYTES, UI_MAX_FILES, UI_MAX_FILE_PATH_BYTES, UI_MAX_ID_BYTES,
+    UI_MAX_ALLOWLIST, UI_MAX_CODE_BYTES, UI_MAX_CONNECTION_BYTES, UI_MAX_DEPENDENCIES,
+    UI_MAX_DIFF_BYTES, UI_MAX_EFFORT_BYTES, UI_MAX_FILES, UI_MAX_FILE_PATH_BYTES, UI_MAX_ID_BYTES,
     UI_MAX_LANGUAGE_BYTES, UI_MAX_MESSAGE_BYTES, UI_MAX_MODEL_BYTES, UI_MAX_PERMISSIONS,
     UI_MAX_PERMISSION_ID_BYTES, UI_MAX_PERMISSION_TEXT_BYTES, UI_MAX_PROVIDERS,
     UI_MAX_PROVIDER_ID_BYTES, UI_MAX_PROVIDER_NAME_BYTES, UI_MAX_PROVIDER_URL_BYTES,
@@ -276,6 +276,8 @@ pub struct ProviderInput {
     pub credential: Option<String>,
     /// Whether the credential currently resolves (env → store → fail-closed).
     pub configured: Option<bool>,
+    /// Model ids selectable for this profile (metadata only).
+    pub allowlist: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -645,6 +647,24 @@ pub fn project_providers(
                     })
                     .transpose()?,
                 configured: input.configured.unwrap_or(false),
+                allowlist: {
+                    if input.allowlist.len() > UI_MAX_ALLOWLIST {
+                        return Err(projection("provider allowlist exceeds its maximum size"));
+                    }
+                    input
+                        .allowlist
+                        .iter()
+                        .enumerate()
+                        .map(|(index, model)| {
+                            text(
+                                model,
+                                &format!("{context}.allowlist[{index}]"),
+                                UI_MAX_MODEL_BYTES,
+                                false,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                },
             })
         })
         .collect()

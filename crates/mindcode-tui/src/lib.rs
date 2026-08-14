@@ -313,6 +313,7 @@ pub struct App {
     selected_change: Option<usize>,
     provider_selection: usize,
     provider_form: Option<ProviderForm>,
+    model_selection: usize,
     providers_auto_opened: bool,
 }
 
@@ -391,6 +392,7 @@ impl App {
             selected_change: None,
             provider_selection: 0,
             provider_form: None,
+            model_selection: 0,
             providers_auto_opened: false,
         }
     }
@@ -483,6 +485,40 @@ impl App {
         }
         self.provider_form = None;
         self.clamp_provider_selection();
+    }
+
+    /// Open the interactive model picker, pre-selecting the currently active
+    /// model when it appears in the list.
+    fn open_models(&mut self) {
+        if self.overlay == OverlayView::None {
+            self.set_overlay(OverlayView::Models);
+        }
+        let current = self
+            .latest_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.telemetry.model.clone());
+        if let Some(index) = self
+            .active_models()
+            .iter()
+            .position(|model| Some(model.as_str()) == current.as_deref())
+        {
+            self.model_selection = index;
+        } else {
+            self.model_selection = 0;
+        }
+    }
+
+    /// The active provider's selectable model ids, borrowed from the snapshot.
+    fn active_models(&self) -> &[String] {
+        self.latest_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.providers.iter().find(|provider| provider.active))
+            .map(|provider| provider.allowlist.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn selected_model_id(&self) -> Option<String> {
+        self.active_models().get(self.model_selection).cloned()
     }
 
     fn clamp_provider_selection(&mut self) {
@@ -641,6 +677,7 @@ impl App {
                 selected_change: self.selected_change,
                 provider_selection: self.provider_selection,
                 provider_form: self.provider_form.as_ref(),
+                model_selection: self.model_selection,
             },
         );
     }
@@ -1045,6 +1082,13 @@ impl App {
                     };
                 }
 
+                if self.overlay == OverlayView::Models {
+                    self.suppress_input = true;
+                    let key = key.clone();
+                    let modifiers = modifiers.clone();
+                    return self.handle_models_list_key(&key, &modifiers);
+                }
+
                 if self.overlay != OverlayView::None {
                     // Every key not explicitly handled above belongs to the
                     // modal focus scope and must not leak into the session.
@@ -1096,7 +1140,40 @@ impl App {
                 self.suppress_input = true;
                 true
             }
+            UiInputEventKind::Submit if self.overlay == OverlayView::Models => {
+                if let Some(model) = self.selected_model_id() {
+                    *event = UiInputEventKind::Action(provider_action(
+                        "model_select",
+                        Some(model),
+                        None,
+                    ));
+                }
+                self.set_overlay(OverlayView::None);
+                self.suppress_input = true;
+                true
+            }
             UiInputEventKind::Submit if self.overlay == OverlayView::None && !self.show_welcome => {
+                // Interactive pickers: a bare `/model` or `/settings` submit
+                // opens an overlay locally instead of round-tripping through
+                // the control server.  Anything else (including a `/model id`
+                // with an argument) keeps flowing as a `composer_submit`.
+                let trimmed = self.input_buffer.trim();
+                if trimmed == "/model" {
+                    self.open_models();
+                    self.input_buffer.clear();
+                    self.input_cursor = 0;
+                    self.preferred_column = None;
+                    self.suppress_input = true;
+                    return true;
+                }
+                if trimmed == "/settings" {
+                    self.set_overlay(OverlayView::Settings);
+                    self.input_buffer.clear();
+                    self.input_cursor = 0;
+                    self.preferred_column = None;
+                    self.suppress_input = true;
+                    return true;
+                }
                 // The composer is the main interface: hand the typed buffer to
                 // the control server as a `composer_submit` action so it can be
                 // routed to a slash command or a live chat turn.
@@ -1168,6 +1245,23 @@ impl App {
                         None,
                     ));
                 }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    /// Model-picker keys: move the selection up/down.  Enter is a Submit event
+    /// handled separately; Esc is the shared `LocalIntent::Cancel`.
+    fn handle_models_list_key(&mut self, key: &str, modifiers: &[String]) -> bool {
+        if !modifiers.is_empty() {
+            return true;
+        }
+        let len = self.active_models().len();
+        match key {
+            "up" => self.model_selection = self.model_selection.saturating_sub(1),
+            "down" if len > 0 => {
+                self.model_selection = (self.model_selection + 1).min(len - 1);
             }
             _ => {}
         }
@@ -1722,6 +1816,7 @@ pub fn render_snapshot(frame: &mut Frame<'_>, snapshot: Option<&UiRenderSnapshot
             selected_change: None,
             provider_selection: 0,
             provider_form: None,
+            model_selection: 0,
         },
     );
 }
@@ -2677,6 +2772,7 @@ mod tests {
                 active: true,
                 credential: Some("env:VEXZY_API_KEY".into()),
                 configured: true,
+                allowlist: vec!["gpt-5.6-luna".into()],
             }],
             writer: UiWriterState {
                 mode: "writer".into(),
@@ -2755,6 +2851,7 @@ mod tests {
                 active: true,
                 credential: Some("env:VEXZY_API_KEY".into()),
                 configured: true,
+                allowlist: vec!["gpt-5.6-luna".into()],
             },
             UiProviderSnapshot {
                 id: "custom-a".into(),
@@ -2764,6 +2861,7 @@ mod tests {
                 active: false,
                 credential: Some("env:CUSTOM_KEY".into()),
                 configured: false,
+                allowlist: vec!["model-a".into(), "model-b".into()],
             },
         ];
         let mut app = App::default();
@@ -2794,6 +2892,82 @@ mod tests {
             }
             other => panic!("expected provider_switch action, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn model_picker_opens_on_bare_model_submit_and_select_emits_action() {
+        let mut app = app_with_providers();
+        app.push_input("/model");
+        let mut submit = submit_message();
+        assert!(app.contextualize_input(&mut submit));
+        assert_eq!(app.overlay, OverlayView::Models);
+        assert!(app.input_buffer.is_empty());
+
+        // The active provider (vexzy) exposes one model; selecting it emits
+        // the model_select action with the model id as its target.
+        let mut enter = submit_message();
+        assert!(app.contextualize_input(&mut enter));
+        match enter {
+            UiMessage::InputEvent {
+                event: UiInputEventKind::Action(action),
+                ..
+            } => {
+                assert_eq!(action.action, "model_select");
+                assert_eq!(action.target.as_deref(), Some("gpt-5.6-luna"));
+            }
+            other => panic!("expected model_select action, got {other:?}"),
+        }
+        assert_eq!(app.overlay, OverlayView::None);
+    }
+
+    #[test]
+    fn model_picker_arrow_keys_navigate_within_allowlist() {
+        use mindcode_protocol::ui::UiProviderSnapshot;
+        // Two-model custom profile is the active provider.
+        let mut current = snapshot(1);
+        current.providers[0].active = false;
+        current.providers.push(UiProviderSnapshot {
+            id: "custom-a".into(),
+            name: "Custom A".into(),
+            protocol: "openai-compatible".into(),
+            base_url: "https://custom.example/v1".into(),
+            active: true,
+            credential: Some("env:CUSTOM_KEY".into()),
+            configured: true,
+            allowlist: vec!["model-a".into(), "model-b".into()],
+        });
+        let mut app = App::default();
+        app.apply_message(render_message(current, "models"));
+
+        app.push_input("/model");
+        let mut submit = submit_message();
+        assert!(app.contextualize_input(&mut submit));
+        assert_eq!(app.overlay, OverlayView::Models);
+
+        let mut down = key_message("down", &[]);
+        assert!(app.contextualize_input(&mut down));
+        assert_eq!(app.model_selection, 1);
+        let mut up = key_message("up", &[]);
+        assert!(app.contextualize_input(&mut up));
+        assert_eq!(app.model_selection, 0);
+    }
+
+    #[test]
+    fn settings_submit_opens_settings_overlay() {
+        let mut app = app_with_providers();
+        app.push_input("/settings");
+        let mut submit = submit_message();
+        assert!(app.contextualize_input(&mut submit));
+        assert_eq!(app.overlay, OverlayView::Settings);
+        assert!(app.input_buffer.is_empty());
+        // The event is not rewritten into an action: the popup is local.
+        assert!(matches!(
+            submit,
+            UiMessage::InputEvent {
+                event: UiInputEventKind::Submit,
+                ..
+            }
+        ));
     }
 
     #[test]

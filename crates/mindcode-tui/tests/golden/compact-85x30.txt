@@ -1,5 +1,5 @@
 size 85x30
-style 0901d8ee0901c712
+style 1d06004842b8a1f8
 | ❀ MindCode                                  VEXZY · gpt-5.6-luna · high · connected |
 |                                                                                     |
 |─────────────────────────────────────────────────────────────────────────────────────|
@@ -26,7 +26,7 @@ style 0901d8ee0901c712
 |│                                                                                   │|
 |│                                                                                   │|
 |╰───────────────────────────────────────────────────────────────────────────────────╯|
-|╭ Composer · Enter send · Shift+Enter newline ──────────────────────────────────────╮|
-|│> Type a prompt or / command…                                                      │|
+|╭ Composer · VEXZY · gpt-5.6-luna · Enter send · Shift+Enter newline ───────────────╮|
+|│> Type a prompt or / command — /model /settings /help /work                        │|
 |╰───────────────────────────────────────────────────────────────────────────────────╯|
 | Enter send · Ctrl+P providers · /help                              Σ $4.42 ·  VEXZY |

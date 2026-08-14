@@ -62,6 +62,7 @@ pub const UI_MAX_PROVIDERS: usize = 64;
 pub const UI_MAX_PROVIDER_ID_BYTES: usize = 128;
 pub const UI_MAX_PROVIDER_NAME_BYTES: usize = 256;
 pub const UI_MAX_PROVIDER_URL_BYTES: usize = 2_048;
+pub const UI_MAX_ALLOWLIST: usize = 256;
 pub const UI_MAX_ACTION_BYTES: usize = 128;
 pub const UI_MAX_ACTION_VALUE_BYTES: usize = 64 * 1024;
 
@@ -527,6 +528,15 @@ pub struct UiProviderSnapshot {
     /// fail-closed).  Only a bool; the value never enters a snapshot.
     #[serde(default)]
     pub configured: bool,
+    /// Model ids selectable for this profile (the allowlist; for the built-in
+    /// VEXZY profile this is the catalog-driven fallback).  Metadata only,
+    /// never credentials.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_files",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub allowlist: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1497,6 +1507,18 @@ fn validate_providers(values: &[UiProviderSnapshot]) -> Result<(), UiValidationE
         if let Some(reference) = &value.credential {
             validate_non_empty_text(reference, UI_MAX_PROVIDER_ID_BYTES, "provider credential")?;
         }
+        validate_count(
+            value.allowlist.len(),
+            UI_MAX_ALLOWLIST,
+            "provider allowlist",
+        )?;
+        for (index, model) in value.allowlist.iter().enumerate() {
+            validate_non_empty_text(
+                model,
+                UI_MAX_MODEL_BYTES,
+                &format!("provider allowlist[{index}]"),
+            )?;
+        }
     }
     Ok(())
 }
@@ -2017,6 +2039,7 @@ mod tests {
                 active: true,
                 credential: Some("env:VEXZY_API_KEY".into()),
                 configured: true,
+                allowlist: vec!["gpt-5.6-luna".into()],
             }],
             writer: UiWriterState {
                 mode: "writer".into(),

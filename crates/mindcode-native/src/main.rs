@@ -1071,7 +1071,8 @@ fn tui_socket_path(session_id: &str) -> PathBuf {
 }
 
 /// Map the persisted profiles to a secret-free provider snapshot: the
-/// credential is represented only by its reference kind, never its value.
+/// credential is represented only by its reference kind, never its value, and
+/// the selectable model ids are metadata only.
 fn providers_input(settings: &NativeSettings) -> Vec<ProviderInput> {
     let active = settings.active_provider.as_ref();
     settings
@@ -1085,8 +1086,21 @@ fn providers_input(settings: &NativeSettings) -> Vec<ProviderInput> {
             active: Some(active == Some(&provider.id)),
             credential: Some(credential_ref_kind(provider)),
             configured: Some(provider_credential_configured(provider)),
+            allowlist: provider_allowlist_input(provider),
         })
         .collect()
+}
+
+/// The model ids the profile offers for interactive selection.  Custom
+/// profiles expose their allowlist verbatim; the built-in VEXZY profile is
+/// catalog-driven, so an empty allowlist surfaces the documented fallback
+/// model rather than an empty picker.
+fn provider_allowlist_input(provider: &ProviderConfig) -> Vec<String> {
+    let mut models: Vec<String> = provider.allowlist.iter().map(ModelId::to_string).collect();
+    if models.is_empty() && provider.id.as_str() == mindcode_settings::BUILTIN_VEXZY_PROVIDER_ID {
+        models.push("gpt-5.6-luna".to_owned());
+    }
+    models
 }
 
 /// Secret-free "is this profile usable right now" check: env → store →
@@ -1572,13 +1586,14 @@ const TUI_HELP: &str = "\
 Commands (type and press Enter):
   <text>                chat with the active provider
   /chat <text>          same as typing text directly
-  /model [<id>]         show or set the global Worker model
+  /model                pick a model from the active provider's list
+  /model <id>           set the global Worker model directly
   /effort [<level>|off] show or set the effort lock (none|low|medium|high|xhigh|max)
   /provider             list provider profiles (* = active)
   /provider use <id>    switch the active provider
   /provider remove <id> remove a provider profile
   /allowlist <id> <m,…> set a profile's Worker model allowlist (empty clears)
-  /settings             show settings summary
+  /settings             open the settings popup
   /permissions [<tier>] show or set worker access (ask-everything|workspace|full-access)
   /work <task>          spawn a worker agent (bounded pool, approval-gated tools)
   /auth                 show active provider auth status
@@ -2111,6 +2126,17 @@ fn apply_tui_action(action: &UiActionInput) -> Result<bool> {
             settings
                 .set_active_provider(&id)
                 .map_err(anyhow::Error::msg)?;
+            true
+        }
+        "model_select" => {
+            let model = ModelId::new(
+                action
+                    .target
+                    .clone()
+                    .ok_or_else(|| anyhow!("model_select requires a target"))?,
+            )
+            .map_err(anyhow::Error::msg)?;
+            settings.global_worker_model = Some(model.to_string());
             true
         }
         _ => false,
@@ -3742,6 +3768,66 @@ mod tests {
                 let inputs = providers_input(&load_sandbox_settings(dir));
                 assert_eq!(inputs[0].configured, Some(true));
             });
+        });
+    }
+
+    #[test]
+    fn providers_input_exposes_selectable_allowlist_and_vexzy_fallback() {
+        with_sandbox_env(|dir| {
+            seed_builtin_active(dir);
+            // The built-in VEXZY profile is catalog-driven with an empty
+            // allowlist; the picker falls back to the documented model so it
+            // is never blank.
+            let inputs = providers_input(&load_sandbox_settings(dir));
+            assert_eq!(inputs[0].allowlist, vec!["gpt-5.6-luna".to_owned()]);
+
+            // A custom profile exposes its allowlist verbatim.
+            let add = UiActionInput {
+                action: "provider_add".into(),
+                target: None,
+                value: Some(
+                    json!({
+                        "id": "custom-a",
+                        "name": "Custom A",
+                        "protocol": "openai-compatible",
+                        "base_url": "https://custom.example/v1",
+                        "credential_env": "CUSTOM_KEY",
+                        "allowlist": ["model-a", "model-b"],
+                    })
+                    .to_string(),
+                ),
+            };
+            assert!(apply_tui_action(&add).unwrap());
+            let inputs = providers_input(&load_sandbox_settings(dir));
+            let custom = inputs.iter().find(|input| input.id == "custom-a").unwrap();
+            assert_eq!(
+                custom.allowlist,
+                vec!["model-a".to_owned(), "model-b".to_owned()]
+            );
+        });
+    }
+
+    #[test]
+    fn model_select_action_sets_the_global_worker_model() {
+        with_sandbox_env(|dir| {
+            seed_builtin_active(dir);
+            let select = UiActionInput {
+                action: "model_select".into(),
+                target: Some("kimi-k3".into()),
+                value: None,
+            };
+            assert!(apply_tui_action(&select).unwrap());
+            assert_eq!(
+                load_sandbox_settings(dir).global_worker_model.as_deref(),
+                Some("kimi-k3")
+            );
+
+            let missing = UiActionInput {
+                action: "model_select".into(),
+                target: None,
+                value: None,
+            };
+            assert!(apply_tui_action(&missing).is_err());
         });
     }
 
