@@ -1,8 +1,8 @@
 //! Integration tests for the scoped tools against a real tempdir workspace.
 
 use mindcode_worker::{
-    append_file, read_file, run_git, run_shell, write_file, OwnershipGuard, PermissionTier,
-    WorkerError, WorkerScope,
+    append_file, read_file, run_agentgrep, run_git, run_rg, run_shell, write_file, OwnershipGuard,
+    PermissionTier, WorkerError, WorkerScope,
 };
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
@@ -151,6 +151,59 @@ async fn shell_prompts_in_ask_everything() {
         .await
         .unwrap_err();
     assert!(matches!(error, WorkerError::NeedsApproval { .. }));
+}
+
+#[tokio::test]
+async fn scopeless_rg_and_agentgrep_fail_closed_outside_all_scope() {
+    // §10.4.3 / §11.10: a worker whose scope is a subset of the workspace must
+    // not search the whole tree (which would leak match context). No explicit
+    // path → error, before any process is spawned.
+    let fixture = Fixture::new(PermissionTier::Workspace);
+    let rg_error = run_rg(&fixture.scope, &fixture.guard, "needle", None, &cancel())
+        .await
+        .unwrap_err();
+    assert!(matches!(rg_error, WorkerError::InvalidRequest(_)));
+    let agentgrep_error =
+        run_agentgrep(&fixture.scope, &fixture.guard, "needle", None, &cancel())
+            .await
+            .unwrap_err();
+    assert!(matches!(agentgrep_error, WorkerError::InvalidRequest(_)));
+}
+
+#[tokio::test]
+async fn scoped_rg_and_agentgrep_search_inside_the_scope() {
+    if std::process::Command::new("rg")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return; // rg unavailable in this environment
+    }
+    let fixture = Fixture::new(PermissionTier::Workspace);
+    std::fs::create_dir_all(fixture.root().join("src")).unwrap();
+    std::fs::write(fixture.root().join("src/needle.txt"), "needle here\n").unwrap();
+
+    let rg = run_rg(
+        &fixture.scope,
+        &fixture.guard,
+        "needle",
+        Some(Path::new("src")),
+        &cancel(),
+    )
+    .await
+    .unwrap();
+    assert!(rg.contains("needle"));
+
+    let agentgrep = run_agentgrep(
+        &fixture.scope,
+        &fixture.guard,
+        "needle",
+        Some(Path::new("src")),
+        &cancel(),
+    )
+    .await
+    .unwrap();
+    assert!(agentgrep.contains("needle"));
 }
 
 #[tokio::test]

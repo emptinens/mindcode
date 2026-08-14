@@ -359,7 +359,15 @@ pub async fn run_rg(
     }
     let search_root = match path {
         Some(path) => resolve_path(scope, guard, path, false)?,
-        None => guard.workspace_root().to_path_buf(),
+        // A scopeless search is only safe when the worker owns the whole
+        // workspace; otherwise it would leak matches from outside the disjoint
+        // ownership scope (§10.4.3). Fail closed and require a path.
+        None if scope.is_all() => guard.workspace_root().to_path_buf(),
+        None => {
+            return Err(WorkerError::InvalidRequest(
+                "rg needs an explicit path inside your scope".to_owned(),
+            ));
+        }
     };
     match guard.check_command() {
         ToolAccess::Allowed => {}
@@ -411,7 +419,15 @@ pub async fn run_agentgrep(
     }
     let search_root = match path {
         Some(path) => resolve_path(scope, guard, path, false)?,
-        None => guard.workspace_root().to_path_buf(),
+        // A scopeless search is only safe when the worker owns the whole
+        // workspace; otherwise it would leak match context from outside the
+        // disjoint ownership scope (§10.4.3). Fail closed and require a path.
+        None if scope.is_all() => guard.workspace_root().to_path_buf(),
+        None => {
+            return Err(WorkerError::InvalidRequest(
+                "agentgrep needs an explicit path inside your scope".to_owned(),
+            ));
+        }
     };
     match guard.check_command() {
         ToolAccess::Allowed => {}
