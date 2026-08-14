@@ -40,6 +40,9 @@ pub use memory_graph::{
     MemoryStore, MemoryType,
 };
 
+pub mod preference;
+pub use preference::{PreferenceLearner, PreferenceSignal, DEFAULT_MIN_OBSERVATIONS};
+
 pub const TASK_GRAPH_SCHEMA_VERSION: u64 = 3;
 pub const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 pub const DEFAULT_LEASE_TTL_MS: u64 = 30_000;
