@@ -1,0 +1,32 @@
+# §13.4: cargo-deny configuration for the release supply-chain gate.
+# Run `scripts/sbom.sh` (requires cargo-deny) to check licenses, duplicate
+# versions, and security advisories before cutting a release.
+
+[licenses]
+version = 2
+# Keep this list aligned with what the workspace actually depends on; the gate
+# fails on any license not listed here.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "OpenSSL",
+]
+exceptions = []
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "deny"
+deny = []
+wildcards = "deny"
+
+[advisories]
+version = 2

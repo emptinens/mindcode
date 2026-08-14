@@ -1,0 +1,7 @@
+# §13.4: frozen toolchain for reproducible release builds. CI and local
+# release scripts both resolve this file, so the same compiler version builds
+# the same artifact.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
