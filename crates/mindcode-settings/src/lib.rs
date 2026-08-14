@@ -17,6 +17,11 @@ pub use mindcode_provider::{CredentialRef, ModelId, Protocol, ProviderConfig, Pr
 pub mod cred_state;
 pub use cred_state::{transition as transition_cred_state, CredEvent, CredState};
 
+pub mod system_prompt;
+pub use system_prompt::{
+    SystemPromptError, SystemPromptOverrides, DEFAULT_LEADER_PROMPT, DEFAULT_WORKER_PROMPT,
+};
+
 use mindcode_vexzy::WorkerEffort;
 use serde_json::{Map, Value};
 use std::{
@@ -51,6 +56,9 @@ pub struct NativeSettings {
     /// Custom `/colors` overrides (§11.6): role label → `#rrggbb`.  Metadata
     /// only — never a credential, never a secret.
     pub color_overrides: Option<BTreeMap<String, String>>,
+    /// Editable Leader/Worker system prompts (§13.3).  Secret-free metadata;
+    /// `None` fields fall back to the built-in defaults.
+    pub system_prompt: SystemPromptOverrides,
     /// The multi-provider profile table (0.1.3).  Secret-free: every profile
     /// references its credential by name instead of carrying a value.
     pub providers: Vec<ProviderConfig>,
@@ -74,6 +82,7 @@ pub enum SettingsError {
     InvalidWorkerEffortLock,
     InvalidContextBudget,
     InvalidColorOverrides,
+    InvalidSystemPrompt,
     InvalidProviders,
     InvalidActiveProvider,
     ProviderNotFound(String),
@@ -99,6 +108,9 @@ impl fmt::Display for SettingsError {
             }
             Self::InvalidColorOverrides => {
                 f.write_str("color_overrides must be an object of role → #rrggbb")
+            }
+            Self::InvalidSystemPrompt => {
+                f.write_str("system_prompt must be an object with optional leader/worker strings")
             }
             Self::InvalidProviders => {
                 f.write_str("providers must be an array of provider profiles")
@@ -248,6 +260,22 @@ pub fn settings_from_value(value: Value) -> Result<NativeSettings, SettingsError
         Some(_) => return Err(SettingsError::InvalidColorOverrides),
     };
 
+    let system_prompt = match object.get("system_prompt") {
+        None | Some(Value::Null) => SystemPromptOverrides::default(),
+        // Reject non-object shapes explicitly: serde derives deserialize JSON
+        // arrays positionally into struct fields, which we do not want.
+        Some(system_prompt_value @ Value::Object(_)) => {
+            let overrides: SystemPromptOverrides =
+                serde_json::from_value(system_prompt_value.clone())
+                    .map_err(|_| SettingsError::InvalidSystemPrompt)?;
+            overrides
+                .validate()
+                .map_err(|_| SettingsError::InvalidSystemPrompt)?;
+            overrides
+        }
+        Some(_) => return Err(SettingsError::InvalidSystemPrompt),
+    };
+
     let active_provider = match object.get("active_provider") {
         None | Some(Value::Null) => None,
         Some(Value::String(value)) => {
@@ -284,6 +312,7 @@ pub fn settings_from_value(value: Value) -> Result<NativeSettings, SettingsError
         worker_effort_lock,
         context_token_budget,
         color_overrides,
+        system_prompt,
         providers,
         active_provider,
         unknown,
@@ -324,6 +353,13 @@ pub fn settings_to_value(settings: &NativeSettings) -> Result<Value, SettingsErr
             .as_ref()
             .map(|overrides| serde_json::to_value(overrides).unwrap_or(Value::Null))
             .unwrap_or(Value::Null),
+    );
+    if settings.system_prompt.validate().is_err() {
+        return Err(SettingsError::InvalidSystemPrompt);
+    }
+    object.insert(
+        "system_prompt".to_owned(),
+        serde_json::to_value(&settings.system_prompt).map_err(SettingsError::Json)?,
     );
     object.insert(
         "active_provider".to_owned(),
@@ -523,6 +559,7 @@ fn is_known_settings_key(key: &str) -> bool {
             | "worker_effort_lock"
             | "context_token_budget"
             | "color_overrides"
+            | "system_prompt"
             | "providers"
             | "active_provider"
     )
@@ -666,6 +703,31 @@ mod tests {
         ));
         assert_eq!(unset.color_overrides, None);
 
+    }
+
+    #[test]
+    fn system_prompt_round_trips_and_rejects_invalid() {
+        let settings = parse_settings(r##"{"system_prompt":{"leader":"Be brief","worker":"Do the task"}}"##).unwrap();
+        assert_eq!(settings.system_prompt.leader.as_deref(), Some("Be brief"));
+        assert_eq!(settings.system_prompt.worker_prompt(), "Do the task");
+        let reparsed = settings_from_value(settings_to_value(&settings).unwrap()).unwrap();
+        assert_eq!(reparsed.system_prompt, settings.system_prompt);
+
+        // Unset → defaults.
+        let unset = parse_settings(r#"{"system_prompt":null}"#).unwrap();
+        assert_eq!(unset.system_prompt, SystemPromptOverrides::default());
+
+        // Non-object shapes and unknown fields are rejected at the settings
+        // layer; oversized/control-character rejection is covered in the
+        // system_prompt.rs unit tests.
+        assert!(matches!(
+            parse_settings(r#"{"system_prompt":["x"]}"#),
+            Err(SettingsError::InvalidSystemPrompt)
+        ));
+        assert!(matches!(
+            parse_settings(r#"{"system_prompt":{"nope":1}}"#),
+            Err(SettingsError::InvalidSystemPrompt)
+        ));
     }
 
     #[test]
