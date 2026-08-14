@@ -1078,6 +1078,7 @@ name = "mindcode-worker"
 version = "0.1.3"
 dependencies = [
  "mindcode-core-tools",
+ "mindcode-transport",
  "serde",
  "serde_json",
  "tempfile",

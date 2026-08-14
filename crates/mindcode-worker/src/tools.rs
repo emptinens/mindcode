@@ -44,7 +44,7 @@ fn check_cancelled(cancel: &CancellationToken) -> WorkerResult<()> {
 /// Resolve a worker-supplied (relative) path against the workspace, verify it
 /// is inside the ownership scope, and return the canonical target after the
 /// permission guard approves it.
-fn resolve_path(
+pub fn resolve_path(
     scope: &WorkerScope,
     guard: &OwnershipGuard,
     path: &Path,

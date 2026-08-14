@@ -7,6 +7,7 @@
 //! disjoint ownership scopes, the structured `WorkerReport`, and the four
 //! scope-checked tools (read/write, shell, git, ripgrep).
 
+pub mod agent;
 pub mod error;
 pub mod guard;
 pub mod permission;
@@ -15,10 +16,17 @@ pub mod report;
 pub mod scope;
 pub mod tools;
 
+pub use agent::{
+    default_tool_defs, AllowAllGate, ApprovalDecision, ApprovalGate, ApprovalRequest,
+    DecisionFuture, DenyAllGate, ModelClient, ModelTurn, ResolvedToolCall, WorkerAgent,
+    DEFAULT_MAX_ITERATIONS,
+};
 pub use error::{WorkerError, WorkerResult};
 pub use guard::{OwnershipGuard, ToolAccess};
 pub use permission::PermissionTier;
 pub use pool::{PoolOutcome, WorkerPool, DEFAULT_MAX_CONCURRENT, MAX_CONCURRENT_CAP};
 pub use report::{CommandRun, WorkerReport, WorkerStatus, WorkerUsage};
 pub use scope::{ScopeError, WorkerScope};
-pub use tools::{append_file, read_file, run_git, run_rg, run_shell, write_file, FileReadResult};
+pub use tools::{
+    append_file, read_file, resolve_path, run_git, run_rg, run_shell, write_file, FileReadResult,
+};

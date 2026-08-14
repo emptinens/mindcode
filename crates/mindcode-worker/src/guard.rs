@@ -19,6 +19,7 @@ pub enum ToolAccess {
 
 /// Tier + workspace + config-home boundary checks. The workspace root is the
 /// directory `mindcode` was launched from.
+#[derive(Clone)]
 pub struct OwnershipGuard {
     workspace_root: PathBuf,
     config_home: PathBuf,
