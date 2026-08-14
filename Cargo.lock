@@ -985,6 +985,7 @@ dependencies = [
  "mindcode-tui",
  "mindcode-tui-server",
  "mindcode-vexzy",
+ "mindcode-worker",
  "mindcoded",
  "serde_json",
  "tempfile",

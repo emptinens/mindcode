@@ -25,6 +25,7 @@ use mindcode_tui_server::{
 use mindcode_vexzy::{
     eligible_worker_models, parse_vexzy_model_catalog, VexzyModel, VexzyModelCatalog, WorkerEffort,
 };
+use mindcode_worker::PermissionTier;
 use mindcoded::{Daemon, DaemonConfig};
 use serde_json::{json, Value};
 use std::{
@@ -1172,6 +1173,9 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
     let processor_session_id = session_id.clone();
     let processor_stats = stats.clone();
     let processor = tokio::spawn(async move {
+        // Session-scoped worker permission tier (§10.4.2); default is the
+        // safest (ask-everything) and it resets on every TUI launch.
+        let mut tier = PermissionTier::default();
         while let Some(action) = action_rx.recv().await {
             if action.action == "composer_submit" {
                 let Some(text) = action.value else { continue };
@@ -1198,7 +1202,9 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
                         }
                     }
                 };
-                let outcome = dispatch_tui_input_streaming(&text, &mut transcript, republish).await;
+                let outcome =
+                    dispatch_tui_input_streaming(&text, &mut transcript, republish, &mut tier)
+                        .await;
                 match outcome {
                     Ok((true, Some(turn))) => {
                         processor_stats.lock().unwrap().record(&turn);
@@ -1464,6 +1470,7 @@ Commands (type and press Enter):
   /provider remove <id> remove a provider profile
   /allowlist <id> <m,…> set a profile's Worker model allowlist (empty clears)
   /settings             show settings summary
+  /permissions [<tier>] show or set worker access (ask-everything|workspace|full-access)
   /auth                 show active provider auth status
   /eligible             show eligible Worker models of the active provider
   /doctor               native health check
@@ -1478,7 +1485,8 @@ Commands (type and press Enter):
 /// settings changed); the credential value never enters the transcript.
 #[cfg(test)]
 async fn dispatch_tui_input(text: &str, transcript: &mut TuiTranscript) -> Result<bool> {
-    dispatch_tui_input_streaming(text, transcript, |_| {})
+    let mut tier = PermissionTier::default();
+    dispatch_tui_input_streaming(text, transcript, |_| {}, &mut tier)
         .await
         .map(|(republish, _)| republish)
 }
@@ -1491,6 +1499,7 @@ async fn dispatch_tui_input_streaming(
     text: &str,
     transcript: &mut TuiTranscript,
     mut on_progress: impl FnMut(&TuiTranscript),
+    tier: &mut PermissionTier,
 ) -> Result<(bool, Option<ChatOutcome>)> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -1543,6 +1552,18 @@ async fn dispatch_tui_input_streaming(
                 settings.worker_effort_lock = Some(effort);
                 save_native_settings(&settings)?;
                 format!("worker effort lock set to {}", effort.as_str())
+            };
+            transcript.push("system", message);
+            Ok((true, None))
+        }
+        "permissions" => {
+            let message = if argument.is_empty() {
+                format!("permission tier: {tier} (ask-everything|workspace|full-access)")
+            } else {
+                *tier = argument
+                    .parse::<PermissionTier>()
+                    .map_err(anyhow::Error::msg)?;
+                format!("permission tier set to {tier}")
             };
             transcript.push("system", message);
             Ok((true, None))
@@ -4364,6 +4385,51 @@ mod tests {
                     panic!("expected entry");
                 };
                 assert!(text.contains("unknown command"));
+            });
+        });
+    }
+
+    #[test]
+    fn tui_slash_permissions_sets_and_reports_the_session_tier() {
+        with_sandbox_env(|dir| {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                seed_builtin_active(dir);
+                let mut transcript = TuiTranscript::default();
+                let mut tier = PermissionTier::default();
+
+                // Default tier is the safest.
+                assert_eq!(tier, PermissionTier::AskEverything);
+                dispatch_tui_input_streaming(
+                    "/permissions workspace",
+                    &mut transcript,
+                    |_| {},
+                    &mut tier,
+                )
+                .await
+                .unwrap();
+                assert_eq!(tier, PermissionTier::Workspace);
+
+                // Reporting the tier echoes the current value without changing it.
+                dispatch_tui_input_streaming("/permissions", &mut transcript, |_| {}, &mut tier)
+                    .await
+                    .unwrap();
+                assert_eq!(tier, PermissionTier::Workspace);
+                let TranscriptInput::Entry { text, .. } = &transcript.entries[1] else {
+                    panic!("expected entry");
+                };
+                assert!(text.contains("workspace"));
+
+                // An invalid tier is rejected and leaves the tier untouched.
+                let error = dispatch_tui_input_streaming(
+                    "/permissions everything",
+                    &mut transcript,
+                    |_| {},
+                    &mut tier,
+                )
+                .await
+                .unwrap_err();
+                assert!(error.to_string().contains("invalid permission tier"));
+                assert_eq!(tier, PermissionTier::Workspace);
             });
         });
     }
