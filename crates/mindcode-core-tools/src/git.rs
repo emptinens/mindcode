@@ -250,6 +250,7 @@ async fn git_command(
             stdin: None,
             timeout_ms: 30_000,
             max_output_bytes,
+            rlimits: None,
         },
         cancellation,
     )

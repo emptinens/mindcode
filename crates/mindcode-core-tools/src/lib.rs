@@ -14,7 +14,7 @@ pub use git::{
     GitStatusRequest, GitStatusResult,
 };
 pub use js_runtime::{JsRuntime, JsRuntimeKind};
-pub use process::{process_run, ProcessRunRequest, ProcessRunResult};
+pub use process::{process_run, ProcessRunRequest, ProcessRunResult, ResourceLimits};
 pub use redact::redact_secrets;
 pub use sandbox::{
     build_bwrap_argv, bwrap_available, run_sandboxed, NetworkPolicy, SandboxConfig,

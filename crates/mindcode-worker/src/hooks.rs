@@ -72,6 +72,7 @@ pub async fn run_pre_tool(
         stdin: Some(payload.to_string()),
         timeout_ms: HOOK_TIMEOUT_MS,
         max_output_bytes: HOOK_MAX_OUTPUT_BYTES,
+        rlimits: None,
     };
     match process_run(request, cancel.clone()).await {
         Ok(result) if result.exit_code == Some(0) => HookDecision::Allow,

@@ -40,6 +40,40 @@ pub struct ProcessRunRequest {
     pub timeout_ms: u64,
     #[serde(default = "default_max_output_bytes")]
     pub max_output_bytes: usize,
+    /// Optional resource limits applied to the child before exec (§13.1).
+    #[serde(default)]
+    pub rlimits: Option<ResourceLimits>,
+}
+
+/// Resource limits applied to a spawned process (soft and hard equal).  Used
+/// by the sandbox to bound a runaway command's FDs, single-file size, and
+/// process count.  Empty (all `None`) means "no extra limits".
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceLimits {
+    /// Max open file descriptors.
+    #[serde(default)]
+    pub nofile: Option<u64>,
+    /// Max size in bytes of a single regular file.
+    #[serde(default)]
+    pub fsize: Option<u64>,
+    /// Max number of processes for the real UID (best-effort under userns).
+    #[serde(default)]
+    pub nproc: Option<u64>,
+}
+
+impl ResourceLimits {
+    pub fn validate(&self) -> CoreToolResult<()> {
+        for value in [self.nofile, self.fsize, self.nproc].into_iter().flatten() {
+            if value == 0 || value > 1_000_000_000_000 {
+                return Err(CoreToolError::new(
+                    CoreToolErrorCode::InvalidInput,
+                    "resource limit must be between 1 and 1000000000000",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -153,6 +187,9 @@ impl ProcessRunRequest {
                 "max_output_bytes must be between 1 and 8 MiB",
             ));
         }
+        if let Some(rlimits) = &self.rlimits {
+            rlimits.validate()?;
+        }
         Ok(())
     }
 }
@@ -178,6 +215,7 @@ pub async fn process_run(
         .stderr(std::process::Stdio::piped());
     add_safe_environment(&mut command, &request.env);
     configure_process_group(&mut command);
+    configure_resource_limits(&mut command, request.rlimits);
     let mut child = command.spawn().map_err(|_| {
         CoreToolError::new(
             CoreToolErrorCode::ProcessSpawn,
@@ -429,6 +467,47 @@ fn configure_process_group(command: &mut Command) {
     let _ = command;
 }
 
+/// Apply resource limits in the child between fork and exec.  `setrlimit` is
+/// async-signal-safe, so this is safe inside `pre_exec`; failures are
+/// best-effort (the process still runs, just without the bound).
+fn configure_resource_limits(command: &mut Command, limits: Option<ResourceLimits>) {
+    #[cfg(unix)]
+    {
+        let Some(limits) = limits else { return };
+        // SAFETY: the closure only calls `setrlimit` (async-signal-safe) and
+        // returns `Ok`, so it cannot corrupt the forked child's state.
+        unsafe {
+            command.pre_exec(move || {
+                if let Some(value) = limits.nofile {
+                    set_rlimit(libc::RLIMIT_NOFILE, value);
+                }
+                if let Some(value) = limits.fsize {
+                    set_rlimit(libc::RLIMIT_FSIZE, value);
+                }
+                if let Some(value) = limits.nproc {
+                    set_rlimit(libc::RLIMIT_NPROC, value);
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (command, limits);
+    }
+}
+
+#[cfg(unix)]
+fn set_rlimit(resource: libc::__rlimit_resource_t, value: u64) {
+    let rlimit = libc::rlimit {
+        rlim_cur: value as libc::rlim_t,
+        rlim_max: value as libc::rlim_t,
+    };
+    // Best-effort: lowering a limit can still fail (e.g. RLIMIT_NPROC under a
+    // user namespace); the wall-clock timeout remains the final backstop.
+    let _ = unsafe { libc::setrlimit(resource, &rlimit) };
+}
+
 async fn terminate_process_group(child: &mut Child) {
     #[cfg(unix)]
     if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
@@ -483,5 +562,89 @@ fn path_has_control(path: &Path) -> bool {
         path.to_string_lossy()
             .chars()
             .any(|character| (character as u32) < 0x20 || character as u32 == 0x7f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resource_limits_validate_bounds() {
+        assert!(ResourceLimits {
+            nofile: None,
+            fsize: None,
+            nproc: None,
+        }
+        .validate()
+        .is_ok());
+        assert!(ResourceLimits {
+            nofile: Some(0),
+            fsize: None,
+            nproc: None,
+        }
+        .validate()
+        .is_err());
+        assert!(ResourceLimits {
+            nofile: Some(1_000_000_000_001),
+            fsize: None,
+            nproc: None,
+        }
+        .validate()
+        .is_err());
+        assert!(ResourceLimits {
+            nofile: Some(256),
+            fsize: Some(1024 * 1024),
+            nproc: Some(128),
+        }
+        .validate()
+        .is_ok());
+    }
+
+    /// RLIMIT_FSIZE must be inherited by the child and bound a single file's
+    /// size even when the command asks to write far more (§13.1).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fsize_limit_bounds_single_file_writes() {
+        if std::process::Command::new("dd")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return; // dd unavailable in this environment
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "mindcode-rlimit-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("out.bin");
+        let script = format!(
+            "dd if=/dev/zero of='{}' bs=1024 count=8 2>/dev/null; true",
+            target.display()
+        );
+        let request = ProcessRunRequest {
+            argv: vec!["sh".to_owned(), "-c".to_owned(), script],
+            cwd: dir.clone(),
+            env: BTreeMap::new(),
+            stdin: None,
+            timeout_ms: 10_000,
+            max_output_bytes: 1024 * 1024,
+            rlimits: Some(ResourceLimits {
+                nofile: None,
+                fsize: Some(2048),
+                nproc: None,
+            }),
+        };
+        let result = process_run(request, CancellationToken::new()).await.unwrap();
+        let size = std::fs::metadata(&target).map(|metadata| metadata.len()).unwrap_or(0);
+        assert!(size <= 2048, "file grew to {size} bytes despite fsize=2048");
+        assert!(size > 0, "dd should have written at least one block");
+        let _ = result;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

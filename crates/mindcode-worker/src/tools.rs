@@ -277,6 +277,7 @@ pub async fn run_shell(
         stdin: None,
         timeout_ms: SHELL_TIMEOUT_MS,
         max_output_bytes: MAX_PROCESS_OUTPUT,
+        rlimits: None,
     };
     let result = process_run(request, cancel.clone())
         .await
@@ -370,6 +371,7 @@ pub async fn run_git(
         stdin: None,
         timeout_ms: GIT_TIMEOUT_MS,
         max_output_bytes: MAX_PROCESS_OUTPUT,
+        rlimits: None,
     };
     let result = process_run(request, cancel.clone()).await?;
     Ok(redact_secrets(&result.stdout))
@@ -428,6 +430,7 @@ pub async fn run_rg(
         stdin: None,
         timeout_ms: RG_TIMEOUT_MS,
         max_output_bytes: MAX_PROCESS_OUTPUT,
+        rlimits: None,
     };
     let result = process_run(request, cancel.clone()).await?;
     Ok(redact_secrets(&result.stdout))
@@ -492,6 +495,7 @@ pub async fn run_agentgrep(
         stdin: None,
         timeout_ms: RG_TIMEOUT_MS,
         max_output_bytes: MAX_PROCESS_OUTPUT,
+        rlimits: None,
     };
     let result = process_run(request, cancel.clone()).await?;
     let matches = adaptive_trim(&redact_secrets(&result.stdout), MAX_AGENTGREP_OUTPUT);

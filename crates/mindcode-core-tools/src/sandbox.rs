@@ -8,11 +8,28 @@
 //! It is opt-in by design: the fast path for `Safe` commands stays un-sandboxed,
 //! and callers fall back to an explicit allow-list flag when bwrap is absent.
 
-use crate::{process_run, CoreToolError, CoreToolErrorCode, CoreToolResult, ProcessRunRequest, ProcessRunResult};
+use crate::{
+    process_run, CoreToolError, CoreToolErrorCode, CoreToolResult, ProcessRunRequest,
+    ProcessRunResult, ResourceLimits,
+};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
 const SANDBOX_TIMEOUT_MS: u64 = 120_000;
+
+/// Sensible resource bounds for a sandboxed command (§13.1): cap open FDs and
+/// single-file size so a runaway command cannot exhaust the host. `nproc` is
+/// deliberately left unset — RLIMIT_NPROC is a per-UID (host-wide) limit that
+/// would starve every process of the launching user, not just the sandbox.
+/// Process count stays bounded by `--unshare-pid`, the timeout, and
+/// `--die-with-parent` instead.
+fn default_rlimits() -> ResourceLimits {
+    ResourceLimits {
+        nofile: Some(256),
+        fsize: Some(1024 * 1024 * 1024),
+        nproc: None,
+    }
+}
 
 /// What the sandbox exposes and hides.
 #[derive(Clone, Debug)]
@@ -25,6 +42,8 @@ pub struct SandboxConfig {
     /// Whether the sandboxed process may reach the network.  Off by default:
     /// isolation drops the net namespace unless the caller explicitly opts in.
     pub network: NetworkPolicy,
+    /// Resource bounds applied to the sandboxed process.
+    pub rlimits: ResourceLimits,
 }
 
 /// Network exposure for a sandboxed command.
@@ -44,12 +63,19 @@ impl SandboxConfig {
             workspace,
             config_home,
             network: NetworkPolicy::Deny,
+            rlimits: default_rlimits(),
         }
     }
 
     /// Opt a sandboxed command into network access (default is offline).
     pub fn with_network(mut self, network: NetworkPolicy) -> Self {
         self.network = network;
+        self
+    }
+
+    /// Override the sandbox resource bounds (defaults are already applied).
+    pub fn with_rlimits(mut self, rlimits: ResourceLimits) -> Self {
+        self.rlimits = rlimits;
         self
     }
 }
@@ -161,6 +187,7 @@ pub async fn run_sandboxed(
         stdin: None,
         timeout_ms: SANDBOX_TIMEOUT_MS,
         max_output_bytes: 1024 * 1024,
+        rlimits: Some(config.rlimits),
     };
     process_run(request, cancel.clone()).await
 }
