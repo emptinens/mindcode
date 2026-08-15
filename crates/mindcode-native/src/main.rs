@@ -1899,16 +1899,16 @@ async fn run_tui_host_session(
                             if task.is_empty() {
                                 transcript.push("system", "usage: /work <task>");
                             } else {
-                                match spawn_worker(
-                                    &processor_session_id,
+                                match spawn_worker(WorkerLaunch {
+                                    session_id: &processor_session_id,
                                     task,
                                     tier,
                                     allow_unsafe_shell,
                                     allow_network,
-                                    pending.clone(),
-                                    worker_event_tx.clone(),
-                                    worker_pool.clone(),
-                                )
+                                    pending: pending.clone(),
+                                    worker_event_tx: worker_event_tx.clone(),
+                                    pool: worker_pool.clone(),
+                                })
                                 .await {
                                     Ok(message) => transcript.push("system", message),
                                     Err(error) => {
@@ -2300,11 +2300,7 @@ fn memory_candidate(memory_type: MemoryType, text: &str) -> Option<(MemoryType, 
 /// prose is not persisted: memory is opt-in by wording, which avoids turning
 /// an entire transcript into a durable profile.
 fn record_memory_candidates(store: &mut MemoryStore, role: &str, text: &str, session_id: &str) {
-    let default_type = if role == "assistant" {
-        MemoryType::Fact
-    } else {
-        MemoryType::Fact
-    };
+    let default_type = MemoryType::Fact;
     let provenance_prefix = project_memory_key();
     let now = now_ms();
     for line in text.lines().flat_map(|line| line.split([';', '\n'])) {
@@ -4244,20 +4240,35 @@ impl ApprovalGate for TuiApprovalGate {
 /// Monotonic worker id source (session-local; resets on each TUI launch).
 static NEXT_WORKER_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Resolve the active provider into a worker model client, build an ownership
-/// guard around the launch directory, and spawn the agent on the bounded pool.
-/// Returns the transcript confirmation line; the report arrives later through
-/// `worker_event_tx` as [`WorkerEvent::Finished`].
-async fn spawn_worker(
-    session_id: &str,
-    task: &str,
+/// Inputs needed to launch one bounded worker task. Grouping the launch
+/// context keeps the orchestration function readable as the worker contract
+/// grows without spreading more positional arguments through the TUI loop.
+struct WorkerLaunch<'a> {
+    session_id: &'a str,
+    task: &'a str,
     tier: PermissionTier,
     allow_unsafe_shell: bool,
     allow_network: bool,
     pending: Arc<Mutex<PendingApprovals>>,
     worker_event_tx: mpsc::UnboundedSender<WorkerEvent>,
     pool: WorkerPool,
-) -> Result<String> {
+}
+
+/// Resolve the active provider into a worker model client, build an ownership
+/// guard around the launch directory, and spawn the agent on the bounded pool.
+/// Returns the transcript confirmation line; the report arrives later through
+/// `worker_event_tx` as [`WorkerEvent::Finished`].
+async fn spawn_worker(request: WorkerLaunch<'_>) -> Result<String> {
+    let WorkerLaunch {
+        session_id,
+        task,
+        tier,
+        allow_unsafe_shell,
+        allow_network,
+        pending,
+        worker_event_tx,
+        pool,
+    } = request;
     let settings = load_native_settings()?;
     let client = TransportModelClient::resolve(&settings).await?;
     let worker_id = format!("worker-{}", NEXT_WORKER_ID.fetch_add(1, Ordering::SeqCst));
