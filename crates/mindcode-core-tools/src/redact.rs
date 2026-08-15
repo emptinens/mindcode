@@ -13,6 +13,7 @@ pub fn redact_secrets(text: &str) -> String {
     output = redact_sk_tokens(&output);
     output = redact_key_value(&output);
     output = redact_high_entropy_tokens(&output);
+    output = redact_encoded_tokens(&output);
     output
 }
 
@@ -114,15 +115,105 @@ fn redact_high_entropy_tokens(text: &str) -> String {
                 continue;
             }
         }
-        let next = rest
-            .char_indices()
-            .nth(1)
-            .map(|(index, _)| index)
-            .unwrap_or(rest.len());
+        let next = next_char_len(rest);
         output.push_str(&rest[..next]);
         rest = &rest[next..];
     }
     output
+}
+
+/// Catch encoded credential material even when it avoids the ordinary key
+/// prefixes. Hex/base32 are common output encodings for a protected file;
+/// ROT13 catches simple obfuscation of a recognizable marker such as `sk-` or
+/// `bearer`. This is intentionally conservative and only redacts long tokens.
+fn redact_encoded_tokens(text: &str) -> String {
+    let text = redact_hex_tokens(text);
+    let text = redact_base32_tokens(&text);
+    redact_rot13_tokens(&text)
+}
+
+fn redact_hex_tokens(text: &str) -> String {
+    redact_token_runs(text, |token| {
+        token.len() >= 32
+            && token.len().is_multiple_of(2)
+            && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+fn redact_base32_tokens(text: &str) -> String {
+    redact_token_runs(text, |token| {
+        if token.len() < 24 {
+            return false;
+        }
+        let mut digits = 0;
+        let valid = token.bytes().all(|byte| {
+            let upper = byte.to_ascii_uppercase();
+            if matches!(upper, b'2'..=b'7') {
+                digits += 1;
+            }
+            upper.is_ascii_uppercase() || matches!(upper, b'2'..=b'7') || upper == b'='
+        });
+        valid && digits >= 2
+    })
+}
+
+fn redact_rot13_tokens(text: &str) -> String {
+    redact_token_runs(text, |token| {
+        if token.len() < 16 {
+            return false;
+        }
+        let decoded = token
+            .chars()
+            .map(|character| match character {
+                'a'..='m' => ((character as u8) + 13) as char,
+                'n'..='z' => ((character as u8) - 13) as char,
+                'A'..='M' => ((character as u8) + 13) as char,
+                'N'..='Z' => ((character as u8) - 13) as char,
+                _ => character,
+            })
+            .collect::<String>()
+            .to_ascii_lowercase();
+        [
+            "sk-",
+            "bearer",
+            "api_key",
+            "apikey",
+            "secret",
+            "password",
+            "token",
+            "authorization",
+        ]
+        .iter()
+        .any(|marker| decoded.contains(marker))
+    })
+}
+
+fn redact_token_runs(text: &str, is_secret: impl Fn(&str) -> bool) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    while !rest.is_empty() {
+        let length = rest
+            .find(|character: char| {
+                !(character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '='))
+            })
+            .unwrap_or(rest.len());
+        if length > 0 && is_secret(&rest[..length]) {
+            output.push_str("[redacted]");
+            rest = &rest[length..];
+            continue;
+        }
+        let next = next_char_len(rest);
+        output.push_str(&rest[..next]);
+        rest = &rest[next..];
+    }
+    output
+}
+
+fn next_char_len(text: &str) -> usize {
+    text.char_indices()
+        .nth(1)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len())
 }
 
 /// Replace occurrences of `marker` using `decide`, which inspects the text
@@ -184,5 +275,23 @@ mod tests {
     fn preserves_plain_text_and_short_tokens() {
         let text = "rendered frame: command /status, 200K context budget, no secrets here";
         assert_eq!(redact_secrets(text), text);
+    }
+
+    #[test]
+    fn redacts_hex_and_base32_encoded_material() {
+        let hex = "2f686f6d652f757365722f2e7373682f69645f727361";
+        let base32 = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+        let redacted = redact_secrets(&format!("hex={hex} base32={base32}"));
+        assert!(!redacted.contains(hex));
+        assert!(!redacted.contains(base32));
+        assert_eq!(redacted.matches("[redacted]").count(), 2);
+    }
+
+    #[test]
+    fn redacts_rot13_of_recognizable_secret_marker() {
+        let encoded = "fx-fhcre-frperg-gbxra-123456";
+        let redacted = redact_secrets(encoded);
+        assert!(!redacted.contains(encoded));
+        assert!(redacted.contains("[redacted]"));
     }
 }
