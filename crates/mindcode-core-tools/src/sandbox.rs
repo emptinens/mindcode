@@ -49,6 +49,14 @@ pub struct SandboxConfig {
     /// default; the denylist refuses escape/host-global-state syscalls while
     /// leaving the normal build surface open.
     pub seccomp: bool,
+    /// Optional host toolchain directories to expose through `PATH`. Only
+    /// callers that explicitly need user-installed tools (for example Cargo)
+    /// should set it; the default remains the fixed system PATH.
+    pub path: Option<String>,
+    /// Read-only host Rust toolchain metadata for rustup-backed commands. It is
+    /// never used as HOME, so credential files under the user's home remain
+    /// hidden by the normal config tmpfs mount.
+    pub toolchain_home: Option<PathBuf>,
 }
 
 /// Network exposure for a sandboxed command.
@@ -70,6 +78,8 @@ impl SandboxConfig {
             network: NetworkPolicy::Deny,
             rlimits: default_rlimits(),
             seccomp: true,
+            path: None,
+            toolchain_home: None,
         }
     }
 
@@ -88,6 +98,21 @@ impl SandboxConfig {
     /// Disable the seccomp denylist (e.g. for compatibility debugging).
     pub fn with_seccomp(mut self, enabled: bool) -> Self {
         self.seccomp = enabled;
+        self
+    }
+
+    /// Set a sanitized toolchain PATH for commands such as Cargo. The caller
+    /// owns the filtering policy; this builder only stores the value for the
+    /// bounded child environment.
+    pub fn with_path(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+
+    /// Expose only the rustup metadata directory needed by Cargo/rustc
+    /// shims; the sandbox still uses the workspace as HOME.
+    pub fn with_toolchain_home(mut self, path: PathBuf) -> Self {
+        self.toolchain_home = Some(path);
         self
     }
 }
@@ -151,7 +176,11 @@ pub fn build_bwrap_argv(config: &SandboxConfig, command: &[String]) -> Vec<Strin
         "--clearenv".to_owned(),
         "--setenv".to_owned(),
         "PATH".to_owned(),
-        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_owned(),
+        config
+            .path
+            .as_deref()
+            .unwrap_or("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            .to_owned(),
         "--setenv".to_owned(),
         "HOME".to_owned(),
         config.workspace.to_string_lossy().into_owned(),
@@ -165,6 +194,18 @@ pub fn build_bwrap_argv(config: &SandboxConfig, command: &[String]) -> Vec<Strin
         // the command can reach the network while every other namespace stays
         // isolated. Insert it right after `--unshare-all` (index 2).
         argv.insert(3, "--share-net".to_owned());
+    }
+    if let Some(toolchain_home) = &config.toolchain_home {
+        if let Some(separator) = argv.iter().position(|arg| arg == "--") {
+            argv.splice(
+                separator..separator,
+                [
+                    "--setenv".to_owned(),
+                    "RUSTUP_HOME".to_owned(),
+                    toolchain_home.to_string_lossy().into_owned(),
+                ],
+            );
+        }
     }
     argv.extend(command.iter().cloned());
     argv

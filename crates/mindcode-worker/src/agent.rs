@@ -6,7 +6,7 @@ use crate::error::{WorkerError, WorkerResult};
 use crate::guard::OwnershipGuard;
 use crate::hooks::{run_pre_tool, HookDecision, HookSet};
 use crate::permission::PermissionTier;
-use crate::report::{CommandRun, WorkerReport, WorkerStatus};
+use crate::report::{CommandRun, TestRun, WorkerReport, WorkerStatus};
 use crate::risk::{classify, ShellRisk};
 use crate::scope::WorkerScope;
 use crate::tools;
@@ -123,6 +123,14 @@ pub fn default_tool_defs() -> Vec<ToolSpec> {
             parameters: object(serde_json::json!({
                 "path": {"type": "string"},
                 "content": {"type": "string"},
+            })),
+        },
+        ToolSpec {
+            name: "run_tests".to_owned(),
+            description: "Run the project's tests in the sandbox; defaults to cargo test, pytest, or make test".to_owned(),
+            parameters: object(serde_json::json!({
+                "argv": {"type": "array", "items": {"type": "string"}},
+                "allow_network": {"type": "boolean"},
             })),
         },
         ToolSpec {
@@ -450,6 +458,62 @@ impl WorkerAgent {
                         .await?;
                 report.files_changed.push(path);
                 Ok((format!("appended {written} bytes"), None))
+            }
+            "run_tests" => {
+                let argv = match call.arguments.get("argv") {
+                    None | Some(Value::Null) => {
+                        tools::default_test_argv(self.guard.workspace_root())?
+                    }
+                    Some(_) => arg_strings(&call.arguments, "argv")?,
+                };
+                let command = argv.join(" ");
+                match classify(&command) {
+                    ShellRisk::Deny => {
+                        return Err(WorkerError::RiskDenied { command });
+                    }
+                    ShellRisk::Confirm => {
+                        if self.guard.tier() != PermissionTier::FullAccess
+                            && !self.mark_reflected(&command)?
+                        {
+                            return Ok((reflection_prompt(&command), None));
+                        }
+                    }
+                    ShellRisk::Safe => {}
+                }
+                self.authorize_command(&call.name, &command, allow_worker)
+                    .await?;
+                let allow_network = call
+                    .arguments
+                    .get("allow_network")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let guard = self.exec_guard();
+                let test = tools::run_tests(&guard, &argv, allow_network, &cancel).await?;
+                report.test_runs.push(TestRun {
+                    command: test.command.clone(),
+                    exit_code: test.exit_code,
+                    passed: test.passed,
+                    failed: test.failed,
+                    skipped: test.skipped,
+                    summary_lines: test.summary_lines.clone(),
+                });
+                let mut rendered = format!(
+                    "test run: {}\nexit: {:?}; passed: {}; failed: {}; skipped: {}",
+                    test.command, test.exit_code, test.passed, test.failed, test.skipped
+                );
+                if !test.output.is_empty() {
+                    rendered.push_str("\noutput:\n");
+                    rendered.push_str(&test.output);
+                }
+                let output_len = test.output.len() as u64;
+                Ok((
+                    rendered,
+                    Some(CommandRun {
+                        command: test.command,
+                        exit_code: test.exit_code,
+                        output_len,
+                    }),
+                ))
             }
             "run_shell" => {
                 let argv = arg_strings(&call.arguments, "argv")?;

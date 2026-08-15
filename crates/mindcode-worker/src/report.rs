@@ -21,6 +21,17 @@ pub struct CommandRun {
     pub output_len: u64,
 }
 
+/// Structured evidence from one bounded test-runner invocation (§5.1.3).
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TestRun {
+    pub command: String,
+    pub exit_code: Option<i32>,
+    pub passed: u64,
+    pub failed: u64,
+    pub skipped: u64,
+    pub summary_lines: Vec<String>,
+}
+
 /// Token/cost counters attributed to one worker (§10.3).
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct WorkerUsage {
@@ -38,6 +49,7 @@ pub struct WorkerReport {
     pub files_read: Vec<String>,
     pub files_changed: Vec<String>,
     pub commands_run: Vec<CommandRun>,
+    pub test_runs: Vec<TestRun>,
     pub findings: Vec<String>,
     pub deviations: Vec<String>,
     pub risks: Vec<String>,
@@ -79,6 +91,14 @@ mod tests {
                 command: "cargo fmt".into(),
                 exit_code: Some(0),
                 output_len: 0,
+            }],
+            test_runs: vec![TestRun {
+                command: "cargo test".into(),
+                exit_code: Some(0),
+                passed: 3,
+                failed: 0,
+                skipped: 1,
+                summary_lines: vec!["3 passed".into()],
             }],
             findings: vec!["build is green".into()],
             deviations: Vec::new(),

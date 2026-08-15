@@ -178,6 +178,61 @@ async fn agent_reports_a_denied_tool_and_continues() {
 // §13.1: under `full-access` a shell command is sandboxed by default, and the
 // explicit `--allow-unsafe-shell` opt-out runs it unsandboxed.
 #[tokio::test]
+async fn run_tests_returns_structured_evidence_for_a_mini_project() {
+    if !mindcode_core_tools::bwrap_available() {
+        return;
+    }
+    let (workspace, _config, scope, guard) = fixture(PermissionTier::Workspace);
+    std::fs::write(
+        workspace.path().join("Cargo.toml"),
+        "[package]\nname = \"mini-test-project\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.path().join("src/lib.rs"),
+        "#[test]\nfn one_test_passes() { assert_eq!(2 + 2, 4); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.path().join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.97.1\"\n",
+    )
+    .unwrap();
+    let client = Arc::new(ScriptedClient::new(vec![
+        ModelTurn {
+            tool_calls: vec![tool_call(
+                "call-tests",
+                "run_tests",
+                serde_json::json!({"argv": ["cargo", "test"]}),
+            )],
+            ..Default::default()
+        },
+        turn_text("tests passed"),
+    ]));
+
+    let agent = WorkerAgent::new("w-tests", client, Arc::new(AllowAllGate), scope, guard);
+    let report = agent
+        .run("run the project tests", CancellationToken::new())
+        .await;
+
+    assert_eq!(report.status, WorkerStatus::Success);
+    assert_eq!(report.test_runs.len(), 1);
+    assert_eq!(
+        report.test_runs[0].exit_code,
+        Some(0),
+        "test report: {:?}",
+        report.test_runs
+    );
+    assert!(
+        report.test_runs[0].passed >= 1,
+        "test report: {:?}",
+        report.test_runs
+    );
+    assert_eq!(report.test_runs[0].failed, 0);
+    assert!(report.commands_run[0].command.contains("cargo test"));
+}
+
+#[tokio::test]
 async fn full_access_shell_runs_unsandboxed_when_unsafe_shell_allowed() {
     let (_workspace, _config, scope, guard) = fixture(PermissionTier::FullAccess);
     let client = Arc::new(ScriptedClient::new(vec![ModelTurn {

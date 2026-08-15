@@ -247,6 +247,196 @@ async fn ensure_parent_exists(target: &Path) -> WorkerResult<()> {
     }
 }
 
+/// Structured result of the bounded test runner. The full output is kept only
+/// long enough to provide the model a capped preview; the agent records the
+/// typed counters in `WorkerReport::test_runs`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TestRunResult {
+    pub command: String,
+    pub exit_code: Option<i32>,
+    pub passed: u64,
+    pub failed: u64,
+    pub skipped: u64,
+    pub summary_lines: Vec<String>,
+    pub output: String,
+}
+
+/// Determine the safest project-local default test command without executing
+/// anything. Explicit argv overrides are still accepted by `run_tests`, but
+/// all variants execute through the sandbox.
+pub fn default_test_argv(workspace: &Path) -> WorkerResult<Vec<String>> {
+    if workspace.join("Cargo.toml").is_file() {
+        return Ok(vec!["cargo".to_owned(), "test".to_owned()]);
+    }
+    if workspace.join("pyproject.toml").is_file() || workspace.join("pytest.ini").is_file() {
+        return Ok(vec!["pytest".to_owned()]);
+    }
+    if workspace.join("Makefile").is_file() {
+        return Ok(vec!["make".to_owned(), "test".to_owned()]);
+    }
+    Err(WorkerError::InvalidRequest(
+        "run_tests could not detect a test command; provide argv".to_owned(),
+    ))
+}
+
+/// Run a detected or explicitly supplied test command in the bwrap sandbox.
+/// Network access is always explicit and the output is capped/redacted at the
+/// process boundary. The timeout is the sandbox's bounded 120-second limit.
+pub async fn run_tests(
+    guard: &OwnershipGuard,
+    argv: &[String],
+    allow_network: bool,
+    cancel: &CancellationToken,
+) -> WorkerResult<TestRunResult> {
+    check_cancelled(cancel)?;
+    if argv.is_empty() || argv[0].is_empty() {
+        return Err(WorkerError::InvalidRequest(
+            "run_tests argv must not be empty".to_owned(),
+        ));
+    }
+    let network = if allow_network {
+        NetworkPolicy::Allow
+    } else {
+        NetworkPolicy::Deny
+    };
+    let config = SandboxConfig::new(
+        guard.workspace_root().to_path_buf(),
+        guard.config_home().to_path_buf(),
+    )
+    .with_network(network);
+    let config = match sanitized_toolchain_path(guard) {
+        Some(path) => config.with_path(path),
+        None => config,
+    };
+    let config = match sanitized_rustup_home(guard) {
+        Some(path) => config.with_toolchain_home(path),
+        None => config,
+    };
+    let result = run_sandboxed(&config, argv, cancel)
+        .await
+        .map_err(WorkerError::from)?;
+    let result = redact_result(result);
+    let output = process_output_text(&result);
+    let (passed, failed, skipped) = parse_test_counts(&output, result.exit_code);
+    let summary_lines = output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let summary_lines = summary_lines
+        .into_iter()
+        .rev()
+        .take(12)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    Ok(TestRunResult {
+        command: argv.join(" "),
+        exit_code: result.exit_code,
+        passed,
+        failed,
+        skipped,
+        summary_lines,
+        output,
+    })
+}
+
+/// Preserve only absolute, existing PATH directories that are outside the
+/// writable workspace and hidden config directory. This makes user-installed
+/// tools such as Cargo available without allowing a workspace executable to
+/// shadow them inside the sandbox.
+fn sanitized_toolchain_path(guard: &OwnershipGuard) -> Option<String> {
+    let workspace = guard.workspace_root();
+    let config_home = guard.config_home();
+    let paths = std::env::var_os("PATH")?
+        .into_string()
+        .ok()?
+        .split(':')
+        .map(PathBuf::from)
+        .filter(|path| {
+            path.is_absolute()
+                && path.is_dir()
+                && !path.starts_with(workspace)
+                && !path.starts_with(config_home)
+        })
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        return None;
+    }
+    std::env::join_paths(paths)
+        .ok()
+        .and_then(|path| path.into_string().ok())
+}
+
+fn sanitized_rustup_home(guard: &OwnershipGuard) -> Option<PathBuf> {
+    let candidate = std::env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".rustup")))?;
+    if candidate.is_absolute()
+        && candidate.is_dir()
+        && !candidate.starts_with(guard.workspace_root())
+        && !candidate.starts_with(guard.config_home())
+    {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn process_output_text(result: &ProcessRunResult) -> String {
+    let mut output = result.stdout.clone();
+    if !result.stderr.is_empty() {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str("[stderr] ");
+        output.push_str(&result.stderr);
+    }
+    if result.timed_out {
+        output.push_str("\n[timed out]");
+    }
+    if result.truncated {
+        output.push_str("\n[truncated]");
+    }
+    output
+}
+
+fn parse_test_counts(output: &str, exit_code: Option<i32>) -> (u64, u64, u64) {
+    let passed = count_before_word(output, &["passed", "pass"]);
+    let failed = count_before_word(output, &["failed", "fail", "failure"]);
+    let skipped = count_before_word(output, &["skipped", "skip", "ignored"]);
+    if passed.is_none() && failed.is_none() && skipped.is_none() {
+        if exit_code == Some(0) {
+            (1, 0, 0)
+        } else {
+            (0, 1, 0)
+        }
+    } else {
+        (
+            passed.unwrap_or(0),
+            failed.unwrap_or(0),
+            skipped.unwrap_or(0),
+        )
+    }
+}
+
+fn count_before_word(output: &str, words: &[&str]) -> Option<u64> {
+    let tokens = output.split_whitespace().collect::<Vec<_>>();
+    for window in tokens.windows(2) {
+        let number = window[0].trim_matches(|character: char| !character.is_ascii_digit());
+        let word = window[1]
+            .trim_matches(|character: char| !character.is_ascii_alphabetic())
+            .to_ascii_lowercase();
+        if words.iter().any(|candidate| *candidate == word) {
+            if let Ok(number) = number.parse::<u64>() {
+                return Some(number);
+            }
+        }
+    }
+    None
+}
+
 /// Run a shell command with `cwd` set to the workspace root. The shell obeys
 /// the scope contractually in v1 (§10.4.8); only the tier gates it here.
 pub async fn run_shell(
@@ -300,6 +490,14 @@ pub async fn run_shell_sandboxed(
         guard.config_home().to_path_buf(),
     )
     .with_network(network);
+    let config = match sanitized_toolchain_path(guard) {
+        Some(path) => config.with_path(path),
+        None => config,
+    };
+    let config = match sanitized_rustup_home(guard) {
+        Some(path) => config.with_toolchain_home(path),
+        None => config,
+    };
     let result = run_sandboxed(&config, argv, cancel)
         .await
         .map_err(WorkerError::from)?;
@@ -589,6 +787,37 @@ mod tests {
             Err(WorkerError::InvalidRequest(_))
         ));
         assert_eq!(list.apply("clear", None).unwrap(), "todo list is empty");
+    }
+
+    #[test]
+    fn default_test_command_is_project_aware() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            default_test_argv(temp.path()),
+            Err(WorkerError::InvalidRequest(_))
+        ));
+        std::fs::write(temp.path().join("Cargo.toml"), "[package]\nname='x'\n").unwrap();
+        assert_eq!(default_test_argv(temp.path()).unwrap(), ["cargo", "test"]);
+        std::fs::remove_file(temp.path().join("Cargo.toml")).unwrap();
+        std::fs::write(temp.path().join("pyproject.toml"), "[tool.pytest]\n").unwrap();
+        assert_eq!(default_test_argv(temp.path()).unwrap(), ["pytest"]);
+        std::fs::remove_file(temp.path().join("pyproject.toml")).unwrap();
+        std::fs::write(temp.path().join("Makefile"), "test:\n").unwrap();
+        assert_eq!(default_test_argv(temp.path()).unwrap(), ["make", "test"]);
+    }
+
+    #[test]
+    fn test_result_parser_handles_rust_and_pytest_formats() {
+        assert_eq!(
+            parse_test_counts("test result: ok. 7 passed; 0 failed; 2 ignored;", Some(0)),
+            (7, 0, 2)
+        );
+        assert_eq!(
+            parse_test_counts("2 passed, 1 failed, 3 skipped", Some(1)),
+            (2, 1, 3)
+        );
+        assert_eq!(parse_test_counts("finished", Some(0)), (1, 0, 0));
+        assert_eq!(parse_test_counts("finished", Some(1)), (0, 1, 0));
     }
 
     #[test]
