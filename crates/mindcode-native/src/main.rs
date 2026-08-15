@@ -38,10 +38,10 @@ use mindcode_vexzy::{
     eligible_worker_models, parse_vexzy_model_catalog, VexzyModel, VexzyModelCatalog, WorkerEffort,
 };
 use mindcode_worker::{
-    bwrap_available, ApprovalDecision, ApprovalGate, ApprovalRequest, DecisionFuture, HookSet,
-    ModelClient, ModelTurn, OwnershipGuard, PermissionTier, PoolOutcome, ResolvedToolCall,
-    WorkerAgent, WorkerError, WorkerPool, WorkerReport, WorkerResult, WorkerScope, WorkerStatus,
-    WorkerUsage, DEFAULT_MAX_CONCURRENT, DEFAULT_WORKER_CONTEXT_TOKEN_BUDGET,
+    bwrap_available, classify, ApprovalDecision, ApprovalGate, ApprovalRequest, DecisionFuture,
+    HookSet, ModelClient, ModelTurn, OwnershipGuard, PermissionTier, PoolOutcome, ResolvedToolCall,
+    ShellRisk, WorkerAgent, WorkerError, WorkerPool, WorkerReport, WorkerResult, WorkerScope,
+    WorkerStatus, WorkerUsage, DEFAULT_MAX_CONCURRENT, DEFAULT_WORKER_CONTEXT_TOKEN_BUDGET,
 };
 use mindcoded::{
     daemon_token_path,
@@ -2412,18 +2412,40 @@ async fn run_tui_host_session(
     Ok(TuiHost { server, processor })
 }
 
-/// One append-only, secret-free accounting record for a settled chat or
-/// worker attempt (§5.3.2). `cost: null` is intentional when usage was absent.
+/// One append-only, secret-free ledger event for a chat or worker attempt
+/// (§5.3.2). Three events share one `attempt_id`: reserved → dispatched →
+/// settled. `accounted_upper_bound_usd: null` is intentional when provider
+/// usage is absent; it is never fabricated as `$0.00`.
 #[derive(Clone, Debug)]
 struct LedgerAttempt {
+    /// Event id, monotonically increasing within the session file.
     id: u64,
+    /// Logical attempt id shared by its lifecycle events.
+    attempt_id: u64,
     timestamp_ms: u64,
     model: String,
     input_tokens: u64,
     output_tokens: u64,
     cached_tokens: u64,
     cost: Option<f64>,
+    accounted_upper_bound_usd: Option<f64>,
+    phase: String,
+    outcome: Option<String>,
+    /// Kept for compatibility with existing session readers; lifecycle phase
+    /// is in `phase`, while this field remains the stable human status.
     status: String,
+}
+
+struct LedgerEventInput {
+    attempt_id: u64,
+    phase: String,
+    status: String,
+    model: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    cached_tokens: u64,
+    cost: Option<f64>,
+    outcome: Option<String>,
 }
 
 /// In-memory TUI conversation state: the transcript republished on every turn.
@@ -2435,10 +2457,73 @@ struct TuiTranscript {
 }
 
 impl TuiTranscript {
-    fn record_chat_attempt(&mut self, outcome: &ChatOutcome) {
+    fn next_attempt_id(&self) -> u64 {
+        self.attempts
+            .iter()
+            .map(|attempt| attempt.attempt_id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
+
+    fn append_ledger_event(&mut self, event: LedgerEventInput) {
         self.attempts.push(LedgerAttempt {
             id: self.attempts.len() as u64,
+            attempt_id: event.attempt_id,
             timestamp_ms: now_ms(),
+            model: event.model,
+            input_tokens: event.input_tokens,
+            output_tokens: event.output_tokens,
+            cached_tokens: event.cached_tokens,
+            accounted_upper_bound_usd: event.cost,
+            cost: event.cost,
+            phase: event.phase,
+            outcome: event.outcome,
+            status: event.status,
+        });
+    }
+
+    fn reserve_attempt(&mut self, model_hint: impl Into<String>) -> u64 {
+        let attempt_id = self.next_attempt_id();
+        self.append_ledger_event(LedgerEventInput {
+            attempt_id,
+            phase: "reserved".into(),
+            status: "reserved".into(),
+            model: model_hint.into(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_tokens: 0,
+            cost: None,
+            outcome: None,
+        });
+        attempt_id
+    }
+
+    fn dispatch_attempt(&mut self, attempt_id: u64, model: impl Into<String>) {
+        self.append_ledger_event(LedgerEventInput {
+            attempt_id,
+            phase: "dispatched".into(),
+            status: "dispatched".into(),
+            model: model.into(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_tokens: 0,
+            cost: None,
+            outcome: None,
+        });
+    }
+
+    fn settle_attempt(&mut self, attempt_id: u64, outcome: &ChatOutcome) {
+        let cost = estimate_turn_cost(outcome).map(|(cost, _)| cost);
+        let outcome_label = if outcome.usage_reported {
+            "success"
+        } else {
+            "usage_unknown"
+        };
+        self.append_ledger_event(LedgerEventInput {
+            attempt_id,
+            phase: "settled".into(),
+            status: "settled".into(),
             model: outcome.model.clone(),
             input_tokens: outcome.usage.input_tokens,
             output_tokens: outcome.usage.output_tokens,
@@ -2446,31 +2531,39 @@ impl TuiTranscript {
                 .usage
                 .cached_read_tokens
                 .saturating_add(outcome.usage.cache_creation_tokens),
-            cost: estimate_turn_cost(outcome).map(|(cost, _)| cost),
-            status: if outcome.usage_reported {
-                "settled".to_owned()
-            } else {
-                "usage_unknown".to_owned()
-            },
+            cost,
+            outcome: Some(outcome_label.to_owned()),
         });
     }
 
+    /// Record a complete chat lifecycle for offline callers/tests. The live
+    /// TUI uses the same event helpers around the actual request.
+    fn record_chat_attempt(&mut self, outcome: &ChatOutcome) {
+        let attempt_id = self.reserve_attempt("pending");
+        self.dispatch_attempt(attempt_id, &outcome.model);
+        self.settle_attempt(attempt_id, outcome);
+    }
+
     fn record_worker_attempt(&mut self, report: &WorkerReport) {
-        self.attempts.push(LedgerAttempt {
-            id: self.attempts.len() as u64,
-            timestamp_ms: now_ms(),
+        let attempt_id = self.reserve_attempt(format!("worker:{}", report.id));
+        self.dispatch_attempt(attempt_id, format!("worker:{}", report.id));
+        let cost = report.usage.cost_known.then_some(report.usage.cost);
+        let outcome = match report.status {
+            WorkerStatus::Success => "success",
+            WorkerStatus::Failed => "failed",
+            WorkerStatus::Cancelled => "cancelled",
+            WorkerStatus::Timeout => "timeout",
+        };
+        self.append_ledger_event(LedgerEventInput {
+            attempt_id,
+            phase: "settled".into(),
+            status: "settled".into(),
             model: format!("worker:{}", report.id),
             input_tokens: report.usage.input_tokens,
             output_tokens: report.usage.output_tokens,
             cached_tokens: report.usage.cached_tokens,
-            cost: report.usage.cost_known.then_some(report.usage.cost),
-            status: match report.status {
-                WorkerStatus::Success => "success",
-                WorkerStatus::Failed => "failed",
-                WorkerStatus::Cancelled => "cancelled",
-                WorkerStatus::Timeout => "timeout",
-            }
-            .to_owned(),
+            cost,
+            outcome: Some(outcome.to_owned()),
         });
     }
 
@@ -2777,12 +2870,19 @@ fn save_session(
         .map(|attempt| {
             serde_json::json!({
                 "id": attempt.id,
+                "attempt_id": attempt.attempt_id,
                 "timestamp_ms": attempt.timestamp_ms,
                 "model": attempt.model,
                 "input_tokens": attempt.input_tokens,
                 "output_tokens": attempt.output_tokens,
                 "cached_tokens": attempt.cached_tokens,
                 "cost": attempt.cost.map(Value::from).unwrap_or(Value::Null),
+                "accounted_upper_bound_usd": attempt
+                    .accounted_upper_bound_usd
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
+                "phase": attempt.phase,
+                "outcome": attempt.outcome,
                 "status": attempt.status,
             })
         })
@@ -2851,6 +2951,10 @@ fn load_session(session_id: &str) -> (TuiTranscript, SessionStats) {
                     .get("id")
                     .and_then(Value::as_u64)
                     .unwrap_or(transcript.attempts.len() as u64),
+                attempt_id: attempt
+                    .get("attempt_id")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_else(|| attempt.get("id").and_then(Value::as_u64).unwrap_or(0)),
                 timestamp_ms: attempt
                     .get("timestamp_ms")
                     .and_then(Value::as_u64)
@@ -2869,6 +2973,24 @@ fn load_session(session_id: &str) -> (TuiTranscript, SessionStats) {
                     .and_then(Value::as_u64)
                     .unwrap_or(0),
                 cost: attempt.get("cost").and_then(Value::as_f64),
+                accounted_upper_bound_usd: attempt
+                    .get("accounted_upper_bound_usd")
+                    .and_then(Value::as_f64)
+                    .or_else(|| attempt.get("cost").and_then(Value::as_f64)),
+                phase: attempt
+                    .get("phase")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| {
+                        attempt
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("settled")
+                    })
+                    .to_owned(),
+                outcome: attempt
+                    .get("outcome")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
                 status: attempt
                     .get("status")
                     .and_then(Value::as_str)
@@ -4286,9 +4408,12 @@ struct TransportModelClient {
 
 impl TransportModelClient {
     /// Resolve the active provider, its credential (env -> store ->
-    /// fail-closed), and catalog-eligible model — the same resolution as a
-    /// chat turn.
-    async fn resolve(settings: &NativeSettings) -> Result<Self> {
+    /// fail-closed), and catalog-eligible model, applying the global lock or
+    /// the local Ares effort when no lock is set.
+    async fn resolve_with_effort(
+        settings: &NativeSettings,
+        automatic_effort: Option<WorkerEffort>,
+    ) -> Result<Self> {
         let provider = run_active_provider_config(settings, None)
             .ok_or_else(|| anyhow!("no active provider is configured"))?;
         let store = load_store(&native_store_path()?).map_err(anyhow::Error::msg)?;
@@ -4302,20 +4427,15 @@ impl TransportModelClient {
                 )
             })?;
         let transport = Transport::new(&provider.base_url).map_err(anyhow::Error::msg)?;
-        let model = resolve_provider_model(
-            settings,
-            provider,
-            &key,
-            &transport,
-            None,
-            settings.worker_effort_lock,
-        )
-        .await?;
+        // An explicit global lock always wins over the local Ares heuristic.
+        let effort = settings.worker_effort_lock.or(automatic_effort);
+        let model =
+            resolve_provider_model(settings, provider, &key, &transport, None, effort).await?;
         Ok(Self {
             provider: provider.clone(),
             key,
             model,
-            effort: settings.worker_effort_lock,
+            effort,
         })
     }
 }
@@ -4667,6 +4787,67 @@ struct WorkerLaunch<'a> {
     pool: WorkerPool,
 }
 
+/// Deterministic Ares-style signals collected before a worker step. The
+/// classifier is deliberately local: it never asks an LLM to choose effort.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AresStepSignals {
+    diff_bytes: u64,
+    tool_calls: u32,
+    risk: ShellRisk,
+    verification_required: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AresDecision {
+    effort: WorkerEffort,
+    score: u8,
+}
+
+fn ares_decide(signals: AresStepSignals) -> AresDecision {
+    let risk_score = match signals.risk {
+        ShellRisk::Safe => 0,
+        ShellRisk::Confirm => 2,
+        ShellRisk::Deny => 4,
+    };
+    let diff_score = match signals.diff_bytes {
+        0..=512 => 0,
+        513..=4_096 => 1,
+        _ => 2,
+    };
+    let tool_score = match signals.tool_calls {
+        0..=2 => 0,
+        3..=6 => 1,
+        _ => 2,
+    };
+    let score = risk_score + diff_score + tool_score + u8::from(signals.verification_required) * 2;
+    let effort = if signals.verification_required && score >= 5 {
+        WorkerEffort::Max
+    } else if score >= 5 {
+        WorkerEffort::Xhigh
+    } else if score >= 3 {
+        WorkerEffort::High
+    } else if score >= 1 {
+        WorkerEffort::Medium
+    } else {
+        WorkerEffort::Low
+    };
+    AresDecision { effort, score }
+}
+
+fn ares_decide_for_task(task: &str) -> AresDecision {
+    ares_decide(AresStepSignals {
+        diff_bytes: 0,
+        tool_calls: 0,
+        risk: classify(task),
+        verification_required: task.split_whitespace().any(|word| {
+            matches!(
+                word.to_ascii_lowercase().as_str(),
+                "verify" | "verification" | "test" | "tests"
+            )
+        }),
+    })
+}
+
 /// Resolve the active provider into a worker model client, build an ownership
 /// guard around the launch directory, and spawn the agent on the bounded pool.
 /// Returns the transcript confirmation line; the report arrives later through
@@ -4683,7 +4864,8 @@ async fn spawn_worker(request: WorkerLaunch<'_>) -> Result<String> {
         pool,
     } = request;
     let settings = load_native_settings()?;
-    let client = TransportModelClient::resolve(&settings).await?;
+    let ares = ares_decide_for_task(task);
+    let client = TransportModelClient::resolve_with_effort(&settings, Some(ares.effort)).await?;
     let worker_id = format!("worker-{}", NEXT_WORKER_ID.fetch_add(1, Ordering::SeqCst));
     let gate = TuiApprovalGate {
         pending: pending.clone(),
@@ -4727,7 +4909,11 @@ async fn spawn_worker(request: WorkerLaunch<'_>) -> Result<String> {
         .with_allow_network(allow_network),
     );
     let task = task.to_owned();
-    let confirmation = format!("spawned {worker_id}: {task}");
+    let confirmation = format!(
+        "spawned {worker_id}: {task} (Ares effort={} score={})",
+        ares.effort.as_str(),
+        ares.score
+    );
     let cancel = CancellationToken::new();
     tokio::spawn(async move {
         let run_cancel = cancel.clone();
@@ -6133,14 +6319,23 @@ mod tests {
 
             let raw = fs::read_to_string(session_path("ledger").unwrap()).unwrap();
             let value: Value = serde_json::from_str(&raw).unwrap();
-            assert_eq!(value["attempts"].as_array().unwrap().len(), 1);
-            assert_eq!(value["attempts"][0]["cost"], Value::Null);
-            assert_eq!(value["attempts"][0]["status"], "usage_unknown");
+            assert_eq!(value["attempts"].as_array().unwrap().len(), 3);
+            assert_eq!(value["attempts"][0]["phase"], "reserved");
+            assert_eq!(value["attempts"][1]["phase"], "dispatched");
+            assert_eq!(value["attempts"][2]["phase"], "settled");
+            assert_eq!(value["attempts"][2]["cost"], Value::Null);
+            assert_eq!(
+                value["attempts"][2]["accounted_upper_bound_usd"],
+                Value::Null
+            );
+            assert_eq!(value["attempts"][2]["status"], "settled");
+            assert_eq!(value["attempts"][2]["outcome"], "usage_unknown");
 
             let (loaded, _) = load_session("ledger");
-            assert_eq!(loaded.attempts.len(), 1);
-            assert_eq!(loaded.attempts[0].model, "deepseek-v4-flash");
-            assert_eq!(loaded.attempts[0].cost, None);
+            assert_eq!(loaded.attempts.len(), 3);
+            assert_eq!(loaded.attempts[2].model, "deepseek-v4-flash");
+            assert_eq!(loaded.attempts[2].cost, None);
+            assert_eq!(loaded.attempts[2].accounted_upper_bound_usd, None);
         });
     }
 
@@ -6773,6 +6968,40 @@ mod tests {
         );
         assert_eq!(output["models"].as_array().unwrap().len(), 1);
         assert!(!output.to_string().contains("supported_reasoning_efforts"));
+    }
+
+    #[test]
+    fn ares_routes_effort_by_risk_complexity_and_verification() {
+        let light = ares_decide(AresStepSignals {
+            diff_bytes: 0,
+            tool_calls: 0,
+            risk: ShellRisk::Safe,
+            verification_required: false,
+        });
+        assert_eq!(light.effort, WorkerEffort::Low);
+        assert_eq!(light.score, 0);
+
+        let risky = ares_decide(AresStepSignals {
+            diff_bytes: 8_000,
+            tool_calls: 7,
+            risk: ShellRisk::Confirm,
+            verification_required: false,
+        });
+        assert_eq!(risky.effort, WorkerEffort::Xhigh);
+        assert_eq!(risky.score, 6);
+
+        let verify = ares_decide(AresStepSignals {
+            diff_bytes: 8_000,
+            tool_calls: 7,
+            risk: ShellRisk::Confirm,
+            verification_required: true,
+        });
+        assert_eq!(verify.effort, WorkerEffort::Max);
+        assert_eq!(verify.score, 8);
+        assert_eq!(
+            ares_decide_for_task("verify the migration tests").effort,
+            WorkerEffort::Medium
+        );
     }
 
     #[test]
