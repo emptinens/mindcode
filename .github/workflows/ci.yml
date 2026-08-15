@@ -29,6 +29,17 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-targets --locked
 
+      - name: CLI compatibility fixtures
+        run: cargo test -p mindcode-native --test cli_fixture --locked
+
+      - name: Supply-chain policy
+        run: |
+          cargo install cargo-deny --locked
+          ./scripts/sbom.sh
+
+      - name: Whitespace policy
+        run: git diff --check
+
       - name: Release build and smoke test (no Bun/Node)
         run: |
           ./scripts/build-native-release.sh
