@@ -25,7 +25,7 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
 pub mod soft_interrupt;
@@ -40,6 +40,11 @@ pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
 /// Bounded channel capacity between the streaming reader and the consumer.
 const SSE_CHANNEL_CAPACITY: usize = 16;
+/// Number of retries after the initial provider attempt for transient failures.
+const MAX_RETRIES: usize = 2;
+/// Deterministic backoff base; a small clock-derived jitter avoids synchronized
+/// retry storms without adding a random-number dependency.
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
 
 /// A coarse, secret-free classification of an unsuccessful provider status.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -482,13 +487,8 @@ impl Transport {
     /// Fetch the typed `openai-compatible` model catalog from
     /// `GET {base_url}/models`.
     pub async fn fetch_catalog(&self, key: &SecretKey) -> Result<ModelCatalog, TransportError> {
-        let response = self
-            .client
-            .get(format!("{}/models", self.base_url))
-            .bearer_auth(key.as_secret())
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+        let response =
+            get_with_retry(&self.client, &format!("{}/models", self.base_url), key).await?;
         let response = expect_success(response)?;
         let body = read_bounded_body(response, MAX_RESPONSE_BYTES).await?;
         serde_json::from_slice(&body).map_err(|_| TransportError::InvalidJson)
@@ -498,13 +498,8 @@ impl Transport {
     /// parser. Unknown fields are preserved in memory only; callers decide how
     /// to validate the schema, and the response is still byte-capped.
     pub async fn fetch_catalog_value(&self, key: &SecretKey) -> Result<Value, TransportError> {
-        let response = self
-            .client
-            .get(format!("{}/models", self.base_url))
-            .bearer_auth(key.as_secret())
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+        let response =
+            get_with_retry(&self.client, &format!("{}/models", self.base_url), key).await?;
         let response = expect_success(response)?;
         let body = read_bounded_body(response, MAX_RESPONSE_BYTES).await?;
         serde_json::from_slice(&body).map_err(|_| TransportError::InvalidJson)
@@ -540,13 +535,8 @@ impl Transport {
         &self,
         key: &SecretKey,
     ) -> Result<Vec<ModelId>, TransportError> {
-        let response = self
-            .client
-            .get(format!("{}/v1/models", self.base_url))
-            .bearer_auth(key.as_secret())
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+        let response =
+            get_with_retry(&self.client, &format!("{}/v1/models", self.base_url), key).await?;
         let response = expect_success(response)?;
         let body = read_bounded_body(response, MAX_RESPONSE_BYTES).await?;
         let list: AnthropicModelList =
@@ -665,6 +655,109 @@ fn map_reqwest_error(error: reqwest::Error) -> TransportError {
     } else {
         TransportError::RequestFailed
     }
+}
+
+fn is_retryable_status(status: StatusCode) -> bool {
+    matches!(
+        HttpFailureKind::classify(status),
+        HttpFailureKind::RateLimited | HttpFailureKind::ServerError
+    )
+}
+
+fn is_retryable_error(error: &TransportError) -> bool {
+    matches!(
+        error,
+        TransportError::RequestTimeout
+            | TransportError::ConnectFailed
+            | TransportError::RequestFailed
+    )
+}
+
+fn retry_delay(response: Option<&Response>, attempt: usize) -> Duration {
+    if let Some(seconds) = response
+        .and_then(|response| response.headers().get("retry-after"))
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+    {
+        return Duration::from_secs(seconds.min(30));
+    }
+    let multiplier = 1_u32 << attempt.min(1);
+    let jitter = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::from(duration.subsec_millis() % 101))
+        .unwrap_or(0);
+    RETRY_BASE_DELAY
+        .saturating_mul(multiplier)
+        .saturating_add(Duration::from_millis(jitter))
+}
+
+async fn get_with_retry(
+    client: &Client,
+    url: &str,
+    key: &SecretKey,
+) -> Result<Response, TransportError> {
+    for attempt in 0..=MAX_RETRIES {
+        match client.get(url).bearer_auth(key.as_secret()).send().await {
+            Ok(response) if response.status().is_success() => return Ok(response),
+            Ok(response) => {
+                let retry = attempt < MAX_RETRIES && is_retryable_status(response.status());
+                if retry {
+                    let delay = retry_delay(Some(&response), attempt);
+                    drop(response);
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                return expect_success(response);
+            }
+            Err(error) => {
+                let mapped = map_reqwest_error(error);
+                if attempt < MAX_RETRIES && is_retryable_error(&mapped) {
+                    tokio::time::sleep(retry_delay(None, attempt)).await;
+                    continue;
+                }
+                return Err(mapped);
+            }
+        }
+    }
+    unreachable!("retry loop always returns")
+}
+
+async fn post_with_retry(
+    client: &Client,
+    url: &str,
+    key: &SecretKey,
+    body: &Value,
+) -> Result<Response, TransportError> {
+    for attempt in 0..=MAX_RETRIES {
+        match client
+            .post(url)
+            .bearer_auth(key.as_secret())
+            .json(body)
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => return Ok(response),
+            Ok(response) => {
+                let retry = attempt < MAX_RETRIES && is_retryable_status(response.status());
+                if retry {
+                    let delay = retry_delay(Some(&response), attempt);
+                    drop(response);
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                return expect_success(response);
+            }
+            Err(error) => {
+                let mapped = map_reqwest_error(error);
+                if attempt < MAX_RETRIES && is_retryable_error(&mapped) {
+                    tokio::time::sleep(retry_delay(None, attempt)).await;
+                    continue;
+                }
+                return Err(mapped);
+            }
+        }
+    }
+    unreachable!("retry loop always returns")
 }
 
 fn expect_success(response: Response) -> Result<Response, TransportError> {
@@ -1029,20 +1122,7 @@ async fn run_sse_session(
     mode: SseMode,
     sender: mpsc::Sender<Result<SsePayload, TransportError>>,
 ) {
-    let response = match client
-        .post(&url)
-        .bearer_auth(key.as_secret())
-        .json(&body)
-        .send()
-        .await
-    {
-        Ok(response) => response,
-        Err(error) => {
-            let _ = sender.send(Err(map_reqwest_error(error))).await;
-            return;
-        }
-    };
-    let response = match expect_success(response) {
+    let response = match post_with_retry(&client, &url, &key, &body).await {
         Ok(response) => response,
         Err(error) => {
             let _ = sender.send(Err(error)).await;

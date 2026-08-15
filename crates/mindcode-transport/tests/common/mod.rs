@@ -6,6 +6,7 @@
 //! `Bearer` value against a key held only in test code.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -37,12 +38,16 @@ const MESSAGE_DELTA_STOP: &str = r#"{"type":"message_delta","delta":{"stop_reaso
 #[derive(Clone)]
 pub struct MockRoutes {
     pub models_status: u16,
+    pub models_status_sequence: Vec<u16>,
     pub models_body: Vec<u8>,
     pub v1_models_status: u16,
+    pub v1_models_status_sequence: Vec<u16>,
     pub v1_models_body: Vec<u8>,
     pub chat_status: u16,
+    pub chat_status_sequence: Vec<u16>,
     pub chat_events: Vec<String>,
     pub messages_status: u16,
+    pub messages_status_sequence: Vec<u16>,
     pub messages_events: Vec<String>,
     pub oversized: bool,
 }
@@ -51,10 +56,13 @@ impl Default for MockRoutes {
     fn default() -> Self {
         Self {
             models_status: 200,
+            models_status_sequence: Vec::new(),
             models_body: CATALOG_JSON.to_vec(),
             v1_models_status: 200,
+            v1_models_status_sequence: Vec::new(),
             v1_models_body: ANTHROPIC_CATALOG_JSON.to_vec(),
             chat_status: 200,
+            chat_status_sequence: Vec::new(),
             chat_events: vec![
                 CHAT_CHUNK_ROLE.to_owned(),
                 CHAT_CHUNK_HELLO.to_owned(),
@@ -63,6 +71,7 @@ impl Default for MockRoutes {
                 "[DONE]".to_owned(),
             ],
             messages_status: 200,
+            messages_status_sequence: Vec::new(),
             messages_events: vec![
                 MESSAGE_START.to_owned(),
                 MESSAGE_BLOCK_START.to_owned(),
@@ -78,6 +87,14 @@ impl Default for MockRoutes {
 
 /// A running mock provider. `base_url()` is the only address needed by the
 /// transport; every test must call `shutdown()` (or drop the runtime).
+#[derive(Default)]
+struct RouteCounters {
+    models: AtomicUsize,
+    v1_models: AtomicUsize,
+    chat: AtomicUsize,
+    messages: AtomicUsize,
+}
+
 pub struct MockServer {
     pub addr: SocketAddr,
     auth: Arc<Mutex<Vec<Option<String>>>>,
@@ -90,8 +107,9 @@ impl MockServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
         let addr = listener.local_addr().expect("mock local addr");
         let auth = Arc::new(Mutex::new(Vec::new()));
+        let counters = Arc::new(RouteCounters::default());
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let handle = tokio::spawn(serve(listener, routes, auth.clone(), shutdown_rx));
+        let handle = tokio::spawn(serve(listener, routes, auth.clone(), counters, shutdown_rx));
         Self {
             addr,
             auth,
@@ -134,6 +152,7 @@ async fn serve(
     listener: TcpListener,
     routes: MockRoutes,
     auth: Arc<Mutex<Vec<Option<String>>>>,
+    counters: Arc<RouteCounters>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     loop {
@@ -143,8 +162,9 @@ async fn serve(
                 let Ok((stream, _)) = accepted else { continue };
                 let routes = routes.clone();
                 let auth = auth.clone();
+                let counters = counters.clone();
                 tokio::spawn(async move {
-                    let _ = handle_connection(stream, routes, auth).await;
+                    let _ = handle_connection(stream, routes, auth, counters).await;
                 });
             }
         }
@@ -155,6 +175,7 @@ async fn handle_connection(
     mut stream: TcpStream,
     routes: MockRoutes,
     auth: Arc<Mutex<Vec<Option<String>>>>,
+    counters: Arc<RouteCounters>,
 ) -> std::io::Result<()> {
     let request = match read_request(&mut stream).await {
         Ok(request) => request,
@@ -168,15 +189,37 @@ async fn handle_connection(
     }
     let response = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/models") => {
-            http_response(routes.models_status, "application/json", routes.models_body)
+            let status = next_status(
+                routes.models_status,
+                &routes.models_status_sequence,
+                &counters.models,
+            );
+            http_response(status, "application/json", routes.models_body)
         }
-        ("GET", "/v1/models") => http_response(
-            routes.v1_models_status,
-            "application/json",
-            routes.v1_models_body,
-        ),
-        ("POST", "/chat/completions") => sse_response(routes.chat_status, &routes.chat_events),
-        ("POST", "/v1/messages") => sse_response(routes.messages_status, &routes.messages_events),
+        ("GET", "/v1/models") => {
+            let status = next_status(
+                routes.v1_models_status,
+                &routes.v1_models_status_sequence,
+                &counters.v1_models,
+            );
+            http_response(status, "application/json", routes.v1_models_body)
+        }
+        ("POST", "/chat/completions") => {
+            let status = next_status(
+                routes.chat_status,
+                &routes.chat_status_sequence,
+                &counters.chat,
+            );
+            sse_response(status, &routes.chat_events)
+        }
+        ("POST", "/v1/messages") => {
+            let status = next_status(
+                routes.messages_status,
+                &routes.messages_status_sequence,
+                &counters.messages,
+            );
+            sse_response(status, &routes.messages_events)
+        }
         _ => http_response(404, "text/plain", b"not found".to_vec()),
     };
     stream.write_all(&response).await
@@ -251,6 +294,14 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+fn next_status(default: u16, sequence: &[u16], counter: &AtomicUsize) -> u16 {
+    if sequence.is_empty() {
+        return default;
+    }
+    let index = counter.fetch_add(1, Ordering::SeqCst);
+    sequence[index.min(sequence.len() - 1)]
 }
 
 fn http_response(status: u16, content_type: &str, body: Vec<u8>) -> Vec<u8> {

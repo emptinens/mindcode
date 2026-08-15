@@ -70,6 +70,40 @@ async fn catalog_fetch_success_projects_typed_rows() {
 }
 
 #[tokio::test]
+async fn transient_catalog_failure_retries_then_succeeds() {
+    let routes = MockRoutes {
+        models_status_sequence: vec![429, 200],
+        ..Default::default()
+    };
+    let server = MockServer::start(routes).await;
+    let transport = Transport::new(&server.base_url()).unwrap();
+
+    let catalog = transport.fetch_catalog(&test_key()).await.unwrap();
+    assert_eq!(catalog.data.len(), 3);
+    assert_eq!(server.authorization_headers().len(), 2);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn transient_stream_failure_retries_before_first_event() {
+    let routes = MockRoutes {
+        chat_status_sequence: vec![503, 200],
+        ..Default::default()
+    };
+    let server = MockServer::start(routes).await;
+    let transport = Transport::new(&server.base_url()).unwrap();
+
+    let chunks: Vec<_> = transport
+        .chat_completions(&test_key(), &chat_request("model-alpha"))
+        .unwrap()
+        .collect()
+        .await;
+    assert_eq!(chunks.len(), 4);
+    assert_eq!(server.authorization_headers().len(), 2);
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn catalog_fetch_on_http_400_fails_closed() {
     let routes = MockRoutes {
         models_status: 400,
