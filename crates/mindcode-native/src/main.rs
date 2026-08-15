@@ -1390,6 +1390,7 @@ fn colors_command(argument: &str) -> Result<String> {
 /// sanitized frame into `~/.config/mindcode/debug/frames-<session>.jsonl` and
 /// report the path.  The file is only created when the command runs.
 fn debug_visual_dump(session_id: &str, transcript: &TuiTranscript) -> Result<String> {
+    let started = Instant::now();
     let dir = sessions_dir()?
         .parent()
         .map(Path::to_path_buf)
@@ -1406,6 +1407,7 @@ fn debug_visual_dump(session_id: &str, transcript: &TuiTranscript) -> Result<Str
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let timing_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let mut recorder = FrameRecorder::new(100);
     recorder.record(FrameDump {
         frame_id: 0,
@@ -1413,7 +1415,7 @@ fn debug_visual_dump(session_id: &str, transcript: &TuiTranscript) -> Result<Str
         terminal_size: None,
         render_text: sanitize_frame_text(&render_text),
         state: serde_json::json!({ "session_id": session_id, "entries": transcript.entries.len() }),
-        timing_ms: 0,
+        timing_ms,
         anomalies: Vec::new(),
     });
     recorder.write_jsonl(&path).map_err(anyhow::Error::msg)?;
