@@ -4,6 +4,7 @@ pub mod catalog_cache;
 mod instance;
 pub mod mcp_stdio;
 pub mod protocol;
+pub mod session_manager;
 
 use anyhow::{bail, Context, Result};
 use catalog_cache::{CatalogCache, CatalogPutError, CatalogPutParams};
@@ -28,6 +29,7 @@ use serde::{
     Deserialize, Serialize,
 };
 use serde_json::{json, Value};
+use session_manager::{OpenSessionInput, SessionManager};
 use std::{
     collections::{HashMap, VecDeque},
     env,
@@ -81,6 +83,11 @@ const SERVER_CAPABILITIES: &[&str] = &[
     "task_graph.recover",
     "task_graph.snapshot",
     "task_graph.watch",
+    "session",
+    "session.open",
+    "session.touch",
+    "session.close",
+    "session.status",
     "session_index",
     "session_index.upsert",
     "session_index.get",
@@ -165,7 +172,6 @@ pub struct StatusSnapshot {
 #[derive(Debug, Default)]
 struct Metrics {
     active_connections: std::sync::atomic::AtomicU64,
-    active_sessions: std::sync::atomic::AtomicU64,
     active_requests: std::sync::atomic::AtomicU64,
     total_requests: std::sync::atomic::AtomicU64,
     cancelled_requests: std::sync::atomic::AtomicU64,
@@ -175,6 +181,7 @@ struct DaemonState {
     config: DaemonConfig,
     task_graph: Arc<TaskGraph>,
     session_index: Arc<SessionIndex>,
+    session_manager: Arc<SessionManager>,
     mcp_stdio: Arc<McpStdioSupervisor>,
     catalog_cache: Arc<CatalogCache>,
     request_ledger: Arc<Mutex<RequestLedger>>,
@@ -185,18 +192,6 @@ struct DaemonState {
     request_slots: Arc<Semaphore>,
     task_graph_watch_slots: Arc<Semaphore>,
     started_at: Instant,
-}
-
-struct SessionLease {
-    metrics: Arc<Metrics>,
-}
-
-impl Drop for SessionLease {
-    fn drop(&mut self) {
-        use std::sync::atomic::Ordering;
-
-        self.metrics.active_sessions.fetch_sub(1, Ordering::AcqRel);
-    }
 }
 
 impl DaemonState {
@@ -213,7 +208,7 @@ impl DaemonState {
             pid: std::process::id(),
             uptime_ms: self.started_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
             active_connections: self.metrics.active_connections.load(Ordering::Relaxed),
-            active_sessions: self.metrics.active_sessions.load(Ordering::Relaxed),
+            active_sessions: self.session_manager.active_count() as u64,
             active_requests: self.metrics.active_requests.load(Ordering::Relaxed),
             total_requests: self.metrics.total_requests.load(Ordering::Relaxed),
             cancelled_requests: self.metrics.cancelled_requests.load(Ordering::Relaxed),
@@ -238,10 +233,13 @@ impl Daemon {
         if let Some(state_dir) = &config.state_dir {
             task_graph_config.state_dir = state_dir.clone();
         }
+        let session_index = Arc::new(SessionIndex::new(session_index_config));
+        let session_manager = Arc::new(SessionManager::new(Arc::clone(&session_index)));
         Self {
             state: Arc::new(DaemonState {
                 task_graph: Arc::new(TaskGraph::new(task_graph_config)),
-                session_index: Arc::new(SessionIndex::new(session_index_config)),
+                session_index,
+                session_manager,
                 mcp_stdio: Arc::new(McpStdioSupervisor::new()),
                 catalog_cache: Arc::new(CatalogCache::new()),
                 request_ledger: Arc::new(Mutex::new(RequestLedger::default())),
@@ -728,14 +726,6 @@ async fn handle_connection_inner(stream: UnixStream, state: Arc<DaemonState>) ->
     if !accepted {
         return Ok(());
     }
-    state
-        .metrics
-        .active_sessions
-        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-    let _session_lease = SessionLease {
-        metrics: Arc::clone(&state.metrics),
-    };
-
     let mut tasks: JoinSet<Result<()>> = JoinSet::new();
     let loop_result: Result<()> = loop {
         tokio::select! {
@@ -1086,6 +1076,41 @@ struct RecoverParams {
 #[serde(deny_unknown_fields)]
 struct SessionIdParams {
     session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionOpenParams {
+    session_id: String,
+    connection_id: String,
+    project_path: String,
+    transcript_path: String,
+    #[serde(default)]
+    size_bytes: u64,
+    title: Option<String>,
+    first_prompt: Option<String>,
+    now_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionLeaseParams {
+    session_id: String,
+    lease_id: String,
+    now_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionCloseParams {
+    session_id: String,
+    lease_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionStatusParams {
+    now_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1612,6 +1637,79 @@ async fn execute_request(
             }
             RequestResult::serialized(json!({ "connections": result }))
         }
+        "session.open" => {
+            let request = match parse_params::<SessionOpenParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let input = OpenSessionInput {
+                session_id: request.session_id,
+                connection_id: request.connection_id,
+                project_path: request.project_path,
+                transcript_path: request.transcript_path,
+                size_bytes: request.size_bytes,
+                title: request.title,
+                first_prompt: request.first_prompt,
+                now_ms: request.now_ms,
+            };
+            let manager = Arc::clone(&state.session_manager);
+            let result = run_state_call(&cancellation, move || manager.open(input)).await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(value)) => RequestResult::serialized(json!({ "session": value })),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
+        "session.touch" => {
+            let request = match parse_params::<SessionLeaseParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let manager = Arc::clone(&state.session_manager);
+            let result = run_state_call(&cancellation, move || {
+                manager.touch(&request.session_id, &request.lease_id, request.now_ms)
+            })
+            .await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(value)) => RequestResult::serialized(json!({ "session": value })),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
+        "session.close" => {
+            let request = match parse_params::<SessionCloseParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let manager = Arc::clone(&state.session_manager);
+            let result = run_state_call(&cancellation, move || {
+                manager.close(&request.session_id, &request.lease_id)
+            })
+            .await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(value)) => RequestResult::serialized(value),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
+        "session.status" => {
+            let request = match parse_params::<SessionStatusParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let manager = Arc::clone(&state.session_manager);
+            let result = run_state_call(&cancellation, move || {
+                request
+                    .now_ms
+                    .map_or_else(|| manager.status(), |now_ms| manager.status_at(now_ms))
+            })
+            .await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(value)) => RequestResult::serialized(value),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
         "session_index.upsert" => {
             let record = match parse_params::<SessionRecord>(params) {
                 Ok(value) => value,
@@ -1910,6 +2008,9 @@ fn is_mutation_method(method: &str) -> bool {
     matches!(
         method,
         "process.run"
+            | "session.open"
+            | "session.touch"
+            | "session.close"
             | "task_graph.route"
             | "task_graph.claim"
             | "task_graph.update"
