@@ -16,7 +16,10 @@ use mindcode_provider::{
 use mindcode_settings::{
     default_settings_path, load_settings, save_settings, CredState, NativeSettings,
 };
-use mindcode_state::{MemoryRecord, MemoryScope, MemoryStore, MemoryType};
+use mindcode_state::{
+    MemoryRecord, MemoryScope, MemoryStore, MemoryType, SessionIndex, SessionIndexConfig,
+    SessionListOptions, SessionRecord,
+};
 use mindcode_transport::{
     soft_interrupt::{LoopPoint, SoftInterruptQueue},
     ChatCompletionsRequest, ChatMessage, ChatUsage, MessagesRequest, ToolSpec, Transport,
@@ -2639,8 +2642,21 @@ fn session_title_from_transcript(session_id: &str, transcript: &TuiTranscript) -
     format!("session-{session_id}")
 }
 
-/// Maintain the secret-free session index (`sessions/index.json`, §11.2): one
-/// metadata row per session, no message text and no credentials.
+/// Resolve the SQLite session index used by the 0.1.5 session manager
+/// foundation. The JSON file below remains an export for compatibility, not
+/// the source of truth.
+fn native_session_index() -> Result<SessionIndex, anyhow::Error> {
+    let state_dir = native_settings_path()?
+        .parent()
+        .map(|parent| parent.join("state"))
+        .ok_or_else(|| anyhow!("MindCode config home is unavailable"))?;
+    SessionIndex::open(SessionIndexConfig::with_state_dir(state_dir))
+        .map_err(|error| anyhow!(error.to_string()))
+}
+
+/// Maintain the secret-free session index: SQLite is authoritative in the
+/// 0.1.5 foundation, while `sessions/index.json` is kept as a read-only export
+/// for older clients. No message text or credentials enter either record.
 fn update_session_index(
     session_id: &str,
     title: &str,
@@ -2648,6 +2664,21 @@ fn update_session_index(
     updated_at: u64,
     message_count: usize,
 ) -> Result<(), anyhow::Error> {
+    let transcript_path = session_path(session_id)?;
+    let project_path = env::current_dir()?.to_string_lossy().into_owned();
+    let size_bytes = fs::metadata(&transcript_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    native_session_index()?.upsert(SessionRecord {
+        session_id: session_id.to_owned(),
+        project_path,
+        transcript_path: transcript_path.to_string_lossy().into_owned(),
+        modified_at_ms: updated_at.saturating_mul(1_000),
+        size_bytes,
+        title: (!title.is_empty()).then(|| title.to_owned()),
+        first_prompt: None,
+    })?;
+
     let dir = sessions_dir()?;
     fs::create_dir_all(&dir)?;
     let path = dir.join("index.json");
@@ -2683,8 +2714,39 @@ fn update_session_index(
     Ok(())
 }
 
-/// Render the session index as a `/sessions` transcript list (§11.2).
+fn session_message_count(path: &Path) -> u64 {
+    fs::read(path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+        .and_then(|value| value.get("messages").and_then(Value::as_array).cloned())
+        .map_or(0, |messages| messages.len() as u64)
+}
+
+/// Render the authoritative SQLite session index as a `/sessions` transcript
+/// list (§11.2 / §6.1). A legacy JSON export is accepted only as a migration
+/// fallback when no SQLite rows exist.
 fn sessions_index_summary() -> Result<Option<String>, anyhow::Error> {
+    if let Ok(index) = native_session_index() {
+        let records = index
+            .list(SessionListOptions::default())
+            .map_err(|error| anyhow!(error.to_string()))?;
+        if !records.is_empty() {
+            let lines = records
+                .iter()
+                .map(|record| {
+                    let title = record
+                        .title
+                        .as_deref()
+                        .filter(|title| !title.is_empty())
+                        .unwrap_or(record.session_id.as_str());
+                    let count = session_message_count(Path::new(&record.transcript_path));
+                    format!("- {title} [{}] ({count} messages)", record.session_id)
+                })
+                .collect::<Vec<_>>();
+            return Ok(Some(format!("sessions:\n{}", lines.join("\n"))));
+        }
+    }
+
     let path = sessions_dir()?.join("index.json");
     let raw = match fs::read_to_string(&path) {
         Ok(raw) => raw,
@@ -5503,6 +5565,29 @@ mod tests {
             let raw = fs::read_to_string(session_path("roundtrip").unwrap()).unwrap();
             assert!(!raw.contains("ui line"));
             assert!(dir.join("mindcode/sessions/roundtrip.json").exists());
+        });
+    }
+
+    #[test]
+    fn sqlite_session_index_is_authoritative_for_sessions_listing() {
+        with_sandbox_env(|dir| {
+            let mut transcript = TuiTranscript::default();
+            transcript.push("user", "remember this session");
+            transcript.push("assistant", "saved");
+            save_session("sqlite-index", &transcript, SessionStats::default()).unwrap();
+
+            let index = native_session_index().unwrap();
+            let records = index.list(SessionListOptions::default()).unwrap();
+            let record = records
+                .iter()
+                .find(|record| record.session_id == "sqlite-index")
+                .expect("saved session should be indexed");
+            assert_eq!(record.title.as_deref(), Some("remember this session"));
+            assert!(record.size_bytes > 0);
+            assert!(dir.join("mindcode/state/sessions.db").exists());
+
+            let summary = sessions_index_summary().unwrap().unwrap();
+            assert!(summary.contains("remember this session [sqlite-index] (2 messages)"));
         });
     }
 
