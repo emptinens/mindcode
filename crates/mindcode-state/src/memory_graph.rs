@@ -9,11 +9,18 @@
 //! enabled. Credential-shaped text never enters the graph.
 
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Maximum size of a memory-graph file accepted by the loader.
 const MAX_MEMORY_FILE_BYTES: u64 = 32 * 1024 * 1024;
+/// BM25 parameters from the 0.1.5 memory-v2 contract.
+pub const BM25_K1: f32 = 1.2;
+pub const BM25_B: f32 = 0.75;
+/// Reciprocal-rank-fusion offset from the 0.1.5 memory-v2 contract.
+pub const RRF_K: usize = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -186,6 +193,73 @@ fn cosine(left: &[f32], right: &[f32]) -> f32 {
     dot.clamp(-1.0, 1.0)
 }
 
+fn lexical_terms(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn bm25_score(
+    query_terms: &[String],
+    document_terms: &[String],
+    document_frequency: &HashMap<String, usize>,
+    document_count: usize,
+    average_document_length: f32,
+) -> f32 {
+    if query_terms.is_empty() || document_terms.is_empty() || document_count == 0 {
+        return 0.0;
+    }
+    let frequencies = document_terms
+        .iter()
+        .fold(HashMap::new(), |mut counts, term| {
+            *counts.entry(term.as_str()).or_insert(0_u32) += 1;
+            counts
+        });
+    let document_length = document_terms.len() as f32;
+    let length_norm =
+        1.0 - BM25_B + BM25_B * (document_length / average_document_length.max(f32::EPSILON));
+    let mut score = 0.0;
+    let unique_query_terms = query_terms.iter().collect::<HashSet<_>>();
+    for term in unique_query_terms {
+        let Some(&term_frequency) = frequencies.get(term.as_str()) else {
+            continue;
+        };
+        let document_frequency = document_frequency.get(term.as_str()).copied().unwrap_or(0);
+        let inverse_document_frequency = ((document_count as f32 - document_frequency as f32
+            + 0.5)
+            / (document_frequency as f32 + 0.5)
+            + 1.0)
+            .ln();
+        let numerator = term_frequency as f32 * (BM25_K1 + 1.0);
+        let denominator = term_frequency as f32 + BM25_K1 * length_norm;
+        score += inverse_document_frequency * numerator / denominator.max(f32::EPSILON);
+    }
+    score
+}
+
+fn current_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+/// One hybrid memory result with inspectable component scores. The public
+/// fields make local retrieval evaluation possible without exposing the
+/// embedder or the original corpus to a provider.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemorySearchResult {
+    pub record: MemoryRecord,
+    pub score: f32,
+    pub bm25_score: f32,
+    pub dense_score: f32,
+    pub rrf_score: f32,
+    pub prior_score: f32,
+}
+
 pub struct MemoryStore {
     records: Vec<MemoryRecord>,
     enabled: bool,
@@ -276,30 +350,151 @@ impl MemoryStore {
         true
     }
 
-    /// Cosine-ranked retrieval with a relevance floor (the deterministic stand-in
-    /// for the sidecar-LLM filter; the sidecar can raise the floor at runtime).
+    /// Hybrid BM25 + dense + RRF retrieval with a relevance floor. The old
+    /// tuple-shaped API is retained for callers that only need a ranked score;
+    /// new consumers can use [`Self::hybrid_search_at`] to inspect components
+    /// and make deterministic local evaluations with a fixed clock.
     pub fn search(&self, query: &str, limit: usize, min_score: f32) -> Vec<(MemoryRecord, f32)> {
-        if !self.enabled {
+        self.hybrid_search(query, limit, min_score)
+            .into_iter()
+            .map(|result| (result.record, result.score))
+            .collect()
+    }
+
+    /// Run hybrid retrieval using the local wall clock for recency priors.
+    pub fn hybrid_search(
+        &self,
+        query: &str,
+        limit: usize,
+        min_score: f32,
+    ) -> Vec<MemorySearchResult> {
+        self.hybrid_search_at(query, limit, min_score, current_time_ms())
+    }
+
+    /// Deterministic hybrid retrieval. BM25 uses `k1=1.2`, `b=0.75`; dense
+    /// scores come from the configured [`Embedder`]; RRF uses `k=60`. The
+    /// confidence/recency prior is deliberately a bounded tie-break influence,
+    /// not a replacement for textual relevance.
+    pub fn hybrid_search_at(
+        &self,
+        query: &str,
+        limit: usize,
+        min_score: f32,
+        now_ms: u64,
+    ) -> Vec<MemorySearchResult> {
+        if !self.enabled || limit == 0 || self.records.is_empty() {
             return Vec::new();
         }
-        let query_embedding = self.embedder.embed(query);
-        let mut scored: Vec<(MemoryRecord, f32)> = self
+
+        let query_terms = lexical_terms(query);
+        let document_terms = self
             .records
             .iter()
-            .map(|record| {
-                let score = cosine(&query_embedding, &self.embedder.embed(&record.text));
-                (record.clone(), score)
+            .map(|record| lexical_terms(&record.text))
+            .collect::<Vec<_>>();
+        let mut document_frequency = HashMap::<String, usize>::new();
+        for terms in &document_terms {
+            let unique_terms = terms.iter().map(String::as_str).collect::<HashSet<_>>();
+            for term in unique_terms {
+                *document_frequency.entry(term.to_owned()).or_insert(0) += 1;
+            }
+        }
+        let average_document_length =
+            document_terms.iter().map(Vec::len).sum::<usize>() as f32 / self.records.len() as f32;
+        let bm25_scores = document_terms
+            .iter()
+            .map(|terms| {
+                bm25_score(
+                    &query_terms,
+                    terms,
+                    &document_frequency,
+                    self.records.len(),
+                    average_document_length,
+                )
             })
-            .filter(|(_, score)| *score >= min_score)
-            .collect();
-        scored.sort_by(|left, right| {
-            right
-                .1
-                .partial_cmp(&left.1)
+            .collect::<Vec<_>>();
+
+        let query_embedding = self.embedder.embed(query);
+        let dense_scores = self
+            .records
+            .iter()
+            .map(|record| cosine(&query_embedding, &self.embedder.embed(&record.text)))
+            .collect::<Vec<_>>();
+        let mut bm25_order = (0..self.records.len()).collect::<Vec<_>>();
+        bm25_order.sort_by(|left, right| {
+            bm25_scores[*right]
+                .partial_cmp(&bm25_scores[*left])
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| self.records[*left].id.cmp(&self.records[*right].id))
         });
-        scored.truncate(limit);
-        scored
+        let mut dense_order = (0..self.records.len()).collect::<Vec<_>>();
+        dense_order.sort_by(|left, right| {
+            dense_scores[*right]
+                .partial_cmp(&dense_scores[*left])
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| self.records[*left].id.cmp(&self.records[*right].id))
+        });
+        let mut bm25_rank = vec![self.records.len() + 1; self.records.len()];
+        let mut dense_rank = vec![self.records.len() + 1; self.records.len()];
+        for (rank, index) in bm25_order.into_iter().enumerate() {
+            bm25_rank[index] = rank + 1;
+        }
+        for (rank, index) in dense_order.into_iter().enumerate() {
+            dense_rank[index] = rank + 1;
+        }
+
+        let max_bm25 = bm25_scores
+            .iter()
+            .copied()
+            .fold(0.0_f32, f32::max)
+            .max(f32::EPSILON);
+        let max_rrf = 2.0 / (RRF_K as f32 + 1.0);
+        let mut results = self
+            .records
+            .iter()
+            .enumerate()
+            .map(|(index, record)| {
+                let bm25_normalized = (bm25_scores[index] / max_bm25).clamp(0.0, 1.0);
+                let dense_normalized = ((dense_scores[index] + 1.0) / 2.0).clamp(0.0, 1.0);
+                let rrf_raw = 1.0 / (RRF_K as f32 + bm25_rank[index] as f32)
+                    + 1.0 / (RRF_K as f32 + dense_rank[index] as f32);
+                let rrf_score = (rrf_raw / max_rrf).clamp(0.0, 1.0);
+                let age_days = now_ms.saturating_sub(record.reinforced_at_ms) as f32 / 86_400_000.0;
+                let recency = 1.0 / (1.0 + age_days / 30.0);
+                let prior_score = (0.7 * record.effective_confidence(now_ms) as f32
+                    + 0.3 * recency)
+                    .clamp(0.0, 1.0);
+                let score = (0.60 * rrf_score
+                    + 0.15 * bm25_normalized
+                    + 0.10 * dense_normalized
+                    + 0.15 * prior_score)
+                    .clamp(0.0, 1.0);
+                MemorySearchResult {
+                    record: record.clone(),
+                    score,
+                    bm25_score: bm25_scores[index],
+                    dense_score: dense_scores[index],
+                    rrf_score,
+                    prior_score,
+                }
+            })
+            .filter(|result| result.score >= min_score)
+            .collect::<Vec<_>>();
+        results.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    right
+                        .rrf_score
+                        .partial_cmp(&left.rrf_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| left.record.id.cmp(&right.record.id))
+        });
+        results.truncate(limit);
+        results
     }
 
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
@@ -509,6 +704,42 @@ mod tests {
         let results = store.search("rust build target fails", 2, 0.0);
         assert_eq!(results[0].0.id, "a");
         assert!(results[0].1 > results[1].1);
+    }
+
+    #[test]
+    fn hybrid_search_fuses_bm25_dense_and_rrf_deterministically() {
+        let mut store = MemoryStore::default();
+        store
+            .insert(record(
+                "exact",
+                "rust borrow checker rejects a missing lifetime",
+                MemoryType::Fact,
+            ))
+            .unwrap();
+        store
+            .insert(record(
+                "semantic",
+                "ownership compiler diagnostics need an explicit scope",
+                MemoryType::Procedure,
+            ))
+            .unwrap();
+        store
+            .insert(record(
+                "unrelated",
+                "sushi is my favorite food",
+                MemoryType::Preference,
+            ))
+            .unwrap();
+
+        let first = store.hybrid_search_at("borrow checker lifetime", 3, 0.0, 0);
+        let second = store.hybrid_search_at("borrow checker lifetime", 3, 0.0, 0);
+        assert_eq!(first, second);
+        assert_eq!(first[0].record.id, "exact");
+        assert!(first[0].bm25_score > 0.0);
+        assert!(first[0].dense_score >= 0.0);
+        assert!(first[0].rrf_score > 0.0 && first[0].rrf_score <= 1.0);
+        assert!(first[0].prior_score > 0.0 && first[0].prior_score <= 1.0);
+        assert!(first[0].score > first[2].score);
     }
 
     #[test]

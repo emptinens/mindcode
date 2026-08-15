@@ -37,7 +37,7 @@ pub use dag_preset::{
 pub mod memory_graph;
 pub use memory_graph::{
     contains_credential_shaped, Embedder, HashingEmbedder, MemoryError, MemoryRecord, MemoryScope,
-    MemoryStore, MemoryType,
+    MemorySearchResult, MemoryStore, MemoryType,
 };
 
 pub mod preference;

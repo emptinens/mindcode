@@ -87,6 +87,11 @@ static NEXT_DAEMON_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 /// the provider response.  The base is 200K always; a settings override may
 /// raise or lower it.
 const CONTEXT_TOKEN_BUDGET: usize = 200_000;
+/// Number of newest dialog messages kept verbatim by ToFu layer 2. Older
+/// messages become deterministic placeholders, so the provider cache prefix
+/// remains byte-stable across later turns.
+const TOFU_HOT_MESSAGES: usize = 12;
+const TOFU_PLACEHOLDER_VERSION: &str = "tofu-v2";
 static PROCESS_STARTED_AT: OnceLock<Instant> = OnceLock::new();
 
 fn process_boot_ms() -> u64 {
@@ -3535,6 +3540,7 @@ fn conversation_messages_with_truncation(
             });
         }
     }
+    let (turns, _compacted_messages) = cache_aware_compact_cold_history(turns, TOFU_HOT_MESSAGES);
     let total_turns = turns.len();
     let mut kept: Vec<ChatMessage> = Vec::new();
     let mut dropped_turns = 0usize;
@@ -3561,6 +3567,43 @@ fn conversation_messages_with_truncation(
     }
     kept.reverse();
     (kept, dropped_turns)
+}
+
+/// Replace cold history with stable placeholders while retaining the hot tail.
+/// The placeholder contains no source text: its digest is only a local change
+/// detector, and the original transcript remains durable on disk. Because the
+/// same old message always maps to the same bytes, adding later turns does not
+/// invalidate the provider's cached prefix after the one-time compaction.
+fn cache_aware_compact_cold_history(
+    mut messages: Vec<ChatMessage>,
+    hot_messages: usize,
+) -> (Vec<ChatMessage>, usize) {
+    let cold_count = messages.len().saturating_sub(hot_messages);
+    if cold_count == 0 {
+        return (messages, 0);
+    }
+    for message in messages.iter_mut().take(cold_count) {
+        if message
+            .content
+            .starts_with("[tofu-v2 cold-history placeholder ")
+        {
+            continue;
+        }
+        let digest = stable_history_digest(&message.role, &message.content);
+        let original_chars = message.content.chars().count();
+        message.content = format!(
+            "[{TOFU_PLACEHOLDER_VERSION} cold-history placeholder role={} chars={} digest={digest:016x}; original content is retained in the session transcript]",
+            message.role, original_chars
+        );
+    }
+    (messages, cold_count)
+}
+
+fn stable_history_digest(role: &str, content: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    role.hash(&mut hasher);
+    content.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Local token estimate (`chars/4`): cheap, deterministic, no LLM call.
@@ -5832,6 +5875,38 @@ mod tests {
         assert_eq!(messages[1].content, "hi there");
         assert_eq!(messages[2].role, "user");
         assert_eq!(messages[2].content, "second question");
+    }
+
+    #[test]
+    fn tofu_compacts_cold_history_with_a_stable_cache_prefix() {
+        let build_messages = || {
+            (0..15)
+                .map(|index| ChatMessage {
+                    role: if index % 2 == 0 {
+                        "user".to_owned()
+                    } else {
+                        "assistant".to_owned()
+                    },
+                    content: format!("cold or hot transcript message {index}"),
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>()
+        };
+        let (first, compacted) =
+            cache_aware_compact_cold_history(build_messages(), TOFU_HOT_MESSAGES);
+        let (second, _) = cache_aware_compact_cold_history(build_messages(), TOFU_HOT_MESSAGES);
+        assert_eq!(compacted, 3);
+        assert_eq!(first.len(), second.len());
+        for (left, right) in first.iter().zip(second.iter()) {
+            assert_eq!(left.role, right.role);
+            assert_eq!(left.content, right.content);
+        }
+        assert!(first[0]
+            .content
+            .starts_with("[tofu-v2 cold-history placeholder"));
+        assert!(!first[0].content.contains("transcript message 0"));
+        assert_eq!(first[11].content, "cold or hot transcript message 11");
+        assert_eq!(first[14].content, "cold or hot transcript message 14");
     }
 
     #[test]

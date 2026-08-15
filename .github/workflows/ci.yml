@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       run_benchmarks:
-        description: "Run consent-gated injection and TUI performance benchmarks"
+        description: "Run consent-gated injection, memory-recall, and TUI performance benchmarks"
         required: true
         default: false
         type: boolean
@@ -82,3 +82,6 @@ jobs:
 
       - name: TUI frame performance gate
         run: sh scripts/bench-tui-frame.sh
+
+      - name: Memory-v2 retrieval gate
+        run: sh scripts/bench-memory-recall.sh
