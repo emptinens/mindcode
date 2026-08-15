@@ -45,6 +45,8 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// profile in every other respect (editable, removable, never special-cased
 /// in storage).
 pub const BUILTIN_VEXZY_PROVIDER_ID: &str = "vexzy";
+/// Default per-worker approval cache lifetime in seconds (§5.4.4).
+pub const DEFAULT_APPROVAL_CACHE_TTL_SECONDS: u64 = 300;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeSettings {
@@ -55,6 +57,8 @@ pub struct NativeSettings {
     /// Conversation-memory budget override in estimated tokens (§11.3).  When
     /// `None` the caller falls back to the 200K base.  Secret-free.
     pub context_token_budget: Option<usize>,
+    /// Lifetime of an `AllowWorker` approval cache entry (§5.4.4).
+    pub approval_cache_ttl_seconds: u64,
     /// Custom `/colors` overrides (§11.6): role label → `#rrggbb`.  Metadata
     /// only — never a credential, never a secret.
     pub color_overrides: Option<BTreeMap<String, String>>,
@@ -81,6 +85,7 @@ impl Default for NativeSettings {
             worker_effort_lock: None,
             worker_max_iterations: 52,
             context_token_budget: None,
+            approval_cache_ttl_seconds: DEFAULT_APPROVAL_CACHE_TTL_SECONDS,
             color_overrides: None,
             system_prompt: SystemPromptOverrides::default(),
             providers: Vec::new(),
@@ -100,6 +105,7 @@ pub enum SettingsError {
     InvalidWorkerEffortLock,
     InvalidWorkerMaxIterations,
     InvalidContextBudget,
+    InvalidApprovalCacheTtl,
     InvalidColorOverrides,
     InvalidSystemPrompt,
     InvalidProviders,
@@ -127,6 +133,9 @@ impl fmt::Display for SettingsError {
             }
             Self::InvalidContextBudget => {
                 f.write_str("context_token_budget must be a positive integer or null")
+            }
+            Self::InvalidApprovalCacheTtl => {
+                f.write_str("approval_cache_ttl_seconds must be an integer in 1..=86400")
             }
             Self::InvalidColorOverrides => {
                 f.write_str("color_overrides must be an object of role → #rrggbb")
@@ -274,6 +283,15 @@ pub fn settings_from_value(value: Value) -> Result<NativeSettings, SettingsError
         Some(_) => return Err(SettingsError::InvalidContextBudget),
     };
 
+    let approval_cache_ttl_seconds = match object.get("approval_cache_ttl_seconds") {
+        None | Some(Value::Null) => DEFAULT_APPROVAL_CACHE_TTL_SECONDS,
+        Some(Value::Number(value)) => value
+            .as_u64()
+            .filter(|value| (1..=86_400).contains(value))
+            .ok_or(SettingsError::InvalidApprovalCacheTtl)?,
+        Some(_) => return Err(SettingsError::InvalidApprovalCacheTtl),
+    };
+
     let color_overrides = match object.get("color_overrides") {
         None | Some(Value::Null) => None,
         Some(Value::Object(entries)) => {
@@ -344,6 +362,7 @@ pub fn settings_from_value(value: Value) -> Result<NativeSettings, SettingsError
         worker_effort_lock,
         worker_max_iterations,
         context_token_budget,
+        approval_cache_ttl_seconds,
         color_overrides,
         system_prompt,
         providers,
@@ -382,6 +401,13 @@ pub fn settings_to_value(settings: &NativeSettings) -> Result<Value, SettingsErr
             .context_token_budget
             .map(Value::from)
             .unwrap_or(Value::Null),
+    );
+    if !(1..=86_400).contains(&settings.approval_cache_ttl_seconds) {
+        return Err(SettingsError::InvalidApprovalCacheTtl);
+    }
+    object.insert(
+        "approval_cache_ttl_seconds".to_owned(),
+        Value::from(settings.approval_cache_ttl_seconds),
     );
     object.insert(
         "color_overrides".to_owned(),
@@ -596,6 +622,7 @@ fn is_known_settings_key(key: &str) -> bool {
             | "worker_effort_lock"
             | "worker_max_iterations"
             | "context_token_budget"
+            | "approval_cache_ttl_seconds"
             | "color_overrides"
             | "system_prompt"
             | "providers"
@@ -806,6 +833,24 @@ mod tests {
             parse_settings(r#"{"context_token_budget":"big"}"#),
             Err(SettingsError::InvalidContextBudget)
         ));
+    }
+
+    #[test]
+    fn approval_cache_ttl_defaults_and_validates_bounds() {
+        assert_eq!(
+            parse_settings("{}").unwrap().approval_cache_ttl_seconds,
+            DEFAULT_APPROVAL_CACHE_TTL_SECONDS
+        );
+        let settings = parse_settings(r#"{"approval_cache_ttl_seconds":600}"#).unwrap();
+        assert_eq!(settings.approval_cache_ttl_seconds, 600);
+        let reparsed = settings_from_value(settings_to_value(&settings).unwrap()).unwrap();
+        assert_eq!(reparsed.approval_cache_ttl_seconds, 600);
+        for value in [0, 86_401] {
+            assert!(matches!(
+                parse_settings(&format!(r#"{{"approval_cache_ttl_seconds":{value}}}"#)),
+                Err(SettingsError::InvalidApprovalCacheTtl)
+            ));
+        }
     }
 
     #[test]

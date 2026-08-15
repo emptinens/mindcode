@@ -3,14 +3,16 @@
 
 use mindcode_transport::{ChatMessage, ChatUsage, ToolSpec};
 use mindcode_worker::{
-    AllowAllGate, ApprovalDecision, ApprovalRequest, DenyAllGate, ModelClient, ModelTurn,
-    OwnershipGuard, PermissionTier, ResolvedToolCall, WorkerAgent, WorkerError, WorkerReport,
-    WorkerScope, WorkerStatus,
+    AllowAllGate, ApprovalDecision, ApprovalGate, ApprovalRequest, DenyAllGate, ModelClient,
+    ModelTurn, OwnershipGuard, PermissionTier, ResolvedToolCall, WorkerAgent, WorkerError,
+    WorkerReport, WorkerScope, WorkerStatus,
 };
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 type ModelFuture = Pin<Box<dyn Future<Output = Result<ModelTurn, WorkerError>> + Send>>;
@@ -206,6 +208,89 @@ async fn todo_quality_gate_reprompts_and_delimits_tool_output() {
             && message.content.contains("blocked by the local fixture")
     }));
     assert!(!workspace.path().join("unexpected").exists());
+}
+
+struct AllowWorkerCountingGate {
+    calls: Arc<AtomicUsize>,
+}
+
+impl ApprovalGate for AllowWorkerCountingGate {
+    fn decide(&self, _request: ApprovalRequest) -> mindcode_worker::DecisionFuture {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { ApprovalDecision::AllowWorker })
+    }
+}
+
+#[tokio::test]
+async fn allow_worker_cache_is_bound_to_the_canonical_path() {
+    let (workspace, _config, scope, guard) = fixture(PermissionTier::AskEverything);
+    std::fs::write(workspace.path().join("src/a.txt"), "a").unwrap();
+    std::fs::write(workspace.path().join("src/b.txt"), "b").unwrap();
+    let client = Arc::new(ScriptedClient::new(vec![
+        ModelTurn {
+            tool_calls: vec![tool_call(
+                "read-a",
+                "read_file",
+                serde_json::json!({"path": "src/a.txt"}),
+            )],
+            ..Default::default()
+        },
+        ModelTurn {
+            tool_calls: vec![tool_call(
+                "read-b",
+                "read_file",
+                serde_json::json!({"path": "src/b.txt"}),
+            )],
+            ..Default::default()
+        },
+        turn_text("read both files"),
+    ]));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let gate = AllowWorkerCountingGate {
+        calls: Arc::clone(&calls),
+    };
+    let agent = WorkerAgent::new("w-approval-path", client, Arc::new(gate), scope, guard);
+    let report = agent.run("read both files", CancellationToken::new()).await;
+
+    assert_eq!(report.status, WorkerStatus::Success);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn allow_worker_cache_expires_after_configured_ttl() {
+    let (workspace, _config, scope, guard) = fixture(PermissionTier::AskEverything);
+    std::fs::write(workspace.path().join("src/a.txt"), "a").unwrap();
+    let client = Arc::new(ScriptedClient::new(vec![
+        ModelTurn {
+            tool_calls: vec![tool_call(
+                "read-a-1",
+                "read_file",
+                serde_json::json!({"path": "src/a.txt"}),
+            )],
+            ..Default::default()
+        },
+        ModelTurn {
+            tool_calls: vec![tool_call(
+                "read-a-2",
+                "read_file",
+                serde_json::json!({"path": "src/a.txt"}),
+            )],
+            ..Default::default()
+        },
+        turn_text("read the file twice"),
+    ]));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let gate = AllowWorkerCountingGate {
+        calls: Arc::clone(&calls),
+    };
+    let agent = WorkerAgent::new("w-approval-ttl", client, Arc::new(gate), scope, guard)
+        .with_approval_ttl(Duration::ZERO);
+    let report = agent
+        .run("read the file twice", CancellationToken::new())
+        .await;
+
+    assert_eq!(report.status, WorkerStatus::Success);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

@@ -18,7 +18,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 pub type DecisionFuture = Pin<Box<dyn Future<Output = ApprovalDecision> + Send>>;
@@ -86,6 +86,61 @@ pub trait ModelClient: Send + Sync {
         tools: &[ToolSpec],
         cancel: CancellationToken,
     ) -> Pin<Box<dyn Future<Output = WorkerResult<ModelTurn>> + Send>>;
+}
+
+const DEFAULT_APPROVAL_CACHE_TTL: Duration = Duration::from_secs(300);
+
+struct ApprovalCacheEntry {
+    key: String,
+    expires_at: Instant,
+}
+
+#[derive(Default)]
+struct ApprovalCache {
+    ttl: Duration,
+    entries: Vec<ApprovalCacheEntry>,
+}
+
+impl ApprovalCache {
+    fn with_ttl(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            entries: Vec::new(),
+        }
+    }
+
+    fn allows(&mut self, key: &str) -> bool {
+        let now = Instant::now();
+        self.entries.retain(|entry| entry.expires_at > now);
+        self.entries.iter().any(|entry| entry.key == key)
+    }
+
+    fn remember(&mut self, key: String) {
+        let expires_at = Instant::now() + self.ttl;
+        self.entries.retain(|entry| entry.key != key);
+        self.entries.push(ApprovalCacheEntry { key, expires_at });
+    }
+}
+
+/// Approval scope is intentionally narrower than a tool name. File approvals
+/// bind to the canonical path; command approvals bind to the executable plus
+/// flag pattern, and all cached entries expire automatically (§5.4.4).
+fn approval_cache_key(tool_name: &str, target: &str) -> String {
+    let file_tool = matches!(
+        tool_name,
+        "read_file" | "write_file" | "append_file" | "rg" | "agentgrep"
+    );
+    if file_tool {
+        format!("{tool_name}:path:{target}")
+    } else {
+        let mut words = target.split_whitespace();
+        let command = words.next().unwrap_or_default();
+        let flags = words
+            .filter(|word| word.starts_with('-'))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("{tool_name}:command:{command} {flags}")
+    }
 }
 
 pub const DEFAULT_MAX_ITERATIONS: usize = 52;
@@ -204,6 +259,7 @@ pub struct WorkerAgent {
     tools: Vec<ToolSpec>,
     system_prompt: String,
     max_iterations: usize,
+    approval_cache_ttl: Duration,
 }
 
 impl WorkerAgent {
@@ -228,6 +284,7 @@ impl WorkerAgent {
             tools: default_tool_defs(),
             system_prompt: DEFAULT_WORKER_SYSTEM_PROMPT.to_owned(),
             max_iterations: DEFAULT_MAX_ITERATIONS,
+            approval_cache_ttl: DEFAULT_APPROVAL_CACHE_TTL,
         }
     }
 
@@ -243,6 +300,13 @@ impl WorkerAgent {
 
     pub fn with_max_iterations(mut self, limit: usize) -> Self {
         self.max_iterations = limit;
+        self
+    }
+
+    /// Configure the lifetime of `AllowWorker` approval entries. Zero is
+    /// accepted for deterministic tests and means approvals are never reused.
+    pub fn with_approval_ttl(mut self, ttl: Duration) -> Self {
+        self.approval_cache_ttl = ttl;
         self
     }
 
@@ -286,7 +350,7 @@ impl WorkerAgent {
                 ..Default::default()
             },
         ];
-        let mut allow_worker: Option<String> = None;
+        let mut approval_cache = ApprovalCache::with_ttl(self.approval_cache_ttl);
         let mut todo_gate_retried = false;
         let mut finished = false;
 
@@ -362,7 +426,7 @@ impl WorkerAgent {
                     break;
                 }
                 let (result, command) = self
-                    .execute_tool(call, &mut allow_worker, &mut report, cancel.clone())
+                    .execute_tool(call, &mut approval_cache, &mut report, cancel.clone())
                     .await;
                 if let Some(command) = command {
                     report.commands_run.push(command);
@@ -393,12 +457,12 @@ impl WorkerAgent {
     async fn execute_tool(
         &self,
         call: &ResolvedToolCall,
-        allow_worker: &mut Option<String>,
+        approval_cache: &mut ApprovalCache,
         report: &mut WorkerReport,
         cancel: CancellationToken,
     ) -> (String, Option<CommandRun>) {
         let outcome = self
-            .execute_tool_inner(call, allow_worker, report, cancel.clone())
+            .execute_tool_inner(call, approval_cache, report, cancel.clone())
             .await;
         match outcome {
             Ok(result) => result,
@@ -421,7 +485,7 @@ impl WorkerAgent {
     async fn execute_tool_inner(
         &self,
         call: &ResolvedToolCall,
-        allow_worker: &mut Option<String>,
+        approval_cache: &mut ApprovalCache,
         report: &mut WorkerReport,
         cancel: CancellationToken,
     ) -> WorkerResult<(String, Option<CommandRun>)> {
@@ -446,7 +510,7 @@ impl WorkerAgent {
         match call.name.as_str() {
             "read_file" => {
                 let path = arg_path(&call.arguments)?;
-                self.authorize_file(&path, false, &call.name, allow_worker)
+                self.authorize_file(&path, false, &call.name, approval_cache)
                     .await?;
                 let guard = self.exec_guard();
                 let result =
@@ -464,7 +528,7 @@ impl WorkerAgent {
             "write_file" => {
                 let path = arg_path(&call.arguments)?;
                 let content = arg_content(&call.arguments)?;
-                self.authorize_file(&path, true, &call.name, allow_worker)
+                self.authorize_file(&path, true, &call.name, approval_cache)
                     .await?;
                 let guard = self.exec_guard();
                 let written =
@@ -476,7 +540,7 @@ impl WorkerAgent {
             "append_file" => {
                 let path = arg_path(&call.arguments)?;
                 let content = arg_content(&call.arguments)?;
-                self.authorize_file(&path, true, &call.name, allow_worker)
+                self.authorize_file(&path, true, &call.name, approval_cache)
                     .await?;
                 let guard = self.exec_guard();
                 let written =
@@ -506,7 +570,7 @@ impl WorkerAgent {
                     }
                     ShellRisk::Safe => {}
                 }
-                self.authorize_command(&call.name, &command, allow_worker)
+                self.authorize_command(&call.name, &command, approval_cache)
                     .await?;
                 let allow_network = call
                     .arguments
@@ -568,7 +632,7 @@ impl WorkerAgent {
                         }
                     }
                     ShellRisk::Safe => {
-                        self.authorize_command(&call.name, &command, allow_worker)
+                        self.authorize_command(&call.name, &command, approval_cache)
                             .await?;
                     }
                 }
@@ -590,7 +654,7 @@ impl WorkerAgent {
             }
             "git" => {
                 let args = arg_strings(&call.arguments, "args")?;
-                self.authorize_command(&call.name, &args.join(" "), allow_worker)
+                self.authorize_command(&call.name, &args.join(" "), approval_cache)
                     .await?;
                 let guard = self.exec_guard();
                 let output = tools::run_git(&guard, &args, &cancel).await?;
@@ -609,10 +673,10 @@ impl WorkerAgent {
                 let pattern = arg_string(&call.arguments, "pattern")?;
                 let path = arg_optional_string(&call.arguments, "path");
                 if let Some(path) = &path {
-                    self.authorize_file(path, false, &call.name, allow_worker)
+                    self.authorize_file(path, false, &call.name, approval_cache)
                         .await?;
                 } else {
-                    self.authorize_command(&call.name, &pattern, allow_worker)
+                    self.authorize_command(&call.name, &pattern, approval_cache)
                         .await?;
                 }
                 let guard = self.exec_guard();
@@ -649,10 +713,10 @@ impl WorkerAgent {
                 let query = arg_string(&call.arguments, "query")?;
                 let path = arg_optional_string(&call.arguments, "path");
                 if let Some(path) = &path {
-                    self.authorize_file(path, false, &call.name, allow_worker)
+                    self.authorize_file(path, false, &call.name, approval_cache)
                         .await?;
                 } else {
-                    self.authorize_command(&call.name, &query, allow_worker)
+                    self.authorize_command(&call.name, &query, approval_cache)
                         .await?;
                 }
                 let guard = self.exec_guard();
@@ -673,19 +737,19 @@ impl WorkerAgent {
     }
 
     /// Decide a file-path action against the real tier; on `NeedsApproval`,
-    /// consult the gate (cached by tool name via `allow_worker`).
+    /// consult the gate (cached by tool name via `approval_cache`).
     async fn authorize_file(
         &self,
         path: &str,
         write: bool,
         tool_name: &str,
-        allow_worker: &mut Option<String>,
+        approval_cache: &mut ApprovalCache,
     ) -> WorkerResult<()> {
         match tools::resolve_path(&self.scope, &self.guard, Path::new(path), write) {
             Ok(_) => Ok(()),
             Err(WorkerError::NeedsApproval { path }) => {
                 if self
-                    .approve(tool_name, &path.display().to_string(), allow_worker)
+                    .approve(tool_name, &path.display().to_string(), approval_cache)
                     .await
                 {
                     Ok(())
@@ -702,12 +766,12 @@ impl WorkerAgent {
         &self,
         tool_name: &str,
         target: &str,
-        allow_worker: &mut Option<String>,
+        approval_cache: &mut ApprovalCache,
     ) -> WorkerResult<()> {
         match self.guard.check_command() {
             crate::guard::ToolAccess::Allowed => Ok(()),
             crate::guard::ToolAccess::NeedsApproval => {
-                if self.approve(tool_name, target, allow_worker).await {
+                if self.approve(tool_name, target, approval_cache).await {
                     Ok(())
                 } else {
                     Err(WorkerError::NeedsApproval {
@@ -741,9 +805,10 @@ impl WorkerAgent {
         &self,
         tool_name: &str,
         target: &str,
-        allow_worker: &mut Option<String>,
+        approval_cache: &mut ApprovalCache,
     ) -> bool {
-        if allow_worker.as_deref() == Some(tool_name) {
+        let cache_key = approval_cache_key(tool_name, target);
+        if approval_cache.allows(&cache_key) {
             return true;
         }
         let request = ApprovalRequest {
@@ -754,7 +819,7 @@ impl WorkerAgent {
         match self.gate.decide(request).await {
             ApprovalDecision::AllowOnce => true,
             ApprovalDecision::AllowWorker => {
-                *allow_worker = Some(tool_name.to_owned());
+                approval_cache.remember(cache_key);
                 true
             }
             ApprovalDecision::Deny => false,
