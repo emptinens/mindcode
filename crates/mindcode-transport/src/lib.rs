@@ -18,6 +18,7 @@
 use futures_util::stream::{unfold, Stream};
 use futures_util::StreamExt;
 use mindcode_provider::{ModelId, Protocol, SecretKey};
+use mindcode_vexzy::WorkerEffort;
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -245,6 +246,9 @@ pub struct ChatCompletionsRequest {
     /// Tools offered to the model; empty is omitted from the wire body.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolSpec>,
+    /// Optional global Worker effort lock. `none` is omitted from the wire.
+    #[serde(skip)]
+    pub reasoning_effort: Option<WorkerEffort>,
 }
 
 /// The `anthropic-compatible` messages request; `stream` is always set to
@@ -261,6 +265,9 @@ pub struct MessagesRequest {
     /// Tools offered to the model; empty is omitted from the wire body.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolSpec>,
+    /// Optional global Worker effort lock. `none` is omitted from the wire.
+    #[serde(skip)]
+    pub reasoning_effort: Option<WorkerEffort>,
 }
 
 /// One streamed `openai-compatible` chat chunk (`data: {...}` line).
@@ -691,7 +698,24 @@ fn inject_chat_body(request: &ChatCompletionsRequest) -> Result<Value, Transport
     let mut value = inject_stream_flag(request)?;
     apply_openai_tools(&mut value);
     apply_openai_tool_results(&mut value);
+    apply_openai_effort(&mut value, request.reasoning_effort);
     Ok(value)
+}
+
+/// Put the neutral Worker effort on the OpenAI-compatible wire. `none` and an
+/// unset lock are deliberately omitted so providers retain their defaults.
+fn apply_openai_effort(value: &mut Value, effort: Option<WorkerEffort>) {
+    let Some(effort) = effort else {
+        return;
+    };
+    if effort != WorkerEffort::None {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "reasoning_effort".to_owned(),
+                Value::String(effort.to_string()),
+            );
+        }
+    }
 }
 
 /// Rename the neutral `tool_result_id` on `role: "tool"` messages into the
@@ -767,7 +791,43 @@ fn inject_messages_body(request: &MessagesRequest) -> Result<Value, TransportErr
     let mut value = inject_stream_flag(request)?;
     apply_anthropic_tools(&mut value);
     apply_anthropic_messages(&mut value);
+    apply_anthropic_effort(&mut value, request.reasoning_effort);
     Ok(value)
+}
+
+/// Translate the neutral effort lock into Anthropic's extended-thinking shape.
+/// Budget values are bounded and monotonic; the request's `max_tokens` is
+/// raised when necessary because Anthropic requires the thinking budget to fit
+/// inside that request budget.
+fn apply_anthropic_effort(value: &mut Value, effort: Option<WorkerEffort>) {
+    let Some(effort) = effort else {
+        return;
+    };
+    let budget_tokens = match effort {
+        WorkerEffort::None => return,
+        WorkerEffort::Low => 512,
+        WorkerEffort::Medium => 1_024,
+        WorkerEffort::High => 2_048,
+        WorkerEffort::Xhigh => 4_096,
+        WorkerEffort::Max => 8_192,
+    };
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let max_tokens = object
+        .get("max_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if max_tokens < budget_tokens {
+        object.insert("max_tokens".to_owned(), Value::from(budget_tokens));
+    }
+    object.insert(
+        "thinking".to_owned(),
+        serde_json::json!({
+            "type": "enabled",
+            "budget_tokens": budget_tokens,
+        }),
+    );
 }
 
 /// Rewrite neutral messages into the Anthropic wire shape: pull `system`
@@ -1107,6 +1167,7 @@ mod tests {
             max_tokens: Some(16),
             temperature: None,
             tools: Vec::new(),
+            reasoning_effort: None,
         }
     }
 
@@ -1153,10 +1214,49 @@ mod tests {
             system: None,
             temperature: None,
             tools: Vec::new(),
+            reasoning_effort: None,
         })
         .unwrap();
         assert_eq!(messages["stream"], Value::Bool(true));
         assert_eq!(messages["max_tokens"], Value::from(16));
+    }
+
+    #[test]
+    fn worker_effort_reaches_both_protocol_wire_shapes() {
+        let openai = inject_chat_body(&ChatCompletionsRequest {
+            reasoning_effort: Some(WorkerEffort::High),
+            ..chat_request()
+        })
+        .unwrap();
+        assert_eq!(openai["reasoning_effort"], "high");
+
+        let openai_none = inject_chat_body(&ChatCompletionsRequest {
+            reasoning_effort: Some(WorkerEffort::None),
+            ..chat_request()
+        })
+        .unwrap();
+        assert!(openai_none.get("reasoning_effort").is_none());
+
+        let anthropic = inject_messages_body(&MessagesRequest {
+            reasoning_effort: Some(WorkerEffort::Max),
+            ..MessagesRequest {
+                model: "model-alpha".to_owned(),
+                max_tokens: 16,
+                messages: vec![ChatMessage {
+                    role: "user".to_owned(),
+                    content: "ping".to_owned(),
+                    ..Default::default()
+                }],
+                system: None,
+                temperature: None,
+                tools: Vec::new(),
+                reasoning_effort: None,
+            }
+        })
+        .unwrap();
+        assert_eq!(anthropic["thinking"]["type"], "enabled");
+        assert_eq!(anthropic["thinking"]["budget_tokens"], 8192);
+        assert_eq!(anthropic["max_tokens"], 8192);
     }
 
     #[test]
@@ -1279,6 +1379,7 @@ mod tests {
             system: None,
             temperature: None,
             tools: Vec::new(),
+            reasoning_effort: None,
         })
         .unwrap();
         assert_eq!(two_turns["stream"], Value::Bool(true));
@@ -1308,6 +1409,7 @@ mod tests {
             system: None,
             temperature: None,
             tools: Vec::new(),
+            reasoning_effort: None,
         })
         .unwrap();
         let messages = one_turn["messages"].as_array().unwrap();
@@ -1331,6 +1433,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             tools: vec![spec.clone()],
+            reasoning_effort: None,
         })
         .unwrap();
         let tool = &chat["tools"][0];
@@ -1348,6 +1451,7 @@ mod tests {
             system: None,
             temperature: None,
             tools: vec![spec],
+            reasoning_effort: None,
         })
         .unwrap();
         let tool = &messages["tools"][0];
@@ -1389,6 +1493,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             tools: Vec::new(),
+            reasoning_effort: None,
         })
         .unwrap();
         let messages = chat["messages"].as_array().unwrap();
@@ -1437,6 +1542,7 @@ mod tests {
             system: None,
             temperature: None,
             tools: Vec::new(),
+            reasoning_effort: None,
         })
         .unwrap();
         let messages = body["messages"].as_array().unwrap();
@@ -1470,6 +1576,7 @@ mod tests {
             system: None,
             temperature: None,
             tools: Vec::new(),
+            reasoning_effort: None,
         })
         .unwrap();
         assert_eq!(

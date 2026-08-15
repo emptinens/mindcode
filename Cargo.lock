@@ -1043,6 +1043,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "mindcode-provider",
+ "mindcode-vexzy",
  "reqwest",
  "serde",
  "serde_json",

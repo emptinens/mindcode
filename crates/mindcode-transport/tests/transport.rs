@@ -25,6 +25,7 @@ fn chat_request(model: &str) -> ChatCompletionsRequest {
         max_tokens: Some(16),
         temperature: None,
         tools: Vec::new(),
+        reasoning_effort: None,
     }
 }
 
@@ -40,6 +41,7 @@ fn messages_request(model: &str) -> MessagesRequest {
         system: None,
         temperature: None,
         tools: Vec::new(),
+        reasoning_effort: None,
     }
 }
 

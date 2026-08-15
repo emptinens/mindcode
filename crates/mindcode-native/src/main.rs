@@ -3114,6 +3114,7 @@ async fn chat_completion_with_chunks(
                 max_tokens: None,
                 temperature: None,
                 tools: Vec::new(),
+                reasoning_effort: None,
             };
             let stream = transport
                 .chat_completions(&key, &request)
@@ -3144,6 +3145,7 @@ async fn chat_completion_with_chunks(
                 system: None,
                 temperature: None,
                 tools: Vec::new(),
+                reasoning_effort: None,
             };
             let stream = transport
                 .messages(&key, &request)
@@ -3198,6 +3200,7 @@ struct TransportModelClient {
     provider: ProviderConfig,
     key: SecretKey,
     model: String,
+    effort: Option<WorkerEffort>,
 }
 
 impl TransportModelClient {
@@ -3221,6 +3224,7 @@ impl TransportModelClient {
             provider: provider.clone(),
             key,
             model,
+            effort: settings.worker_effort_lock,
         })
     }
 }
@@ -3235,6 +3239,7 @@ impl ModelClient for TransportModelClient {
         let provider = self.provider.clone();
         let key = self.key.clone();
         let model = self.model.clone();
+        let effort = self.effort;
         let messages = messages.to_vec();
         let tools = tools.to_vec();
         Box::pin(async move {
@@ -3248,6 +3253,7 @@ impl ModelClient for TransportModelClient {
                         max_tokens: None,
                         temperature: None,
                         tools,
+                        reasoning_effort: effort,
                     };
                     let stream = transport
                         .chat_completions(&key, &request)
@@ -3310,6 +3316,7 @@ impl ModelClient for TransportModelClient {
                         system: None,
                         temperature: None,
                         tools,
+                        reasoning_effort: effort,
                     };
                     let stream = transport
                         .messages(&key, &request)
