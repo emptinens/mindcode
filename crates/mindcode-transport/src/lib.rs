@@ -494,6 +494,22 @@ impl Transport {
         serde_json::from_slice(&body).map_err(|_| TransportError::InvalidJson)
     }
 
+    /// Fetch the bounded JSON catalog body for a provider-specific eligibility
+    /// parser. Unknown fields are preserved in memory only; callers decide how
+    /// to validate the schema, and the response is still byte-capped.
+    pub async fn fetch_catalog_value(&self, key: &SecretKey) -> Result<Value, TransportError> {
+        let response = self
+            .client
+            .get(format!("{}/models", self.base_url))
+            .bearer_auth(key.as_secret())
+            .send()
+            .await
+            .map_err(map_reqwest_error)?;
+        let response = expect_success(response)?;
+        let body = read_bounded_body(response, MAX_RESPONSE_BYTES).await?;
+        serde_json::from_slice(&body).map_err(|_| TransportError::InvalidJson)
+    }
+
     /// Fetch and validate model ids from the `openai-compatible` catalog.
     ///
     /// Rows with an invalid or duplicated id fail closed.

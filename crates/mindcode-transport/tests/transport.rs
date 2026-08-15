@@ -60,6 +60,9 @@ async fn catalog_fetch_success_projects_typed_rows() {
     assert_eq!(ids, ["model-alpha", "model-beta", "model-gamma"]);
     assert_eq!(catalog.data[1].owned_by.as_deref(), Some("tests"));
 
+    let raw = transport.fetch_catalog_value(&test_key()).await.unwrap();
+    assert_eq!(raw["data"][1]["owned_by"], "tests");
+
     let model_ids = transport.fetch_model_ids(&test_key()).await.unwrap();
     let model_ids = model_ids.iter().map(|id| id.as_str()).collect::<Vec<_>>();
     assert_eq!(model_ids, ["model-alpha", "model-beta", "model-gamma"]);

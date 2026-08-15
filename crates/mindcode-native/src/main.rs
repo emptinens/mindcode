@@ -1126,16 +1126,11 @@ fn providers_input(settings: &NativeSettings) -> Vec<ProviderInput> {
         .collect()
 }
 
-/// The model ids the profile offers for interactive selection.  Custom
-/// profiles expose their allowlist verbatim; the built-in VEXZY profile is
-/// catalog-driven, so an empty allowlist surfaces the documented fallback
-/// model rather than an empty picker.
+/// The model ids the profile offers for interactive selection. Custom
+/// profiles expose their allowlist verbatim; VEXZY is catalog-driven and is
+/// intentionally empty until a live catalog has been resolved.
 fn provider_allowlist_input(provider: &ProviderConfig) -> Vec<String> {
-    let mut models: Vec<String> = provider.allowlist.iter().map(ModelId::to_string).collect();
-    if models.is_empty() && provider.id.as_str() == mindcode_settings::BUILTIN_VEXZY_PROVIDER_ID {
-        models.push("gpt-5.6-luna".to_owned());
-    }
-    models
+    provider.allowlist.iter().map(ModelId::to_string).collect()
 }
 
 /// Secret-free "is this profile usable right now" check: env → store →
@@ -1824,7 +1819,8 @@ async fn run_tui_host_session(
                                     pending.clone(),
                                     worker_event_tx.clone(),
                                     worker_pool.clone(),
-                                ) {
+                                )
+                                .await {
                                     Ok(message) => transcript.push("system", message),
                                     Err(error) => {
                                         transcript.push("system", format!("error: {error:#}"))
@@ -2723,12 +2719,12 @@ fn eligible_text() -> Result<String> {
     };
     if provider.id.as_str() == mindcode_settings::BUILTIN_VEXZY_PROVIDER_ID {
         return Ok(format!(
-            "{}: catalog-driven; worker model {}",
+            "{}: catalog-driven; selected worker model {}",
             provider.id,
             settings
                 .global_worker_model
                 .as_deref()
-                .unwrap_or("gpt-5.6-luna")
+                .unwrap_or("not selected (live catalog required)")
         ));
     }
     let models = provider
@@ -2893,29 +2889,75 @@ fn apply_tui_action(action: &UiActionInput) -> Result<bool> {
     Ok(changed)
 }
 
-/// Resolve the model id for a chat request: the `--model` override wins, then
-/// the global Worker model, then the first custom allowlist entry; VEXZY falls
-/// back to the documented Worker model and custom profiles fail closed on an
-/// empty allowlist.
+/// Resolve a model from explicit settings or a custom profile allowlist.
+/// Built-in VEXZY is intentionally not given an alias fallback: callers must
+/// use [`resolve_provider_model`] so the live catalog proves eligibility.
 fn select_chat_model(
     settings: &NativeSettings,
     provider: &ProviderConfig,
     override_model: Option<&str>,
 ) -> Result<String> {
-    if let Some(model) = override_model {
-        return Ok(model.to_owned());
+    let selected = override_model
+        .map(str::to_owned)
+        .or_else(|| settings.global_worker_model.clone())
+        .or_else(|| provider.allowlist.first().map(ModelId::to_string))
+        .ok_or_else(|| {
+            anyhow!(
+                "active provider has no selected model (VEXZY requires a live catalog; custom profiles require a non-empty allowlist)"
+            )
+        })?;
+    if provider.id.as_str() != mindcode_settings::BUILTIN_VEXZY_PROVIDER_ID
+        && !provider
+            .allowlist
+            .iter()
+            .any(|model| model.as_str() == selected)
+    {
+        return Err(anyhow!(
+            "selected model is not in the active provider allowlist (fail closed)"
+        ));
     }
-    if let Some(model) = &settings.global_worker_model {
-        return Ok(model.clone());
+    Ok(selected)
+}
+
+/// Resolve and validate the model against the active provider's eligibility
+/// contract. VEXZY is catalog-driven on every new request; custom profiles are
+/// allowlist-driven and never receive a vendor alias fallback.
+async fn resolve_provider_model(
+    settings: &NativeSettings,
+    provider: &ProviderConfig,
+    key: &SecretKey,
+    transport: &Transport,
+    override_model: Option<&str>,
+    effort: Option<WorkerEffort>,
+) -> Result<String> {
+    if provider.id.as_str() != mindcode_settings::BUILTIN_VEXZY_PROVIDER_ID {
+        return select_chat_model(settings, provider, override_model);
     }
-    if provider.id.as_str() == mindcode_settings::BUILTIN_VEXZY_PROVIDER_ID {
-        return Ok("gpt-5.6-luna".to_owned());
+
+    let value = transport
+        .fetch_catalog_value(key)
+        .await
+        .map_err(|_| anyhow!("active VEXZY model catalog is unavailable"))?;
+    let catalog = parse_vexzy_model_catalog(&value.to_string())
+        .map_err(|_| anyhow!("active VEXZY model catalog is invalid"))?;
+    let mut eligible = eligible_worker_models(&catalog);
+    if let Some(effort) = effort {
+        eligible.retain(|model| model.supports_worker_effort(effort));
     }
-    provider
-        .allowlist
+    let selected = override_model.or(settings.global_worker_model.as_deref());
+    if let Some(selected) = selected {
+        let model = eligible
+            .into_iter()
+            .find(|model| model.id == selected)
+            .ok_or_else(|| {
+                anyhow!("selected VEXZY model is absent, ineligible, or lacks the effort lock")
+            })?;
+        return Ok(model.id.clone());
+    }
+    eligible
         .first()
-        .map(ModelId::to_string)
-        .ok_or_else(|| anyhow!("active provider has an empty model allowlist (fail closed)"))
+        .map(|model| model.id.clone())
+        .ok_or_else(|| anyhow!("VEXZY catalog has no eligible Worker model"))
 }
 
 async fn run_chat(
@@ -3101,8 +3143,9 @@ async fn chat_completion_with_chunks(
             ));
         }
     };
-    let model = select_chat_model(&settings, provider, model_override)?;
     let transport = Transport::new(&provider.base_url).map_err(anyhow::Error::msg)?;
+    let model =
+        resolve_provider_model(&settings, provider, &key, &transport, model_override, None).await?;
     let mut output = String::new();
     let mut usage = ChatUsage::default();
 
@@ -3205,8 +3248,9 @@ struct TransportModelClient {
 
 impl TransportModelClient {
     /// Resolve the active provider, its credential (env -> store ->
-    /// fail-closed), and model — the same resolution as a chat turn.
-    fn resolve(settings: &NativeSettings) -> Result<Self> {
+    /// fail-closed), and catalog-eligible model — the same resolution as a
+    /// chat turn.
+    async fn resolve(settings: &NativeSettings) -> Result<Self> {
         let provider = run_active_provider_config(settings, None)
             .ok_or_else(|| anyhow!("no active provider is configured"))?;
         let store = load_store(&native_store_path()?).map_err(anyhow::Error::msg)?;
@@ -3219,7 +3263,16 @@ impl TransportModelClient {
                     credential_ref_kind(provider)
                 )
             })?;
-        let model = select_chat_model(settings, provider, None)?;
+        let transport = Transport::new(&provider.base_url).map_err(anyhow::Error::msg)?;
+        let model = resolve_provider_model(
+            settings,
+            provider,
+            &key,
+            &transport,
+            None,
+            settings.worker_effort_lock,
+        )
+        .await?;
         Ok(Self {
             provider: provider.clone(),
             key,
@@ -3552,7 +3605,7 @@ static NEXT_WORKER_ID: AtomicU64 = AtomicU64::new(1);
 /// guard around the launch directory, and spawn the agent on the bounded pool.
 /// Returns the transcript confirmation line; the report arrives later through
 /// `worker_event_tx` as [`WorkerEvent::Finished`].
-fn spawn_worker(
+async fn spawn_worker(
     task: &str,
     tier: PermissionTier,
     allow_unsafe_shell: bool,
@@ -3562,7 +3615,7 @@ fn spawn_worker(
     pool: WorkerPool,
 ) -> Result<String> {
     let settings = load_native_settings()?;
-    let client = TransportModelClient::resolve(&settings)?;
+    let client = TransportModelClient::resolve(&settings).await?;
     let worker_id = format!("worker-{}", NEXT_WORKER_ID.fetch_add(1, Ordering::SeqCst));
     let gate = TuiApprovalGate {
         pending: pending.clone(),
@@ -4534,14 +4587,14 @@ mod tests {
     }
 
     #[test]
-    fn providers_input_exposes_selectable_allowlist_and_vexzy_fallback() {
+    fn providers_input_exposes_custom_allowlist_and_empty_vexzy_catalog_projection() {
         with_sandbox_env(|dir| {
             seed_builtin_active(dir);
-            // The built-in VEXZY profile is catalog-driven with an empty
-            // allowlist; the picker falls back to the documented model so it
-            // is never blank.
+            // The built-in VEXZY profile is catalog-driven; without a live
+            // catalog its projected model list remains empty rather than
+            // inventing a vendor alias.
             let inputs = providers_input(&load_sandbox_settings(dir));
-            assert_eq!(inputs[0].allowlist, vec!["gpt-5.6-luna".to_owned()]);
+            assert!(inputs[0].allowlist.is_empty());
 
             // A custom profile exposes its allowlist verbatim.
             let add = UiActionInput {
@@ -6267,23 +6320,21 @@ mod tests {
             &["model-a", "model-b"],
         );
         assert_eq!(
-            select_chat_model(&settings, &custom, Some("override")).unwrap(),
-            "override"
+            select_chat_model(&settings, &custom, Some("model-b")).unwrap(),
+            "model-b"
         );
         assert_eq!(
             select_chat_model(&settings, &custom, None).unwrap(),
             "model-a"
         );
-        settings.global_worker_model = Some("global-model".to_owned());
+        settings.global_worker_model = Some("model-b".to_owned());
         assert_eq!(
             select_chat_model(&settings, &custom, None).unwrap(),
-            "global-model"
+            "model-b"
         );
         let vexzy = builtin_vexzy_provider();
-        assert_eq!(
-            select_chat_model(&NativeSettings::default(), &vexzy, None).unwrap(),
-            "gpt-5.6-luna"
-        );
+        assert!(select_chat_model(&NativeSettings::default(), &vexzy, None).is_err());
+        assert!(select_chat_model(&NativeSettings::default(), &custom, Some("override")).is_err());
         let empty = profile(
             "empty",
             "Empty",
