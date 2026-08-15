@@ -1,6 +1,7 @@
 use mindcoded::{
+    daemon_token_path,
     protocol::{read_message, write_message, ClientMessage, ServerMessage, PROTOCOL_VERSION},
-    Daemon, DaemonConfig,
+    read_daemon_token, Daemon, DaemonConfig,
 };
 use serde_json::{json, Value};
 use std::{path::Path, time::Duration};
@@ -18,6 +19,7 @@ async fn wait_for_socket(path: &Path) {
 }
 
 async fn connect(path: &Path) -> UnixStream {
+    let token = read_daemon_token(&daemon_token_path(path)).unwrap();
     let mut stream = UnixStream::connect(path).await.unwrap();
     write_message(
         &mut stream,
@@ -25,6 +27,7 @@ async fn connect(path: &Path) -> UnixStream {
             id: "session-index-handshake".into(),
             version: PROTOCOL_VERSION,
             client: "session-index-rpc-test".into(),
+            token,
             capabilities: vec!["session_index".into()],
         },
     )

@@ -1,5 +1,7 @@
-use mindcoded::protocol::{
-    read_message, write_message, ClientMessage, ServerMessage, PROTOCOL_VERSION,
+use mindcoded::{
+    daemon_token_path,
+    protocol::{read_message, write_message, ClientMessage, ServerMessage, PROTOCOL_VERSION},
+    read_daemon_token,
 };
 use serde_json::Value;
 use std::{path::Path, process::Stdio, time::Duration};
@@ -17,6 +19,7 @@ async fn wait_for_socket(path: &Path) {
 }
 
 async fn connect(path: &Path, handshake_id: &str) -> UnixStream {
+    let token = read_daemon_token(&daemon_token_path(path)).unwrap();
     let mut stream = UnixStream::connect(path).await.unwrap();
     write_message(
         &mut stream,
@@ -24,6 +27,7 @@ async fn connect(path: &Path, handshake_id: &str) -> UnixStream {
             id: handshake_id.into(),
             version: PROTOCOL_VERSION,
             client: "daemon-reload-test".into(),
+            token,
             capabilities: vec!["status".into(), "reload".into(), "shutdown".into()],
         },
     )
@@ -86,6 +90,7 @@ async fn reload_reexecs_in_place_and_keeps_the_socket_usable() {
         .spawn()
         .unwrap();
     wait_for_socket(&socket).await;
+    let token_before = read_daemon_token(&daemon_token_path(&socket)).unwrap();
 
     let mut first = connect(&socket, "handshake-1").await;
     let pid_before = status_pid(request(&mut first, "status-1", "status").await);
@@ -101,6 +106,7 @@ async fn reload_reexecs_in_place_and_keeps_the_socket_usable() {
                 id: format!("handshake-reconnect-{attempt}"),
                 version: PROTOCOL_VERSION,
                 client: "daemon-reload-test".into(),
+                token: read_daemon_token(&daemon_token_path(&socket)).unwrap(),
                 capabilities: vec!["status".into(), "shutdown".into()],
             };
             if write_message(&mut stream, &handshake).await.is_ok()
@@ -116,6 +122,8 @@ async fn reload_reexecs_in_place_and_keeps_the_socket_usable() {
         sleep(Duration::from_millis(10)).await;
     }
     let mut second = second.expect("daemon did not accept a connection after reload");
+    let token_after = read_daemon_token(&daemon_token_path(&socket)).unwrap();
+    assert_eq!(token_after, token_before);
     let pid_after = status_pid(request(&mut second, "status-2", "status").await);
     assert_eq!(pid_after, pid_before);
     let shutdown = request(&mut second, "shutdown-1", "shutdown").await;

@@ -68,13 +68,18 @@ impl From<rmp_serde::decode::Error> for ProtocolError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     Handshake {
         id: String,
         version: u16,
         client: String,
+        /// 32-byte runtime token encoded as lowercase hex. The serde default
+        /// keeps old wire clients parseable so the daemon can reject them
+        /// with an authentication error instead of accepting them.
+        #[serde(default)]
+        token: String,
         #[serde(default)]
         capabilities: Vec<String>,
     },
@@ -89,6 +94,40 @@ pub enum ClientMessage {
     Cancel {
         id: String,
     },
+}
+
+impl fmt::Debug for ClientMessage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Handshake {
+                id,
+                version,
+                client,
+                token,
+                capabilities,
+            } => formatter
+                .debug_struct("Handshake")
+                .field("id", id)
+                .field("version", version)
+                .field("client", client)
+                .field("token_present", &(!token.is_empty()))
+                .field("capabilities", capabilities)
+                .finish(),
+            Self::Request {
+                id,
+                method,
+                params,
+                stream,
+            } => formatter
+                .debug_struct("Request")
+                .field("id", id)
+                .field("method", method)
+                .field("params", params)
+                .field("stream", stream)
+                .finish(),
+            Self::Cancel { id } => formatter.debug_struct("Cancel").field("id", id).finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -232,8 +271,16 @@ mod tests {
             id: "handshake-1".into(),
             version: PROTOCOL_VERSION,
             client: "mindcode-test".into(),
+            token: "test-token".into(),
             capabilities: vec!["stream".into(), "cancel".into()],
         }
+    }
+
+    #[test]
+    fn handshake_debug_redacts_token() {
+        let debug = format!("{:?}", handshake());
+        assert!(!debug.contains("test-token"));
+        assert!(debug.contains("token_present: true"));
     }
 
     #[test]

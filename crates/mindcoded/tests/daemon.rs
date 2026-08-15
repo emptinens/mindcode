@@ -1,6 +1,7 @@
 use mindcoded::{
+    daemon_token_path,
     protocol::{read_message, write_message, ClientMessage, ServerMessage, PROTOCOL_VERSION},
-    Daemon, DaemonConfig,
+    read_daemon_token, Daemon, DaemonConfig,
 };
 use std::{path::Path, time::Duration};
 use tempfile::tempdir;
@@ -16,13 +17,14 @@ async fn wait_for_socket(path: &Path) {
     panic!("socket was not created: {}", path.display());
 }
 
-async fn handshake(stream: &mut UnixStream) {
+async fn handshake(stream: &mut UnixStream, token: &str) {
     write_message(
         stream,
         &ClientMessage::Handshake {
             id: "handshake-1".into(),
             version: PROTOCOL_VERSION,
             client: "integration-test".into(),
+            token: token.to_owned(),
             capabilities: vec!["status".into()],
         },
     )
@@ -59,7 +61,8 @@ async fn status_exposes_counters_without_secrets() {
         );
     }
     let mut stream = UnixStream::connect(&socket).await.unwrap();
-    handshake(&mut stream).await;
+    let token = read_daemon_token(&daemon_token_path(&socket)).unwrap();
+    handshake(&mut stream, &token).await;
     write_message(
         &mut stream,
         &ClientMessage::Request {

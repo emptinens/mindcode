@@ -44,8 +44,9 @@ use mindcode_worker::{
     WorkerUsage, DEFAULT_MAX_CONCURRENT, DEFAULT_WORKER_CONTEXT_TOKEN_BUDGET,
 };
 use mindcoded::{
+    daemon_token_path,
     protocol::{read_message, write_message, ClientMessage, ServerMessage, PROTOCOL_VERSION},
-    Daemon, DaemonConfig,
+    read_daemon_token, Daemon, DaemonConfig,
 };
 use serde_json::{json, Value};
 use std::{
@@ -1133,6 +1134,11 @@ fn daemon_session_socket_path() -> PathBuf {
     DaemonConfig::default_socket()
 }
 
+fn daemon_session_token() -> Result<String> {
+    let socket = daemon_session_socket_path();
+    read_daemon_token(&daemon_token_path(&socket)).context("read daemon session token")
+}
+
 async fn connect_or_spawn_daemon() -> Result<tokio::net::UnixStream> {
     let socket_path = daemon_session_socket_path();
     if let Ok(stream) = tokio::net::UnixStream::connect(&socket_path).await {
@@ -1196,7 +1202,10 @@ async fn connect_or_spawn_daemon() -> Result<tokio::net::UnixStream> {
     }
 }
 
-async fn daemon_handshake(stream: &mut tokio::net::UnixStream) -> Result<()> {
+async fn daemon_handshake(stream: &mut tokio::net::UnixStream, token: &str) -> Result<()> {
+    if token.trim().is_empty() {
+        return Err(anyhow!("daemon token is empty"));
+    }
     let id = format!(
         "native-handshake-{}",
         NEXT_DAEMON_RPC_ID.fetch_add(1, Ordering::Relaxed)
@@ -1207,6 +1216,7 @@ async fn daemon_handshake(stream: &mut tokio::net::UnixStream) -> Result<()> {
             id,
             version: PROTOCOL_VERSION,
             client: "mindcode-native-tui".to_owned(),
+            token: token.to_owned(),
             capabilities: vec!["session".to_owned(), "reload".to_owned()],
         },
     )
@@ -1335,7 +1345,8 @@ impl DaemonSessionControl {
 
     async fn reconnect(&self) -> Result<()> {
         let mut stream = connect_or_spawn_daemon().await?;
-        daemon_handshake(&mut stream).await?;
+        let token = daemon_session_token()?;
+        daemon_handshake(&mut stream, &token).await?;
         let result = daemon_request(&mut stream, "session.open", self.open_params()).await?;
         let lease_id = result["session"]["lease_id"]
             .as_str()
@@ -1375,7 +1386,8 @@ struct DaemonSessionLease {
 impl DaemonSessionLease {
     async fn open(session_id: &str) -> Result<Self> {
         let mut stream = connect_or_spawn_daemon().await?;
-        daemon_handshake(&mut stream).await?;
+        let token = daemon_session_token()?;
+        daemon_handshake(&mut stream, &token).await?;
         let connection_id = format!(
             "tui-{}-{}",
             process::id(),

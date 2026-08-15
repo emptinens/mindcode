@@ -33,8 +33,9 @@ use session_manager::{OpenSessionInput, SessionManager};
 use std::{
     collections::{HashMap, VecDeque},
     env,
+    io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{atomic::AtomicBool, Arc, Mutex},
+    sync::{atomic::AtomicBool, Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 use tokio::{
@@ -47,7 +48,11 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 #[cfg(unix)]
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+
+pub const DAEMON_TOKEN_FILE_NAME: &str = "mindcoded-v1.token";
+const DAEMON_TOKEN_BYTES: usize = 32;
+const DAEMON_TOKEN_HEX_LENGTH: usize = DAEMON_TOKEN_BYTES * 2;
 
 const DEFAULT_IDLE_SECONDS: u64 = 30 * 60;
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -107,6 +112,7 @@ const SERVER_CAPABILITIES: &[&str] = &[
     "mcp.stdio.receive",
     "mcp.stdio.close",
     "mcp.stdio.status",
+    "auth.token",
     "vexzy.catalog.get",
     "vexzy.catalog.put",
     "vexzy.catalog.status",
@@ -128,6 +134,37 @@ pub struct DaemonConfig {
     pub idle_seconds: Option<u64>,
     pub handshake_timeout: Duration,
     pub build_id: String,
+}
+
+/// Return the per-runtime-dir token path used to authenticate daemon clients.
+/// The token is deliberately not derived from the socket name: every daemon
+/// socket in one secured runtime directory shares the same local capability.
+pub fn daemon_token_path(socket: &Path) -> PathBuf {
+    socket
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join(DAEMON_TOKEN_FILE_NAME)
+}
+
+/// Read and validate the daemon token without ever formatting it into a
+/// diagnostic. Native clients use this only to populate the handshake.
+pub fn read_daemon_token(path: &Path) -> Result<String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("open daemon token {}", path.display()))?;
+    validate_token_file(path, &file)?;
+
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)
+        .context("read daemon token")?;
+    let token = contents.trim().to_owned();
+    validate_token_value(&token)?;
+    Ok(token)
 }
 
 impl DaemonConfig {
@@ -182,6 +219,7 @@ struct Metrics {
 
 struct DaemonState {
     config: DaemonConfig,
+    daemon_token: OnceLock<String>,
     task_graph: Arc<TaskGraph>,
     session_index: Arc<SessionIndex>,
     session_manager: Arc<SessionManager>,
@@ -241,6 +279,7 @@ impl Daemon {
         let session_manager = Arc::new(SessionManager::new(Arc::clone(&session_index)));
         Self {
             state: Arc::new(DaemonState {
+                daemon_token: OnceLock::new(),
                 task_graph: Arc::new(TaskGraph::new(task_graph_config)),
                 session_index,
                 session_manager,
@@ -293,6 +332,11 @@ impl Daemon {
             None => InstanceLock::acquire(&lock_path, socket_path, &self.state.config.build_id)
                 .with_context(|| format!("acquire daemon instance lock {}", lock_path.display()))?,
         };
+        let daemon_token = load_or_create_daemon_token(parent)?;
+        self.state
+            .daemon_token
+            .set(daemon_token)
+            .map_err(|_| anyhow::anyhow!("daemon token was initialized twice"))?;
 
         let task_graph = Arc::clone(&self.state.task_graph);
         tokio::task::spawn_blocking(move || task_graph.initialize())
@@ -663,15 +707,28 @@ async fn reject_overloaded_connection(
     mut stream: UnixStream,
     state: Arc<DaemonState>,
 ) -> Result<()> {
-    let handshake = match timeout(
+    let (handshake, token) = match timeout(
         state.config.handshake_timeout,
         read_message::<_, ClientMessage>(&mut stream),
     )
     .await
     {
-        Ok(Ok(Some(ClientMessage::Handshake { id, .. }))) => id,
+        Ok(Ok(Some(ClientMessage::Handshake { id, token, .. }))) => (id, token),
         _ => return Ok(()),
     };
+    let authentication_error =
+        (!daemon_token_matches(&state, &token)).then(|| RemoteErrorPayload {
+            code: "authentication_failed".into(),
+            message: "daemon handshake token is invalid".into(),
+            details: None,
+        });
+    let error = authentication_error.or_else(|| {
+        Some(RemoteErrorPayload {
+            code: "DAEMON_OVERLOADED_CONNECTIONS".into(),
+            message: "daemon connection limit reached".into(),
+            details: None,
+        })
+    });
     write_message(
         &mut stream,
         &ServerMessage::HandshakeAck {
@@ -680,11 +737,7 @@ async fn reject_overloaded_connection(
             accepted: false,
             server: Some(format!("mindcoded/{}", state.config.build_id)),
             capabilities: Vec::new(),
-            error: Some(RemoteErrorPayload {
-                code: "DAEMON_OVERLOADED_CONNECTIONS".into(),
-                message: "daemon connection limit reached".into(),
-                details: None,
-            }),
+            error,
         },
     )
     .await
@@ -732,9 +785,31 @@ async fn handle_connection_inner(stream: UnixStream, state: Arc<DaemonState>) ->
     };
     state.touch();
 
-    let ClientMessage::Handshake { id, version, .. } = message else {
+    let ClientMessage::Handshake {
+        id, version, token, ..
+    } = message
+    else {
         return Ok(());
     };
+    if !daemon_token_matches(&state, &token) {
+        write_server_message(
+            &writer,
+            &ServerMessage::HandshakeAck {
+                id,
+                version: PROTOCOL_VERSION,
+                accepted: false,
+                server: Some(format!("mindcoded/{}", state.config.build_id)),
+                capabilities: Vec::new(),
+                error: Some(RemoteErrorPayload {
+                    code: "authentication_failed".into(),
+                    message: "daemon handshake token is invalid".into(),
+                    details: None,
+                }),
+            },
+        )
+        .await?;
+        return Ok(());
+    }
     let accepted = version == PROTOCOL_VERSION;
     let error = (!accepted).then(|| RemoteErrorPayload {
         code: "protocol_version".into(),
@@ -2266,6 +2341,86 @@ fn runtime_directory_unchanged(_path: &Path, _expected: ()) -> bool {
     true
 }
 
+fn validate_token_value(token: &str) -> Result<()> {
+    if token.len() != DAEMON_TOKEN_HEX_LENGTH
+        || !token.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit())
+    {
+        bail!("daemon token has an invalid format");
+    }
+    Ok(())
+}
+
+fn validate_token_file(path: &Path, file: &std::fs::File) -> Result<()> {
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("inspect daemon token {}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        bail!("daemon token is not a regular file: {}", path.display());
+    }
+    #[cfg(unix)]
+    {
+        if metadata.uid() != unsafe { libc::geteuid() } as u32 {
+            bail!("daemon token is not owned by the current user");
+        }
+        if metadata.permissions().mode() & 0o777 != 0o600 {
+            bail!("daemon token permissions are not 0600");
+        }
+    }
+    Ok(())
+}
+
+fn random_daemon_token() -> Result<String> {
+    let mut bytes = [0_u8; DAEMON_TOKEN_BYTES];
+    let mut source = std::fs::File::open("/dev/urandom")
+        .context("open operating-system random source for daemon token")?;
+    source
+        .read_exact(&mut bytes)
+        .context("read operating-system random source for daemon token")?;
+    let mut encoded = String::with_capacity(DAEMON_TOKEN_HEX_LENGTH);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    Ok(encoded)
+}
+
+fn load_or_create_daemon_token(runtime_dir: &Path) -> Result<String> {
+    let path = runtime_dir.join(DAEMON_TOKEN_FILE_NAME);
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    options
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+
+    match options.open(&path) {
+        Ok(mut file) => {
+            let token = random_daemon_token()?;
+            file.write_all(token.as_bytes())?;
+            file.write_all(b"\n")?;
+            file.sync_all().context("sync daemon token")?;
+            validate_token_file(&path, &file)?;
+            Ok(token)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => read_daemon_token(&path),
+        Err(error) => Err(error).with_context(|| format!("create daemon token {}", path.display())),
+    }
+}
+
+fn daemon_token_matches(state: &DaemonState, presented: &str) -> bool {
+    let Some(expected) = state.daemon_token.get() else {
+        return false;
+    };
+    let expected_bytes = expected.as_bytes();
+    let presented_bytes = presented.as_bytes();
+    let mut difference = (expected_bytes.len() ^ presented_bytes.len()) as u8;
+    for index in 0..expected_bytes.len().max(presented_bytes.len()) {
+        difference |= expected_bytes.get(index).copied().unwrap_or(0)
+            ^ presented_bytes.get(index).copied().unwrap_or(0);
+    }
+    difference == 0
+}
+
 fn remove_stale_socket(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(path)
@@ -2391,7 +2546,12 @@ mod tests {
         panic!("socket was not created: {}", path.display());
     }
 
+    fn test_token(path: &Path) -> String {
+        read_daemon_token(&daemon_token_path(path)).unwrap()
+    }
+
     async fn connect_and_handshake(path: &Path) -> UnixStream {
+        let token = test_token(path);
         let mut stream = UnixStream::connect(path).await.unwrap();
         write_message(
             &mut stream,
@@ -2399,6 +2559,7 @@ mod tests {
                 id: "handshake-1".into(),
                 version: PROTOCOL_VERSION,
                 client: "test-client".into(),
+                token,
                 capabilities: vec!["request".into()],
             },
         )
@@ -2482,6 +2643,7 @@ mod tests {
                 id: "bad".into(),
                 version: 99,
                 client: "test".into(),
+                token: test_token(&path),
                 capabilities: vec![],
             },
         )
@@ -2660,6 +2822,7 @@ mod tests {
                 id: "overload-handshake".into(),
                 version: PROTOCOL_VERSION,
                 client: "overload-test".into(),
+                token: test_token(&path),
                 capabilities: vec![],
             },
         )
