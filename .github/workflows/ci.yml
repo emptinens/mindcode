@@ -3,6 +3,13 @@ name: MindCode CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      run_benchmarks:
+        description: "Run consent-gated injection and TUI performance benchmarks"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -52,3 +59,26 @@ jobs:
 
       - name: Verify tracked tree is unchanged
         run: git diff --exit-code
+
+  owner-approved-benchmarks:
+    # Benchmark execution is never part of push/PR CI. The owner must start a
+    # workflow_dispatch run and explicitly set run_benchmarks=true.
+    if: github.event_name == 'workflow_dispatch' && inputs.run_benchmarks == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      MINDCODE_BENCH_APPROVED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          components: rustfmt
+
+      - name: Injection ASR benchmark
+        run: sh scripts/bench-injection.sh
+
+      - name: TUI frame performance gate
+        run: sh scripts/bench-tui-frame.sh
