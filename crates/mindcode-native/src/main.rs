@@ -1282,19 +1282,93 @@ async fn daemon_request(
     }
 }
 
-async fn locked_daemon_request(
-    stream: &Arc<AsyncMutex<tokio::net::UnixStream>>,
-    method: &str,
-    params: Value,
-) -> Result<Value> {
-    let mut stream = stream.lock().await;
-    daemon_request(&mut stream, method, params).await
+const DAEMON_RECONNECT_MIN_DELAY: Duration = Duration::from_secs(1);
+const DAEMON_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
+
+struct DaemonSessionControl {
+    connection: Arc<AsyncMutex<Option<tokio::net::UnixStream>>>,
+    session_id: String,
+    connection_id: String,
+    project_path: String,
+    transcript_path: String,
+    size_bytes: u64,
+    lease_id: Arc<AsyncMutex<String>>,
+}
+
+impl DaemonSessionControl {
+    fn open_params(&self) -> Value {
+        json!({
+            "session_id": self.session_id,
+            "connection_id": self.connection_id,
+            "project_path": self.project_path,
+            "transcript_path": self.transcript_path,
+            "size_bytes": self.size_bytes,
+        })
+    }
+
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        let mut connection = self.connection.lock().await;
+        let Some(stream) = connection.as_mut() else {
+            return Err(anyhow!("daemon session connection is not available"));
+        };
+        match daemon_request(stream, method, params).await {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                *connection = None;
+                Err(error)
+            }
+        }
+    }
+
+    async fn touch(&self) -> Result<()> {
+        let lease_id = self.lease_id.lock().await.clone();
+        self.request(
+            "session.touch",
+            json!({
+                "session_id": self.session_id,
+                "lease_id": lease_id,
+            }),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn reconnect(&self) -> Result<()> {
+        let mut stream = connect_or_spawn_daemon().await?;
+        daemon_handshake(&mut stream).await?;
+        let result = daemon_request(&mut stream, "session.open", self.open_params()).await?;
+        let lease_id = result["session"]["lease_id"]
+            .as_str()
+            .ok_or_else(|| anyhow!("daemon reconnect returned no lease"))?
+            .to_owned();
+        {
+            let mut connection = self.connection.lock().await;
+            *connection = Some(stream);
+        }
+        *self.lease_id.lock().await = lease_id;
+        Ok(())
+    }
+
+    async fn reload(&self) -> Result<()> {
+        self.request("reload", json!({})).await.map(|_| ())
+    }
+
+    async fn close(&self) {
+        let lease_id = self.lease_id.lock().await.clone();
+        let _ = self
+            .request(
+                "session.close",
+                json!({
+                    "session_id": self.session_id,
+                    "lease_id": lease_id,
+                }),
+            )
+            .await;
+    }
 }
 
 struct DaemonSessionLease {
-    connection: Arc<AsyncMutex<tokio::net::UnixStream>>,
-    session_id: String,
-    lease_id: String,
+    control: Arc<DaemonSessionControl>,
     heartbeat: tokio::task::JoinHandle<()>,
 }
 
@@ -1302,7 +1376,6 @@ impl DaemonSessionLease {
     async fn open(session_id: &str) -> Result<Self> {
         let mut stream = connect_or_spawn_daemon().await?;
         daemon_handshake(&mut stream).await?;
-        let connection = Arc::new(AsyncMutex::new(stream));
         let connection_id = format!(
             "tui-{}-{}",
             process::id(),
@@ -1316,65 +1389,54 @@ impl DaemonSessionLease {
         let size_bytes = fs::metadata(&transcript_path)
             .map(|metadata| metadata.len())
             .unwrap_or(0);
-        let result = locked_daemon_request(
-            &connection,
-            "session.open",
-            json!({
-                "session_id": session_id,
-                "connection_id": connection_id,
-                "project_path": project_path,
-                "transcript_path": transcript_path,
-                "size_bytes": size_bytes,
-            }),
-        )
-        .await?;
+        let control = Arc::new(DaemonSessionControl {
+            connection: Arc::new(AsyncMutex::new(Some(stream))),
+            session_id: session_id.to_owned(),
+            connection_id,
+            project_path,
+            transcript_path,
+            size_bytes,
+            lease_id: Arc::new(AsyncMutex::new(String::new())),
+        });
+        let result = control
+            .request("session.open", control.open_params())
+            .await?;
         let lease_id = result["session"]["lease_id"]
             .as_str()
             .ok_or_else(|| anyhow!("daemon session.open returned no lease"))?
             .to_owned();
-        let heartbeat_connection = Arc::clone(&connection);
-        let heartbeat_session = session_id.to_owned();
-        let heartbeat_lease = lease_id.clone();
+        *control.lease_id.lock().await = lease_id;
+
+        let heartbeat_control = Arc::clone(&control);
         let heartbeat = tokio::spawn(async move {
             let mut interval = tokio::time::interval(DAEMON_HEARTBEAT_INTERVAL);
             interval.tick().await;
             loop {
                 interval.tick().await;
-                if locked_daemon_request(
-                    &heartbeat_connection,
-                    "session.touch",
-                    json!({
-                        "session_id": heartbeat_session,
-                        "lease_id": heartbeat_lease,
-                    }),
-                )
-                .await
-                .is_err()
-                {
-                    break;
+                if heartbeat_control.touch().await.is_ok() {
+                    continue;
+                }
+                let mut delay = DAEMON_RECONNECT_MIN_DELAY;
+                loop {
+                    tokio::time::sleep(delay).await;
+                    if heartbeat_control.reconnect().await.is_ok() {
+                        break;
+                    }
+                    delay = (delay * 2).min(DAEMON_RECONNECT_MAX_DELAY);
                 }
             }
         });
-        Ok(Self {
-            connection,
-            session_id: session_id.to_owned(),
-            lease_id,
-            heartbeat,
-        })
+        Ok(Self { control, heartbeat })
+    }
+
+    fn control(&self) -> Arc<DaemonSessionControl> {
+        Arc::clone(&self.control)
     }
 
     async fn close(self) {
         self.heartbeat.abort();
         let _ = self.heartbeat.await;
-        let _ = locked_daemon_request(
-            &self.connection,
-            "session.close",
-            json!({
-                "session_id": self.session_id,
-                "lease_id": self.lease_id,
-            }),
-        )
-        .await;
+        self.control.close().await;
     }
 }
 
@@ -1756,14 +1818,20 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
     // the renderer is attached, so reconnects and detached workers share one
     // durable session identity without breaking the compatibility host path.
     let daemon_session = DaemonSessionLease::open(&session_id).await?;
+    let daemon_control = daemon_session.control();
     let outcome = async {
         // §13.2: internal entry point for the detached background host. It owns
         // the control server, worker pool, and conversation; it never detaches
         // again and never runs the renderer.
         if args.detach_host {
             write_host_pidfile(&session_id, process::id())?;
-            let host =
-                run_tui_host_session(session_id.clone(), allow_unsafe_shell, allow_network).await?;
+            let host = run_tui_host_session(
+                session_id.clone(),
+                allow_unsafe_shell,
+                allow_network,
+                Arc::clone(&daemon_control),
+            )
+            .await?;
             let outcome = host.await_shutdown().await;
             let _ = remove_host_pidfile(&session_id);
             return outcome.map(|()| 0);
@@ -1785,8 +1853,13 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
         if session_host_alive(&socket_path).await {
             return run_tui_client(&session_id, socket_path).await;
         }
-        let host =
-            run_tui_host_session(session_id.clone(), allow_unsafe_shell, allow_network).await?;
+        let host = run_tui_host_session(
+            session_id.clone(),
+            allow_unsafe_shell,
+            allow_network,
+            Arc::clone(&daemon_control),
+        )
+        .await?;
         let outcome = run_tui_client(&session_id, socket_path).await;
         host.shutdown().await;
         outcome
@@ -2031,6 +2104,7 @@ async fn run_tui_host_session(
     session_id: String,
     allow_unsafe_shell: bool,
     allow_network: bool,
+    daemon_control: Arc<DaemonSessionControl>,
 ) -> Result<TuiHost> {
     let socket_path = tui_socket_path(&session_id);
 
@@ -2097,6 +2171,7 @@ async fn run_tui_host_session(
     let (worker_event_tx, mut worker_event_rx) = mpsc::unbounded_channel::<WorkerEvent>();
     let worker_pool = WorkerPool::with_defaults(DEFAULT_MAX_CONCURRENT)
         .map_err(|error| anyhow!(error.to_string()))?;
+    let processor_daemon_control = Arc::clone(&daemon_control);
     let processor = tokio::spawn(async move {
         // Session-scoped worker permission tier (§10.4.2); default is the
         // safest (ask-everything) and it resets on every TUI launch.
@@ -2229,6 +2304,7 @@ async fn run_tui_host_session(
                                 &mut tier,
                                 &mut memory,
                                 &processor_session_id,
+                                Some(&processor_daemon_control),
                             )
                             .await;
                         processor_turn_active.store(false, Ordering::Release);
@@ -3056,6 +3132,7 @@ Commands (type and press Enter):
   /permissions [<tier>] show or set worker access (ask-everything|workspace|full-access)
   /work <task>          run a task with a worker agent (asks before risky tools)
   /status               show session usage and provider status
+  /reload               exec the daemon in place and reconnect this session
   /auth                 show active provider auth status
   /eligible             show eligible Worker models of the active provider
   /doctor               native health check
@@ -3099,6 +3176,7 @@ async fn dispatch_tui_input_streaming(
         tier,
         &mut memory,
         "test",
+        None,
     )
     .await
 }
@@ -3110,6 +3188,7 @@ async fn dispatch_tui_input_streaming_with_memory(
     tier: &mut PermissionTier,
     memory: &mut MemoryStore,
     session_id: &str,
+    daemon_control: Option<&DaemonSessionControl>,
 ) -> Result<(bool, Option<ChatOutcome>)> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -3124,6 +3203,17 @@ async fn dispatch_tui_input_streaming_with_memory(
     let command = tokens.next().unwrap_or("").trim();
     let argument = tokens.next().map(str::trim).unwrap_or("");
     match command {
+        "reload" => {
+            let Some(daemon_control) = daemon_control else {
+                return Err(anyhow!("/reload is available only in a live TUI session"));
+            };
+            daemon_control.reload().await?;
+            transcript.push(
+                "system",
+                "daemon reload accepted; session will reconnect in the background",
+            );
+            Ok((true, None))
+        }
         "help" => {
             transcript.push("system", TUI_HELP);
             Ok((true, None))
@@ -6972,6 +7062,7 @@ mod tests {
                     panic!("expected entry");
                 };
                 assert!(text.contains("Commands"));
+                assert!(text.contains("/reload"));
                 let TranscriptInput::Entry { text, .. } = &transcript.entries[1] else {
                     panic!("expected entry");
                 };
