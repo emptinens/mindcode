@@ -16,6 +16,7 @@ clap = { version = "4.6", features = ["derive"] }
 futures-util = "0.3"
 libc = "0.2"
 mindcoded = { path = "../mindcoded" }
+mindcode-state = { path = "../mindcode-state" }
 mindcode-protocol = { path = "../mindcode-protocol" }
 mindcode-provider = { path = "../mindcode-provider" }
 mindcode-settings = { path = "../mindcode-settings" }

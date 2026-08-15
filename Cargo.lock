@@ -982,6 +982,7 @@ dependencies = [
  "mindcode-protocol",
  "mindcode-provider",
  "mindcode-settings",
+ "mindcode-state",
  "mindcode-transport",
  "mindcode-tui",
  "mindcode-tui-server",
