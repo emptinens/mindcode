@@ -46,10 +46,12 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// in storage).
 pub const BUILTIN_VEXZY_PROVIDER_ID: &str = "vexzy";
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeSettings {
     pub global_worker_model: Option<String>,
     pub worker_effort_lock: Option<WorkerEffort>,
+    /// Maximum model/tool iterations for one Worker run (§5.1.2).
+    pub worker_max_iterations: usize,
     /// Conversation-memory budget override in estimated tokens (§11.3).  When
     /// `None` the caller falls back to the 200K base.  Secret-free.
     pub context_token_budget: Option<usize>,
@@ -72,6 +74,22 @@ pub struct NativeSettings {
     pub unknown: BTreeMap<String, Value>,
 }
 
+impl Default for NativeSettings {
+    fn default() -> Self {
+        Self {
+            global_worker_model: None,
+            worker_effort_lock: None,
+            worker_max_iterations: 52,
+            context_token_budget: None,
+            color_overrides: None,
+            system_prompt: SystemPromptOverrides::default(),
+            providers: Vec::new(),
+            active_provider: None,
+            unknown: BTreeMap::new(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum SettingsError {
     HomeUnavailable,
@@ -80,6 +98,7 @@ pub enum SettingsError {
     RootMustBeObject,
     InvalidWorkerModel,
     InvalidWorkerEffortLock,
+    InvalidWorkerMaxIterations,
     InvalidContextBudget,
     InvalidColorOverrides,
     InvalidSystemPrompt,
@@ -103,6 +122,9 @@ impl fmt::Display for SettingsError {
             Self::InvalidWorkerEffortLock => f.write_str(
                 "worker_effort_lock must be null or one of none, low, medium, high, xhigh, max",
             ),
+            Self::InvalidWorkerMaxIterations => {
+                f.write_str("worker_max_iterations must be an integer in 1..=200")
+            }
             Self::InvalidContextBudget => {
                 f.write_str("context_token_budget must be a positive integer or null")
             }
@@ -231,6 +253,16 @@ pub fn settings_from_value(value: Value) -> Result<NativeSettings, SettingsError
         Some(_) => return Err(SettingsError::InvalidWorkerEffortLock),
     };
 
+    let worker_max_iterations = match object.get("worker_max_iterations") {
+        None | Some(Value::Null) => 52,
+        Some(Value::Number(value)) => value
+            .as_u64()
+            .filter(|value| (1..=200).contains(value))
+            .map(|value| value as usize)
+            .ok_or(SettingsError::InvalidWorkerMaxIterations)?,
+        Some(_) => return Err(SettingsError::InvalidWorkerMaxIterations),
+    };
+
     let context_token_budget = match object.get("context_token_budget") {
         None | Some(Value::Null) => None,
         Some(Value::Number(value)) => Some(
@@ -310,6 +342,7 @@ pub fn settings_from_value(value: Value) -> Result<NativeSettings, SettingsError
     Ok(NativeSettings {
         global_worker_model,
         worker_effort_lock,
+        worker_max_iterations,
         context_token_budget,
         color_overrides,
         system_prompt,
@@ -338,6 +371,10 @@ pub fn settings_to_value(settings: &NativeSettings) -> Result<Value, SettingsErr
             .worker_effort_lock
             .map(|effort| Value::String(effort.to_string()))
             .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "worker_max_iterations".to_owned(),
+        Value::from(settings.worker_max_iterations),
     );
     object.insert(
         "context_token_budget".to_owned(),
@@ -557,6 +594,7 @@ fn is_known_settings_key(key: &str) -> bool {
         key,
         "global_worker_model"
             | "worker_effort_lock"
+            | "worker_max_iterations"
             | "context_token_budget"
             | "color_overrides"
             | "system_prompt"
@@ -768,6 +806,21 @@ mod tests {
             parse_settings(r#"{"context_token_budget":"big"}"#),
             Err(SettingsError::InvalidContextBudget)
         ));
+    }
+
+    #[test]
+    fn worker_max_iterations_defaults_and_validates_bounds() {
+        assert_eq!(parse_settings("{}").unwrap().worker_max_iterations, 52);
+        let settings = parse_settings(r#"{"worker_max_iterations":120}"#).unwrap();
+        assert_eq!(settings.worker_max_iterations, 120);
+        let reparsed = settings_from_value(settings_to_value(&settings).unwrap()).unwrap();
+        assert_eq!(reparsed.worker_max_iterations, 120);
+        for value in ["0", "201", "-1", "\"many\""] {
+            assert!(matches!(
+                parse_settings(&format!(r#"{{"worker_max_iterations":{value}}}"#)),
+                Err(SettingsError::InvalidWorkerMaxIterations)
+            ));
+        }
     }
 
     #[test]

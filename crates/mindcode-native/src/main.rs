@@ -2685,7 +2685,8 @@ fn settings_summary_text(settings: &NativeSettings) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "active provider: {active}\nworker model: {model}\nworker effort lock: {effort}\nproviders:\n{providers}"
+        "active provider: {active}\nworker model: {model}\nworker effort lock: {effort}\nworker max iterations: {}\nproviders:\n{providers}",
+        settings.worker_max_iterations
     )
 }
 
@@ -3643,6 +3644,7 @@ async fn spawn_worker(
             guard,
         )
         .with_hooks(hooks)
+        .with_max_iterations(settings.worker_max_iterations)
         .with_unsafe_shell(allow_unsafe_shell)
         .with_allow_network(allow_network),
     );
@@ -3855,6 +3857,7 @@ fn settings_show_value(settings: &NativeSettings, active: Option<&ProviderId>) -
         "active_provider": active.map(ProviderId::to_string),
         "global_worker_model": settings.global_worker_model,
         "worker_effort_lock": settings.worker_effort_lock.map(|effort| effort.to_string()),
+        "worker_max_iterations": settings.worker_max_iterations,
         "providers": providers_list_value(settings, active),
     })
 }

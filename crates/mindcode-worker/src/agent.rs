@@ -88,7 +88,7 @@ pub trait ModelClient: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = WorkerResult<ModelTurn>> + Send>>;
 }
 
-pub const DEFAULT_MAX_ITERATIONS: usize = 32;
+pub const DEFAULT_MAX_ITERATIONS: usize = 52;
 
 const DEFAULT_WORKER_SYSTEM_PROMPT: &str = "\
 You are a MindCode worker agent. Complete the task by calling the available \
