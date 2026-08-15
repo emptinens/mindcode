@@ -151,7 +151,7 @@ fn shell_words(command: &str) -> Vec<&str> {
 }
 
 fn path_components(word: &str) -> impl Iterator<Item = &str> {
-    word.split(|character| matches!(character, '/' | '=' | ':' | ',' | ';' | '&' | '|'))
+    word.split(['/', '=', ':', ',', ';', '&', '|'])
         .filter(|component| !component.is_empty())
 }
 
@@ -167,7 +167,7 @@ fn protected_path_in(command: &str) -> bool {
 }
 
 fn has_word(words: &[&str], expected: &str) -> bool {
-    words.iter().any(|word| *word == expected)
+    words.contains(&expected)
 }
 
 fn has_command(words: &[&str], expected: &str) -> bool {
@@ -191,8 +191,7 @@ fn catastrophic_in(command: &str) -> bool {
     if has_command(&words, "dd") && words.iter().any(|word| word.starts_with("of=/dev/")) {
         return true;
     }
-    if words.iter().any(|word| *word == ">") && words.iter().any(|word| word.starts_with("/dev/sd"))
-    {
+    if words.contains(&">") && words.iter().any(|word| word.starts_with("/dev/sd")) {
         return true;
     }
 
