@@ -564,7 +564,7 @@ fn transcript_card(
             capitalize(&block.role),
             block.role.clone(),
             None,
-            preview_lines(&block.text, 8, 180),
+            markdown_preview_lines(&block.text, 8, 180),
         ),
         UiTranscriptBlock::Code(block) => (
             format!("Code · {}", block.language),
@@ -658,10 +658,13 @@ fn transcript_card(
         if streaming && index + 1 == body_len {
             line_text.push('▍');
         }
-        lines.push(Line::from(vec![
-            Span::styled("│ ", theme.style(border)),
-            Span::styled(line_text, body_style),
-        ]));
+        let mut row = vec![Span::styled("│ ", theme.style(border))];
+        if matches!(entry, UiTranscriptBlock::Markdown(_)) {
+            row.extend(markdown_line_spans(&line_text, body_style, theme));
+        } else {
+            row.push(Span::styled(line_text, body_style));
+        }
+        lines.push(Line::from(row));
     }
     lines.push(Line::from(Span::styled("╰─", theme.style(border))));
 }
@@ -1728,6 +1731,139 @@ fn preview_lines(value: &str, max_lines: usize, max_chars: usize) -> Vec<String>
         .collect()
 }
 
+/// Bounded markdown projection for transcript cards. Mermaid fences are
+/// converted to the dependency-free text diagram renderer; ordinary fences
+/// remain visible and are styled as code by `markdown_line_spans`.
+fn markdown_preview_lines(value: &str, max_lines: usize, max_chars: usize) -> Vec<String> {
+    let mut output = Vec::new();
+    let mut mermaid_source: Option<String> = None;
+    for raw in value.lines() {
+        if let Some(source) = mermaid_source.as_mut() {
+            if raw.trim() == "```" {
+                let source = std::mem::take(source);
+                mermaid_source = None;
+                match crate::mermaid::render_mermaid(&source) {
+                    Ok(rendered) => {
+                        for line in rendered.lines() {
+                            if output.len() >= max_lines {
+                                break;
+                            }
+                            output.push(truncate(line, max_chars));
+                        }
+                    }
+                    Err(error) => output.push(truncate(&format!("[mermaid: {error}]"), max_chars)),
+                }
+            } else if source.len() < 64 * 1024 {
+                source.push_str(raw);
+                source.push('\n');
+            }
+            if output.len() >= max_lines {
+                break;
+            }
+            continue;
+        }
+        let trimmed = raw.trim();
+        if trimmed.to_ascii_lowercase().starts_with("```mermaid") {
+            mermaid_source = Some(String::new());
+            continue;
+        }
+        output.push(truncate(raw, max_chars));
+        if output.len() >= max_lines {
+            break;
+        }
+    }
+    if output.is_empty() && mermaid_source.is_some() {
+        output.push("```mermaid (unfinished)".to_owned());
+    }
+    output
+}
+
+/// Render a small inline-markdown subset into styled spans without allowing
+/// control sequences or unbounded allocations from model text.
+fn markdown_line_spans(text: &str, base: Style, theme: Theme) -> Vec<Span<'static>> {
+    let trimmed = text.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("> ") {
+        let mut spans = vec![Span::styled(
+            "│ ".to_owned(),
+            theme.style(ColorToken::Muted),
+        )];
+        spans.extend(inline_markdown_spans(
+            rest,
+            base.add_modifier(Modifier::ITALIC),
+            theme,
+        ));
+        return spans;
+    }
+    if let Some(rest) = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+    {
+        let mut spans = vec![Span::styled(
+            "• ".to_owned(),
+            theme.style(ColorToken::Accent),
+        )];
+        spans.extend(inline_markdown_spans(rest, base, theme));
+        return spans;
+    }
+    if trimmed.starts_with('#') {
+        let heading = trimmed.trim_start_matches('#').trim_start();
+        if !heading.is_empty() {
+            return vec![Span::styled(
+                heading.to_owned(),
+                base.add_modifier(Modifier::BOLD)
+                    .fg(theme.color(ColorToken::Accent)),
+            )];
+        }
+    }
+    if trimmed.starts_with("```") {
+        return vec![Span::styled(
+            text.to_owned(),
+            base.fg(theme.color(ColorToken::AccentSoft)),
+        )];
+    }
+    inline_markdown_spans(text, base, theme)
+}
+
+fn inline_markdown_spans(text: &str, base: Style, theme: Theme) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let Some((index, marker)) = next_inline_marker(rest) else {
+            spans.push(Span::styled(rest.to_owned(), base));
+            break;
+        };
+        if index > 0 {
+            spans.push(Span::styled(rest[..index].to_owned(), base));
+        }
+        let after = &rest[index + marker.len()..];
+        let closing = after.find(marker);
+        let Some(closing) = closing else {
+            spans.push(Span::styled(marker.to_owned(), base));
+            rest = after;
+            continue;
+        };
+        let inner = &after[..closing];
+        let style = match marker {
+            "`" => base
+                .fg(theme.color(ColorToken::AccentSoft))
+                .add_modifier(Modifier::UNDERLINED),
+            "**" | "__" => base.add_modifier(Modifier::BOLD),
+            "*" | "_" => base.add_modifier(Modifier::ITALIC),
+            _ => base,
+        };
+        spans.push(Span::styled(inner.to_owned(), style));
+        rest = &after[closing + marker.len()..];
+    }
+    spans
+}
+
+fn next_inline_marker(text: &str) -> Option<(usize, &'static str)> {
+    ["**", "__", "`", "*", "_"]
+        .iter()
+        .filter_map(|marker| text.find(marker).map(|index| (index, *marker)))
+        .min_by_key(|(index, _)| *index)
+}
+
 fn single_line(value: &str, max_chars: usize) -> String {
     if !value.contains(['\r', '\n']) {
         return truncate(value, max_chars);
@@ -1792,6 +1928,30 @@ mod tests {
     fn truncation_is_unicode_safe() {
         assert_eq!(truncate("abcdef", 4), "abc…");
         assert_eq!(truncate("❀❀❀❀", 3), "❀❀…");
+    }
+
+    #[test]
+    fn markdown_preview_renders_mermaid_fences_as_text() {
+        let lines = markdown_preview_lines(
+            "# Plan\n```mermaid\nflowchart LR\nA[Start] --> B[Done]\n```",
+            8,
+            180,
+        );
+        assert!(lines.iter().any(|line| line.contains("flowchart LR")));
+        assert!(lines.iter().any(|line| line.contains("A: \"Start\"")));
+        assert!(!lines.iter().any(|line| line == "```mermaid"));
+    }
+
+    #[test]
+    fn markdown_inline_styles_are_bounded_and_semantic() {
+        let theme = Theme::default();
+        let spans =
+            markdown_line_spans("**bold** and `code`", theme.style(ColorToken::Text), theme);
+        assert!(spans.iter().any(|span| span.content == "bold"));
+        assert!(spans.iter().any(|span| span.content == "code"));
+        assert!(spans
+            .iter()
+            .any(|span| span.style.add_modifier(Modifier::BOLD) == span.style));
     }
 
     #[test]
