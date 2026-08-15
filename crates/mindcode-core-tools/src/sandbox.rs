@@ -9,9 +9,10 @@
 //! and callers fall back to an explicit allow-list flag when bwrap is absent.
 
 use crate::{
-    process_run, CoreToolError, CoreToolErrorCode, CoreToolResult, ProcessRunRequest,
-    ProcessRunResult, ResourceLimits,
+    open_seccomp_bpf_fd, process_run, CoreToolError, CoreToolErrorCode, CoreToolResult,
+    ProcessRunRequest, ProcessRunResult, ResourceLimits,
 };
+use std::os::fd::RawFd;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
@@ -44,6 +45,10 @@ pub struct SandboxConfig {
     pub network: NetworkPolicy,
     /// Resource bounds applied to the sandboxed process.
     pub rlimits: ResourceLimits,
+    /// Whether to install the seccomp (cBPF) syscall denylist (§13.1). On by
+    /// default; the denylist refuses escape/host-global-state syscalls while
+    /// leaving the normal build surface open.
+    pub seccomp: bool,
 }
 
 /// Network exposure for a sandboxed command.
@@ -64,6 +69,7 @@ impl SandboxConfig {
             config_home,
             network: NetworkPolicy::Deny,
             rlimits: default_rlimits(),
+            seccomp: true,
         }
     }
 
@@ -76,6 +82,12 @@ impl SandboxConfig {
     /// Override the sandbox resource bounds (defaults are already applied).
     pub fn with_rlimits(mut self, rlimits: ResourceLimits) -> Self {
         self.rlimits = rlimits;
+        self
+    }
+
+    /// Disable the seccomp denylist (e.g. for compatibility debugging).
+    pub fn with_seccomp(mut self, enabled: bool) -> Self {
+        self.seccomp = enabled;
         self
     }
 }
@@ -180,6 +192,17 @@ pub async fn run_sandboxed(
     })?;
     let mut argv = build_bwrap_argv(config, command);
     argv[0] = bwrap.to_string_lossy().into_owned();
+    // The seccomp program must be built before spawn and its fd kept open
+    // until the child execs bwrap (which reads it via `--seccomp <fd>`).
+    let seccomp_fd = if config.seccomp {
+        Some(open_seccomp_bpf_fd()?)
+    } else {
+        None
+    };
+    let seccomp_raw = seccomp_fd.as_ref().map(std::os::fd::AsRawFd::as_raw_fd);
+    if let Some(fd) = seccomp_raw {
+        insert_seccomp(&mut argv, fd)?;
+    }
     let request = ProcessRunRequest {
         argv,
         cwd: config.workspace.clone(),
@@ -188,8 +211,26 @@ pub async fn run_sandboxed(
         timeout_ms: SANDBOX_TIMEOUT_MS,
         max_output_bytes: 1024 * 1024,
         rlimits: Some(config.rlimits),
+        seccomp_fd: seccomp_raw,
     };
     process_run(request, cancel.clone()).await
+}
+
+/// Insert `--seccomp <fd>` immediately before the `--` separator so the option
+/// stays on the bwrap side of the command line. Returns an error if the
+/// separator is missing (which would mean a malformed argv layout).
+fn insert_seccomp(argv: &mut Vec<String>, fd: RawFd) -> CoreToolResult<()> {
+    let separator = argv.iter().position(|arg| arg == "--").ok_or_else(|| {
+        CoreToolError::new(
+            CoreToolErrorCode::InvalidArgv,
+            "bwrap argv is missing the command separator",
+        )
+    })?;
+    argv.splice(
+        separator..separator,
+        ["--seccomp".to_owned(), fd.to_string()],
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -218,6 +259,20 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--tmpfs", "/home/user/.config/mindcode"]));
         // The original command is preserved verbatim at the tail.
+        assert_eq!(argv[argv.len() - 3..], ["sh", "-c", "true"]);
+    }
+
+    #[test]
+    fn insert_seccomp_places_the_flag_before_the_command_separator() {
+        let mut argv = build_bwrap_argv(
+            &config(),
+            &["sh".to_owned(), "-c".to_owned(), "true".to_owned()],
+        );
+        insert_seccomp(&mut argv, 42).unwrap();
+        let separator = argv.iter().position(|arg| arg == "--").unwrap();
+        assert_eq!(argv[separator - 2], "--seccomp");
+        assert_eq!(argv[separator - 1], "42");
+        // The command tail is untouched.
         assert_eq!(argv[argv.len() - 3..], ["sh", "-c", "true"]);
     }
 
@@ -294,5 +349,118 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&workspace);
         let _ = std::fs::remove_dir_all(&config_home);
+    }
+
+    #[tokio::test]
+    async fn seccomp_filter_is_loaded_by_default_and_absent_when_disabled() {
+        if !bwrap_available() {
+            return;
+        }
+        let workspace = temp_dir("mindcode-seccomp-ws");
+        let config_home = temp_dir("mindcode-seccomp-cfg");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&config_home).unwrap();
+        let cancel = CancellationToken::new();
+        let probe = [
+            "sh".to_owned(),
+            "-c".to_owned(),
+            "awk '/^Seccomp:/ {print $2}' /proc/self/status".to_owned(),
+        ];
+
+        // Default: the denylist is installed, so the kernel reports
+        // SECCOMP_MODE_FILTER (2).
+        let on = run_sandboxed(
+            &SandboxConfig::new(workspace.clone(), config_home.clone()),
+            &probe,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert_eq!(on.stdout.trim(), "2", "seccomp should be active by default");
+
+        // Explicitly disabled: no filter, kernel reports 0.
+        let off = run_sandboxed(
+            &SandboxConfig::new(workspace.clone(), config_home.clone()).with_seccomp(false),
+            &probe,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            off.stdout.trim(),
+            "0",
+            "seccomp should be absent when disabled"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
+        let _ = std::fs::remove_dir_all(&config_home);
+    }
+
+    #[tokio::test]
+    async fn seccomp_denies_ptrace_that_the_off_config_allows() {
+        if !bwrap_available() || !python3_available() {
+            return;
+        }
+        let workspace = temp_dir("mindcode-seccomp-ptrace-ws");
+        let config_home = temp_dir("mindcode-seccomp-ptrace-cfg");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&config_home).unwrap();
+        let cancel = CancellationToken::new();
+        // PTRACE_TRACEME needs no capability; the denylist is the only thing
+        // that can refuse it inside bwrap (which already drops all caps).
+        let probe = [
+            "python3".to_owned(),
+            "-c".to_owned(),
+            "import ctypes; r=ctypes.CDLL('libc.so.6').ptrace(0,0,0,0); print('OK' if r==0 else 'EPERM')".to_owned(),
+        ];
+
+        let denied = run_sandboxed(
+            &SandboxConfig::new(workspace.clone(), config_home.clone()),
+            &probe,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            denied.stdout.trim(),
+            "EPERM",
+            "ptrace must be denied by seccomp"
+        );
+
+        let allowed = run_sandboxed(
+            &SandboxConfig::new(workspace.clone(), config_home.clone()).with_seccomp(false),
+            &probe,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            allowed.stdout.trim(),
+            "OK",
+            "ptrace succeeds without the denylist"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
+        let _ = std::fs::remove_dir_all(&config_home);
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ))
+    }
+
+    fn python3_available() -> bool {
+        std::process::Command::new("python3")
+            .arg("-c")
+            .arg("pass")
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 }

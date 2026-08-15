@@ -7,6 +7,7 @@ mod plugin;
 mod process;
 mod redact;
 mod sandbox;
+mod seccomp;
 
 pub use error::{CoreToolError, CoreToolErrorCode, CoreToolResult};
 pub use git::{
@@ -21,3 +22,4 @@ pub use plugin::{
 pub use process::{process_run, ProcessRunRequest, ProcessRunResult, ResourceLimits};
 pub use redact::redact_secrets;
 pub use sandbox::{build_bwrap_argv, bwrap_available, run_sandboxed, NetworkPolicy, SandboxConfig};
+pub use seccomp::{build_seccomp_program, open_seccomp_bpf_fd, program_bytes, PROGRAM_LEN};

@@ -1,6 +1,7 @@
 use crate::{CoreToolError, CoreToolErrorCode, CoreToolResult};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -43,6 +44,11 @@ pub struct ProcessRunRequest {
     /// Optional resource limits applied to the child before exec (§13.1).
     #[serde(default)]
     pub rlimits: Option<ResourceLimits>,
+    /// Raw fd of a compiled seccomp (cBPF) program to inherit into the child
+    /// (§13.1). `#[serde(skip)]` because fds are process-local and cannot cross
+    /// a serialization boundary; a deserialized request always has `None`.
+    #[serde(skip, default)]
+    pub seccomp_fd: Option<RawFd>,
 }
 
 /// Resource limits applied to a spawned process (soft and hard equal).  Used
@@ -215,7 +221,7 @@ pub async fn process_run(
         .stderr(std::process::Stdio::piped());
     add_safe_environment(&mut command, &request.env);
     configure_process_group(&mut command);
-    configure_resource_limits(&mut command, request.rlimits);
+    configure_child(&mut command, request.rlimits, request.seccomp_fd);
     let mut child = command.spawn().map_err(|_| {
         CoreToolError::new(
             CoreToolErrorCode::ProcessSpawn,
@@ -467,25 +473,45 @@ fn configure_process_group(command: &mut Command) {
     let _ = command;
 }
 
-/// Apply resource limits in the child between fork and exec.  `setrlimit` is
-/// async-signal-safe, so this is safe inside `pre_exec`; failures are
-/// best-effort (the process still runs, just without the bound).
-fn configure_resource_limits(command: &mut Command, limits: Option<ResourceLimits>) {
+/// Apply child-process preparation between fork and exec: resource limits
+/// (§13.1) and, when present, the seccomp program fd.  `setrlimit` and `fcntl`
+/// are async-signal-safe, so this is safe inside `pre_exec`; failures are
+/// best-effort (the process still runs, just without the bound).  Both effects
+/// are applied in a single `pre_exec` closure because `Command::pre_exec`
+/// replaces any previously registered closure.
+fn configure_child(
+    command: &mut Command,
+    limits: Option<ResourceLimits>,
+    seccomp_fd: Option<RawFd>,
+) {
     #[cfg(unix)]
     {
-        let Some(limits) = limits else { return };
-        // SAFETY: the closure only calls `setrlimit` (async-signal-safe) and
-        // returns `Ok`, so it cannot corrupt the forked child's state.
+        if limits.is_none() && seccomp_fd.is_none() {
+            return;
+        }
+        // SAFETY: the closure only calls `setrlimit` and `fcntl`
+        // (async-signal-safe) and returns `Ok`, so it cannot corrupt the
+        // forked child's state.
         unsafe {
             command.pre_exec(move || {
-                if let Some(value) = limits.nofile {
-                    set_rlimit(libc::RLIMIT_NOFILE, value);
+                if let Some(limits) = limits {
+                    if let Some(value) = limits.nofile {
+                        set_rlimit(libc::RLIMIT_NOFILE, value);
+                    }
+                    if let Some(value) = limits.fsize {
+                        set_rlimit(libc::RLIMIT_FSIZE, value);
+                    }
+                    if let Some(value) = limits.nproc {
+                        set_rlimit(libc::RLIMIT_NPROC, value);
+                    }
                 }
-                if let Some(value) = limits.fsize {
-                    set_rlimit(libc::RLIMIT_FSIZE, value);
-                }
-                if let Some(value) = limits.nproc {
-                    set_rlimit(libc::RLIMIT_NPROC, value);
+                if let Some(fd) = seccomp_fd {
+                    // Clear CLOEXEC so the fd survives the exec into the child
+                    // (bwrap reads it via `--seccomp <fd>`).
+                    let flags = libc::fcntl(fd, libc::F_GETFD);
+                    if flags >= 0 {
+                        let _ = libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                    }
                 }
                 Ok(())
             });
@@ -493,7 +519,7 @@ fn configure_resource_limits(command: &mut Command, limits: Option<ResourceLimit
     }
     #[cfg(not(unix))]
     {
-        let _ = (command, limits);
+        let _ = (command, limits, seccomp_fd);
     }
 }
 
@@ -639,6 +665,7 @@ mod tests {
                 fsize: Some(2048),
                 nproc: None,
             }),
+            seccomp_fd: None,
         };
         let result = process_run(request, CancellationToken::new())
             .await

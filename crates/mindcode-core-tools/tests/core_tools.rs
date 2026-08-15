@@ -19,6 +19,7 @@ fn request(argv: Vec<String>, cwd: &Path) -> ProcessRunRequest {
         timeout_ms: 2_000,
         max_output_bytes: 64 * 1024,
         rlimits: None,
+        seccomp_fd: None,
     }
 }
 
