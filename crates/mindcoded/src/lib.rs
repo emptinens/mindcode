@@ -34,7 +34,7 @@ use std::{
     collections::{HashMap, VecDeque},
     env,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{atomic::AtomicBool, Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::{
@@ -51,6 +51,8 @@ use std::os::unix::fs::FileTypeExt;
 
 const DEFAULT_IDLE_SECONDS: u64 = 30 * 60;
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const INHERITED_LISTENER_FD_ENV: &str = "MINDCODE_DAEMON_LISTENER_FD";
+const INHERITED_LOCK_FD_ENV: &str = "MINDCODE_DAEMON_LOCK_FD";
 const IDLE_POLL: Duration = Duration::from_millis(250);
 const MAX_SLEEP_MS: u64 = 60_000;
 const DEFAULT_TASK_GRAPH_WATCH_POLL_MS: u64 = 50;
@@ -70,6 +72,7 @@ const SERVER_CAPABILITIES: &[&str] = &[
     "ping",
     "status",
     "shutdown",
+    "reload",
     "task_graph",
     "task_graph.route",
     "task_graph.route_update",
@@ -186,6 +189,7 @@ struct DaemonState {
     catalog_cache: Arc<CatalogCache>,
     request_ledger: Arc<Mutex<RequestLedger>>,
     metrics: Arc<Metrics>,
+    reload_requested: AtomicBool,
     shutdown: CancellationToken,
     activity: Notify,
     connection_slots: Arc<Semaphore>,
@@ -243,6 +247,7 @@ impl Daemon {
                 mcp_stdio: Arc::new(McpStdioSupervisor::new()),
                 catalog_cache: Arc::new(CatalogCache::new()),
                 request_ledger: Arc::new(Mutex::new(RequestLedger::default())),
+                reload_requested: AtomicBool::new(false),
                 config,
                 metrics: Arc::new(Metrics::default()),
                 shutdown: CancellationToken::new(),
@@ -276,9 +281,18 @@ impl Daemon {
         let runtime_identity = secure_runtime_directory(parent)?;
 
         let lock_path = parent.join("mindcoded-v1.lock");
-        let _instance_lock =
-            InstanceLock::acquire(&lock_path, socket_path, &self.state.config.build_id)
-                .with_context(|| format!("acquire daemon instance lock {}", lock_path.display()))?;
+        let inherited_lock_fd = inherited_fd(INHERITED_LOCK_FD_ENV)?;
+        let instance_lock = match inherited_lock_fd {
+            Some(fd) => InstanceLock::from_inherited_fd(
+                &lock_path,
+                socket_path,
+                &self.state.config.build_id,
+                fd,
+            )
+            .with_context(|| format!("adopt daemon instance lock {}", lock_path.display()))?,
+            None => InstanceLock::acquire(&lock_path, socket_path, &self.state.config.build_id)
+                .with_context(|| format!("acquire daemon instance lock {}", lock_path.display()))?,
+        };
 
         let task_graph = Arc::clone(&self.state.task_graph);
         tokio::task::spawn_blocking(move || task_graph.initialize())
@@ -296,9 +310,14 @@ impl Daemon {
             .context("join session index initialization")??;
 
         ensure_runtime_directory_unchanged(parent, runtime_identity)?;
-        remove_stale_socket(socket_path)?;
-        let listener = bind_restricted_socket(socket_path)
-            .with_context(|| format!("bind daemon socket {}", socket_path.display()))?;
+        let inherited_listener_fd = inherited_fd(INHERITED_LISTENER_FD_ENV)?;
+        let listener = if let Some(fd) = inherited_listener_fd {
+            adopt_listener_fd(fd)?
+        } else {
+            remove_stale_socket(socket_path)?;
+            bind_restricted_socket(socket_path)
+                .with_context(|| format!("bind daemon socket {}", socket_path.display()))?
+        };
         set_socket_mode(socket_path)?;
         let socket_identity = socket_identity(socket_path)?;
         ensure_runtime_directory_unchanged(parent, runtime_identity)?;
@@ -372,6 +391,20 @@ impl Daemon {
                 "mindcoded MCP stdio shutdown failed: {}",
                 error.stable_code()
             );
+        }
+        if self
+            .state
+            .reload_requested
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            if let Err(error) = exec_reloaded_daemon(&listener, &instance_lock) {
+                eprintln!("mindcoded reload failed: {error:#}");
+                self.state
+                    .reload_requested
+                    .store(false, std::sync::atomic::Ordering::Release);
+            } else {
+                unreachable!("successful daemon exec does not return");
+            }
         }
         drop(listener);
         if runtime_directory_unchanged(parent, runtime_identity) {
@@ -865,6 +898,7 @@ async fn run_request(
         execute_request(&method, params, &state, cancellation).await?
     };
     let should_shutdown = result.shutdown;
+    let should_reload = method == "reload" && result.ok;
     let replayable = is_mutation_method(&method);
     let mut lease = lease;
     if replayable {
@@ -885,7 +919,12 @@ async fn run_request(
         lease.finish(false, &result);
     }
     state.touch();
-    if should_shutdown {
+    if should_reload {
+        state
+            .reload_requested
+            .store(true, std::sync::atomic::Ordering::Release);
+        state.shutdown.cancel();
+    } else if should_shutdown {
         state.shutdown.cancel();
     }
     write_result
@@ -1446,6 +1485,10 @@ async fn execute_request(
             }
         }
         "shutdown" => Ok(RequestResult::shutdown(json!({ "accepted": true }))),
+        "reload" => Ok(RequestResult::ok(json!({
+            "accepted": true,
+            "reloading": true,
+        }))),
         "process.run" => {
             let request = match parse_params::<ProcessRunRequest>(params) {
                 Ok(value) => value,
@@ -2008,6 +2051,7 @@ fn is_mutation_method(method: &str) -> bool {
     matches!(
         method,
         "process.run"
+            | "reload"
             | "session.open"
             | "session.touch"
             | "session.close"
@@ -2078,6 +2122,73 @@ async fn write_error(writer: &SharedWriter, id: String, code: &str, message: &st
         },
     )
     .await
+}
+
+fn inherited_fd(name: &str) -> Result<Option<i32>> {
+    match env::var(name) {
+        Ok(value) => {
+            let fd = value
+                .parse::<i32>()
+                .with_context(|| format!("invalid inherited daemon fd in {name}"))?;
+            if fd <= 2 {
+                bail!("inherited daemon fd in {name} must be greater than 2");
+            }
+            Ok(Some(fd))
+        }
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read inherited daemon fd {name}")),
+    }
+}
+
+#[cfg(unix)]
+fn adopt_listener_fd(fd: i32) -> Result<UnixListener> {
+    use std::os::fd::FromRawFd;
+    if fd <= 2 {
+        bail!("inherited daemon listener fd is invalid");
+    }
+    // SAFETY: the reload parent transferred ownership of this descriptor
+    // through exec; the new Tokio listener adopts it exactly once.
+    let listener = unsafe { std::os::unix::net::UnixListener::from_raw_fd(fd) };
+    listener
+        .set_nonblocking(true)
+        .context("set inherited daemon listener nonblocking")?;
+    UnixListener::from_std(listener).context("adopt inherited daemon listener")
+}
+
+#[cfg(unix)]
+fn clear_cloexec(fd: i32) -> Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error()).context("inspect reload descriptor flags");
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error()).context("prepare reload descriptor");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn exec_reloaded_daemon(listener: &UnixListener, lock: &InstanceLock) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
+    let listener_fd = listener.as_raw_fd();
+    let lock_fd = lock.raw_fd();
+    clear_cloexec(listener_fd)?;
+    clear_cloexec(lock_fd)?;
+    let executable = env::current_exe().context("resolve daemon executable for reload")?;
+    let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    let error = std::process::Command::new(executable)
+        .args(arguments)
+        .env(INHERITED_LISTENER_FD_ENV, listener_fd.to_string())
+        .env(INHERITED_LOCK_FD_ENV, lock_fd.to_string())
+        .exec();
+    Err(error).context("exec daemon reload")
+}
+
+#[cfg(not(unix))]
+fn exec_reloaded_daemon(_listener: &UnixListener, _lock: &InstanceLock) -> Result<()> {
+    bail!("daemon reload is supported only on Unix");
 }
 
 #[cfg(unix)]
@@ -2341,6 +2452,21 @@ mod tests {
         drop(stream);
         task.await.unwrap().unwrap();
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn reload_request_is_explicitly_acknowledged_without_touching_state() {
+        let dir = tempdir().unwrap();
+        let daemon = Daemon::new(test_config(dir.path().join("mindcoded.sock")));
+        let result = execute_request("reload", None, &daemon.state, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert_eq!(result.result.unwrap()["reloading"], true);
+        assert!(!daemon
+            .state
+            .reload_requested
+            .load(std::sync::atomic::Ordering::Acquire));
     }
 
     #[tokio::test]

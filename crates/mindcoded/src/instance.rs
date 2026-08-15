@@ -1,12 +1,14 @@
 use anyhow::{Context, Result};
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 #[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -65,7 +67,6 @@ impl InstanceLock {
         file.set_len(0)?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let mut permissions = file.metadata()?.permissions();
             permissions.set_mode(0o600);
             file.set_permissions(permissions)?;
@@ -83,6 +84,39 @@ impl InstanceLock {
             #[cfg(unix)]
             identity,
         })
+    }
+
+    /// Adopt the already-locked file descriptor inherited during a daemon
+    /// exec handoff. Re-opening the path would contend with our own flock, so
+    /// the new image must keep the original open file description.
+    #[cfg(unix)]
+    pub fn from_inherited_fd(path: &Path, socket: &Path, build_id: &str, fd: i32) -> Result<Self> {
+        if fd <= 2 {
+            anyhow::bail!("inherited daemon lock fd is invalid");
+        }
+        // SAFETY: the reload parent transferred ownership of this descriptor
+        // through exec; this process adopts it exactly once.
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        file.seek(SeekFrom::Start(0))?;
+        file.set_len(0)?;
+        let mut permissions = file.metadata()?.permissions();
+        permissions.set_mode(0o600);
+        file.set_permissions(permissions)?;
+        writeln!(file, "pid={}", std::process::id())?;
+        writeln!(file, "socket={}", socket.display())?;
+        writeln!(file, "build_id={build_id}")?;
+        file.flush()?;
+        let identity = FileIdentity::from_metadata(&file.metadata()?);
+        Ok(Self {
+            file,
+            path: path.to_owned(),
+            identity,
+        })
+    }
+
+    #[cfg(unix)]
+    pub fn raw_fd(&self) -> i32 {
+        self.file.as_raw_fd()
     }
 }
 
