@@ -75,6 +75,9 @@ pub struct ModelTurn {
     pub tool_calls: Vec<ResolvedToolCall>,
     pub usage: ChatUsage,
     pub cost: f64,
+    /// False when the provider omitted usage; cost must then be shown as
+    /// unknown rather than fabricated as `$0.00`.
+    pub cost_known: bool,
 }
 
 /// The protocol-agnostic model client the loop drives. Implemented over the
@@ -351,6 +354,8 @@ impl WorkerAgent {
             },
         ];
         let mut approval_cache = ApprovalCache::with_ttl(self.approval_cache_ttl);
+        let mut saw_turn = false;
+        let mut cost_known = true;
         let mut todo_gate_retried = false;
         let mut finished = false;
 
@@ -371,10 +376,16 @@ impl WorkerAgent {
                     break;
                 }
             };
+            saw_turn = true;
+            cost_known &= turn.cost_known;
             report.usage.input_tokens += turn.usage.input_tokens;
             report.usage.output_tokens += turn.usage.output_tokens;
             report.usage.cached_tokens += turn.usage.cached_read_tokens;
-            report.usage.cost += turn.cost;
+            if turn.cost_known {
+                report.usage.cost += turn.cost;
+            } else {
+                report.usage.cost_known = false;
+            }
 
             if turn.tool_calls.is_empty() {
                 if let Some(prompt) = self.todo_quality_gate_prompt() {
@@ -450,6 +461,7 @@ impl WorkerAgent {
                 .risks
                 .push("iteration limit reached without a final answer".to_owned());
         }
+        report.usage.cost_known = saw_turn && cost_known;
         report.elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         report
     }

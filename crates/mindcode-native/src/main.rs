@@ -1196,7 +1196,11 @@ fn status_line(stats: &SessionStats) -> String {
             "session: {} in · {} out tokens",
             stats.input_tokens, stats.output_tokens
         ),
-        format!("cost: ${:.4} (saved ${:.4})", stats.cost, stats.savings),
+        if stats.cost_is_known() {
+            format!("cost: ${:.4} (saved ${:.4})", stats.cost, stats.savings)
+        } else {
+            "cost: unknown (provider did not report usage)".to_owned()
+        },
         format!("context budget: {budget} tokens (base 200000)"),
     ];
     match provider {
@@ -1869,6 +1873,7 @@ async fn run_tui_host_session(
                         match outcome {
                             Ok((true, Some(turn))) => {
                                 processor_stats.lock().unwrap().record(&turn);
+                                transcript.record_chat_attempt(&turn);
                                 let current = *processor_stats.lock().unwrap();
                                 let permissions = pending_permission_inputs(&pending);
                                 let _ = processor_server
@@ -1915,6 +1920,7 @@ async fn run_tui_host_session(
                         // §13.2: worker reports use a dedicated role so they
                         // persist across host restarts and reattach as their
                         // own (secret-free) transcript entries.
+                        transcript.record_worker_attempt(&report);
                         transcript.push("worker", worker_report_text(&report));
                         let current = *processor_stats.lock().unwrap();
                         let _ = save_session(&processor_session_id, &transcript, current);
@@ -1933,14 +1939,68 @@ async fn run_tui_host_session(
     Ok(TuiHost { server, processor })
 }
 
+/// One append-only, secret-free accounting record for a settled chat or
+/// worker attempt (§5.3.2). `cost: null` is intentional when usage was absent.
+#[derive(Clone, Debug)]
+struct LedgerAttempt {
+    id: u64,
+    timestamp_ms: u64,
+    model: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    cached_tokens: u64,
+    cost: Option<f64>,
+    status: String,
+}
+
 /// In-memory TUI conversation state: the transcript republished on every turn.
 #[derive(Default)]
 struct TuiTranscript {
     entries: Vec<TranscriptInput>,
     next_sequence: u64,
+    attempts: Vec<LedgerAttempt>,
 }
 
 impl TuiTranscript {
+    fn record_chat_attempt(&mut self, outcome: &ChatOutcome) {
+        self.attempts.push(LedgerAttempt {
+            id: self.attempts.len() as u64,
+            timestamp_ms: now_ms(),
+            model: outcome.model.clone(),
+            input_tokens: outcome.usage.input_tokens,
+            output_tokens: outcome.usage.output_tokens,
+            cached_tokens: outcome
+                .usage
+                .cached_read_tokens
+                .saturating_add(outcome.usage.cache_creation_tokens),
+            cost: estimate_turn_cost(outcome).map(|(cost, _)| cost),
+            status: if outcome.usage_reported {
+                "settled".to_owned()
+            } else {
+                "usage_unknown".to_owned()
+            },
+        });
+    }
+
+    fn record_worker_attempt(&mut self, report: &WorkerReport) {
+        self.attempts.push(LedgerAttempt {
+            id: self.attempts.len() as u64,
+            timestamp_ms: now_ms(),
+            model: format!("worker:{}", report.id),
+            input_tokens: report.usage.input_tokens,
+            output_tokens: report.usage.output_tokens,
+            cached_tokens: report.usage.cached_tokens,
+            cost: report.usage.cost_known.then_some(report.usage.cost),
+            status: match report.status {
+                WorkerStatus::Success => "success",
+                WorkerStatus::Failed => "failed",
+                WorkerStatus::Cancelled => "cancelled",
+                WorkerStatus::Timeout => "timeout",
+            }
+            .to_owned(),
+        });
+    }
+
     fn push(&mut self, role: &str, text: impl Into<String>) {
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.saturating_add(1);
@@ -2005,11 +2065,11 @@ fn tui_snapshot(
     };
     input.telemetry.input_tokens = Some(stats.input_tokens);
     input.telemetry.output_tokens = Some(stats.output_tokens);
-    input.telemetry.credits = Some(stats.cost);
+    input.telemetry.credits = stats.cost_is_known().then_some(stats.cost);
     input.telemetry.last_input_tokens = Some(stats.last_input_tokens);
     input.telemetry.last_output_tokens = Some(stats.last_output_tokens);
-    input.telemetry.last_cost = Some(stats.last_cost);
-    input.telemetry.last_savings = Some(stats.last_savings);
+    input.telemetry.last_cost = stats.last_cost_known.then_some(stats.last_cost);
+    input.telemetry.last_savings = stats.last_cost_known.then_some(stats.last_savings);
     input.telemetry.savings = Some(stats.savings);
     input.permissions = permissions.to_vec();
     input
@@ -2072,6 +2132,22 @@ fn save_session(
         }
     }
     let message_count = messages.len();
+    let attempts = transcript
+        .attempts
+        .iter()
+        .map(|attempt| {
+            serde_json::json!({
+                "id": attempt.id,
+                "timestamp_ms": attempt.timestamp_ms,
+                "model": attempt.model,
+                "input_tokens": attempt.input_tokens,
+                "output_tokens": attempt.output_tokens,
+                "cached_tokens": attempt.cached_tokens,
+                "cost": attempt.cost.map(Value::from).unwrap_or(Value::Null),
+                "status": attempt.status,
+            })
+        })
+        .collect::<Vec<_>>();
     let now = now_unix_seconds();
     let created_at = existing_created_at(&path).unwrap_or(now);
     let title = session_title_from_transcript(session_id, transcript);
@@ -2086,12 +2162,17 @@ fn save_session(
         // §13.2: worker reports survive host restarts so a reattached TUI can
         // show them even when the original host process is gone.
         "worker_reports": worker_reports,
+        // Append-only attempt ledger: unknown cost stays JSON null and is
+        // never rewritten to a fabricated zero on resume.
+        "attempts": attempts,
         // Secret-free counters so a resumed session keeps its running totals
         // (§10.3); the per-turn `last_*` values are transient and not stored.
         "usage": {
             "input_tokens": stats.input_tokens,
             "output_tokens": stats.output_tokens,
-            "cost": stats.cost,
+            "cost": if stats.cost_is_known() { json!(stats.cost) } else { Value::Null },
+            "cost_unknown": stats.cost_unknown,
+            "has_attempts": stats.has_attempts,
             "savings": stats.savings,
         },
     });
@@ -2116,6 +2197,42 @@ fn load_session(session_id: &str) -> (TuiTranscript, SessionStats) {
     else {
         return (transcript, stats);
     };
+    if let Some(serde_json::Value::Array(attempts)) = map.get("attempts") {
+        for attempt in attempts {
+            let Some(model) = attempt.get("model").and_then(Value::as_str) else {
+                continue;
+            };
+            transcript.attempts.push(LedgerAttempt {
+                id: attempt
+                    .get("id")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(transcript.attempts.len() as u64),
+                timestamp_ms: attempt
+                    .get("timestamp_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                model: model.to_owned(),
+                input_tokens: attempt
+                    .get("input_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                output_tokens: attempt
+                    .get("output_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                cached_tokens: attempt
+                    .get("cached_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                cost: attempt.get("cost").and_then(Value::as_f64),
+                status: attempt
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_owned(),
+            });
+        }
+    }
     if let Some(serde_json::Value::Object(usage)) = map.get("usage") {
         stats.input_tokens = usage
             .get("input_tokens")
@@ -2129,6 +2246,21 @@ fn load_session(session_id: &str) -> (TuiTranscript, SessionStats) {
             .get("cost")
             .and_then(serde_json::Value::as_f64)
             .unwrap_or(0.0);
+        stats.cost_unknown = usage
+            .get("cost_unknown")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or_else(|| {
+                usage.get("cost").is_none() || usage.get("cost") == Some(&Value::Null)
+            });
+        stats.has_attempts = usage
+            .get("has_attempts")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(
+                stats.input_tokens > 0
+                    || stats.output_tokens > 0
+                    || stats.cost > 0.0
+                    || stats.cost_unknown,
+            );
         stats.savings = usage
             .get("savings")
             .and_then(serde_json::Value::as_f64)
@@ -2479,8 +2611,8 @@ async fn dispatch_tui_input_streaming(
             if argument.is_empty() {
                 return Err(anyhow!("usage: /chat <text>"));
             }
-            chat_tui_turn(argument, transcript, &mut on_progress).await?;
-            Ok((true, None))
+            let outcome = chat_tui_turn(argument, transcript, &mut on_progress).await?;
+            Ok((true, outcome))
         }
         "allowlist" => {
             let mut tokens = argument.splitn(2, char::is_whitespace);
@@ -3032,6 +3164,9 @@ struct ChatOutcome {
     text: String,
     usage: ChatUsage,
     model: String,
+    /// False when the provider omitted a usage object; the cost ledger keeps
+    /// that attempt explicitly unknown.
+    usage_reported: bool,
 }
 
 /// Running token/cost counters for the current TUI session (§10.3).  The
@@ -3047,34 +3182,61 @@ struct SessionStats {
     last_output_tokens: u64,
     last_cost: f64,
     last_savings: f64,
+    has_attempts: bool,
+    cost_unknown: bool,
+    last_cost_known: bool,
 }
 
 impl SessionStats {
     fn record(&mut self, outcome: &ChatOutcome) {
-        let (turn_cost, turn_savings) = estimate_turn_cost(outcome);
+        self.has_attempts = true;
         self.input_tokens = self.input_tokens.saturating_add(outcome.usage.input_tokens);
         self.output_tokens = self
             .output_tokens
             .saturating_add(outcome.usage.output_tokens);
-        self.cost += turn_cost;
-        self.savings += turn_savings;
+        match estimate_turn_cost(outcome) {
+            Some((turn_cost, turn_savings)) => {
+                self.cost += turn_cost;
+                self.savings += turn_savings;
+                self.last_cost = turn_cost;
+                self.last_savings = turn_savings;
+                self.last_cost_known = true;
+            }
+            None => {
+                self.cost_unknown = true;
+                self.last_cost = 0.0;
+                self.last_savings = 0.0;
+                self.last_cost_known = false;
+            }
+        }
         self.last_input_tokens = outcome.usage.input_tokens;
         self.last_output_tokens = outcome.usage.output_tokens;
-        self.last_cost = turn_cost;
-        self.last_savings = turn_savings;
+    }
+
+    fn cost_is_known(&self) -> bool {
+        self.has_attempts && !self.cost_unknown
     }
 
     /// Fold one finished worker's usage into the running session counters
     /// (§10.4.7).  The worker's `cost` is already cache-aware, so it is added
     /// verbatim; per-worker savings are not tracked in this release.
     fn record_worker(&mut self, usage: &WorkerUsage) {
+        self.has_attempts = true;
         self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
-        self.cost += usage.cost;
+        if usage.cost_known {
+            self.cost += usage.cost;
+            self.last_cost = usage.cost;
+            self.last_savings = 0.0;
+            self.last_cost_known = true;
+        } else {
+            self.cost_unknown = true;
+            self.last_cost = 0.0;
+            self.last_savings = 0.0;
+            self.last_cost_known = false;
+        }
         self.last_input_tokens = usage.input_tokens;
         self.last_output_tokens = usage.output_tokens;
-        self.last_cost = usage.cost;
-        self.last_savings = 0.0;
     }
 }
 
@@ -3128,7 +3290,10 @@ fn load_pricing_override() -> Option<std::collections::HashMap<String, (f64, f64
 /// Cache rates follow the standard Anthropic scheme relative to the input
 /// price: writes cost 1.25×, reads cost 0.1×.  The same multipliers are used
 /// for OpenAI-compatible `cached_tokens` reports.
-fn estimate_turn_cost(outcome: &ChatOutcome) -> (f64, f64) {
+fn estimate_turn_cost(outcome: &ChatOutcome) -> Option<(f64, f64)> {
+    if !outcome.usage_reported {
+        return None;
+    }
     let (input_per_1k, output_per_1k) = model_price_per_1k(&outcome.model);
     let usage = outcome.usage;
     let uncached_input = usage
@@ -3143,7 +3308,7 @@ fn estimate_turn_cost(outcome: &ChatOutcome) -> (f64, f64) {
         + usage.output_tokens as f64 / 1000.0 * output_per_1k;
     let naive = usage.input_tokens as f64 / 1000.0 * input_per_1k
         + usage.output_tokens as f64 / 1000.0 * output_per_1k;
-    (cost, (naive - cost).max(0.0))
+    Some((cost, (naive - cost).max(0.0)))
 }
 
 /// Like [`chat_completion_text`], but sends a full message history (so the
@@ -3175,6 +3340,7 @@ async fn chat_completion_with_chunks(
         resolve_provider_model(&settings, provider, &key, &transport, model_override, None).await?;
     let mut output = String::new();
     let mut usage = ChatUsage::default();
+    let mut usage_reported = false;
 
     match provider.protocol {
         Protocol::OpenAiCompatible => {
@@ -3195,6 +3361,7 @@ async fn chat_completion_with_chunks(
                 // OpenAI-compatible gateways report usage on the final chunk
                 // (`prompt_tokens`/`completion_tokens`); take the last report.
                 if let Some(reported) = ChatUsage::parse(chunk.usage.as_ref()) {
+                    usage_reported = true;
                     if reported.input_tokens > 0 || reported.output_tokens > 0 {
                         usage = reported;
                     }
@@ -3228,6 +3395,7 @@ async fn chat_completion_with_chunks(
                 // on `message_delta.usage` (§10.3).
                 if let Some(start) = &chunk.message {
                     if let Some(reported) = ChatUsage::parse(start.usage.as_ref()) {
+                        usage_reported = true;
                         usage.input_tokens = reported.input_tokens;
                         usage.cached_read_tokens = reported.cached_read_tokens;
                         usage.cache_creation_tokens = reported.cache_creation_tokens;
@@ -3237,6 +3405,7 @@ async fn chat_completion_with_chunks(
                     }
                 }
                 if let Some(reported) = ChatUsage::parse(chunk.usage.as_ref()) {
+                    usage_reported = true;
                     if reported.output_tokens > usage.output_tokens {
                         usage.output_tokens = reported.output_tokens;
                     }
@@ -3260,6 +3429,7 @@ async fn chat_completion_with_chunks(
         text: output,
         usage,
         model: model.to_owned(),
+        usage_reported,
     })
 }
 
@@ -3325,7 +3495,7 @@ impl ModelClient for TransportModelClient {
         Box::pin(async move {
             let transport = Transport::new(&provider.base_url)
                 .map_err(|error| WorkerError::Io(error.to_string()))?;
-            let (text, tool_calls, usage) = match provider.protocol {
+            let (text, tool_calls, usage, usage_reported) = match provider.protocol {
                 Protocol::OpenAiCompatible => {
                     let request = ChatCompletionsRequest {
                         model: model.clone(),
@@ -3341,6 +3511,7 @@ impl ModelClient for TransportModelClient {
                     futures_util::pin_mut!(stream);
                     let mut text = String::new();
                     let mut usage = ChatUsage::default();
+                    let mut usage_reported = false;
                     // (id, name, accumulated arguments) grouped by tool-call index.
                     let mut calls: BTreeMap<u64, (String, String, String)> = BTreeMap::new();
                     while let Some(item) = stream.next().await {
@@ -3349,6 +3520,7 @@ impl ModelClient for TransportModelClient {
                         }
                         let chunk = item.map_err(|error| WorkerError::Io(error.to_string()))?;
                         if let Some(reported) = ChatUsage::parse(chunk.usage.as_ref()) {
+                            usage_reported = true;
                             if reported.input_tokens > 0 || reported.output_tokens > 0 {
                                 usage = reported;
                             }
@@ -3386,7 +3558,7 @@ impl ModelClient for TransportModelClient {
                                 .unwrap_or(Value::String(arguments)),
                         })
                         .collect();
-                    (text, tool_calls, usage)
+                    (text, tool_calls, usage, usage_reported)
                 }
                 Protocol::AnthropicCompatible => {
                     let request = MessagesRequest {
@@ -3404,6 +3576,7 @@ impl ModelClient for TransportModelClient {
                     futures_util::pin_mut!(stream);
                     let mut text = String::new();
                     let mut usage = ChatUsage::default();
+                    let mut usage_reported = false;
                     // (id, name, accumulated partial_json) grouped by block index.
                     let mut calls: BTreeMap<u64, (String, String, String)> = BTreeMap::new();
                     while let Some(item) = stream.next().await {
@@ -3413,6 +3586,7 @@ impl ModelClient for TransportModelClient {
                         let chunk = item.map_err(|error| WorkerError::Io(error.to_string()))?;
                         if let Some(start) = &chunk.message {
                             if let Some(reported) = ChatUsage::parse(start.usage.as_ref()) {
+                                usage_reported = true;
                                 usage.input_tokens = reported.input_tokens;
                                 usage.cached_read_tokens = reported.cached_read_tokens;
                                 usage.cache_creation_tokens = reported.cache_creation_tokens;
@@ -3422,6 +3596,7 @@ impl ModelClient for TransportModelClient {
                             }
                         }
                         if let Some(reported) = ChatUsage::parse(chunk.usage.as_ref()) {
+                            usage_reported = true;
                             if reported.output_tokens > usage.output_tokens {
                                 usage.output_tokens = reported.output_tokens;
                             }
@@ -3462,20 +3637,24 @@ impl ModelClient for TransportModelClient {
                                 .unwrap_or(Value::String(arguments)),
                         })
                         .collect();
-                    (text, tool_calls, usage)
+                    (text, tool_calls, usage, usage_reported)
                 }
             };
-            let cost = estimate_turn_cost(&ChatOutcome {
+            let cost_outcome = ChatOutcome {
                 text: String::new(),
                 usage,
                 model,
-            })
-            .0;
+                usage_reported,
+            };
+            let (cost, cost_known) = estimate_turn_cost(&cost_outcome)
+                .map(|(cost, _)| (cost, true))
+                .unwrap_or((0.0, false));
             Ok(ModelTurn {
                 text,
                 tool_calls,
                 usage,
                 cost,
+                cost_known,
             })
         })
     }
@@ -3586,9 +3765,14 @@ fn worker_report_text(report: &WorkerReport) -> String {
     if !report.risks.is_empty() {
         lines.push(format!("  risks: {}", report.risks.join("; ")));
     }
+    let usage_cost = if report.usage.cost_known {
+        format!("${:.6}", report.usage.cost)
+    } else {
+        "cost unknown".to_owned()
+    };
     lines.push(format!(
-        "  usage: ↑{} ↓{} · ${:.6}",
-        report.usage.input_tokens, report.usage.output_tokens, report.usage.cost
+        "  usage: ↑{} ↓{} · {usage_cost}",
+        report.usage.input_tokens, report.usage.output_tokens
     ));
     lines.join("\n")
 }
@@ -4944,6 +5128,7 @@ mod tests {
                     ..Default::default()
                 },
                 model: "gpt-5.6-luna".into(),
+                usage_reported: true,
             });
             assert_eq!(stats.input_tokens, 10);
             assert_eq!(stats.output_tokens, 4);
@@ -4967,6 +5152,48 @@ mod tests {
     }
 
     #[test]
+    fn session_attempt_ledger_round_trips_unknown_cost_append_only() {
+        with_sandbox_env(|_dir| {
+            let mut transcript = TuiTranscript::default();
+            transcript.record_chat_attempt(&ChatOutcome {
+                text: "reply".into(),
+                usage: ChatUsage::default(),
+                model: "deepseek-v4-flash".into(),
+                usage_reported: false,
+            });
+            save_session("ledger", &transcript, SessionStats::default()).unwrap();
+
+            let raw = fs::read_to_string(session_path("ledger").unwrap()).unwrap();
+            let value: Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(value["attempts"].as_array().unwrap().len(), 1);
+            assert_eq!(value["attempts"][0]["cost"], Value::Null);
+            assert_eq!(value["attempts"][0]["status"], "usage_unknown");
+
+            let (loaded, _) = load_session("ledger");
+            assert_eq!(loaded.attempts.len(), 1);
+            assert_eq!(loaded.attempts[0].model, "deepseek-v4-flash");
+            assert_eq!(loaded.attempts[0].cost, None);
+        });
+    }
+
+    #[test]
+    fn missing_provider_usage_is_persisted_and_displayed_as_unknown() {
+        with_sandbox_env(|_dir| {
+            let mut stats = SessionStats::default();
+            stats.record(&ChatOutcome {
+                text: "provider omitted usage".into(),
+                usage: ChatUsage::default(),
+                model: "model-without-usage".into(),
+                usage_reported: false,
+            });
+            assert!(stats.has_attempts);
+            assert!(stats.cost_unknown);
+            assert!(!stats.cost_is_known());
+            assert!(status_line(&stats).contains("cost: unknown"));
+        });
+    }
+
+    #[test]
     fn session_stats_record_accumulates_across_turns() {
         let mut stats = SessionStats::default();
         for (input, output) in [(100, 20), (150, 35)] {
@@ -4978,6 +5205,7 @@ mod tests {
                     ..Default::default()
                 },
                 model: "gpt-5.6-luna".into(),
+                usage_reported: true,
             });
         }
         assert_eq!(stats.input_tokens, 250);
@@ -5001,8 +5229,9 @@ mod tests {
                 cache_creation_tokens: 0,
             },
             model: "gpt-5.6-luna".to_owned(),
+            usage_reported: true,
         };
-        let (cost, savings) = estimate_turn_cost(&outcome);
+        let (cost, savings) = estimate_turn_cost(&outcome).expect("usage is marked reported");
         let expected_naive = 10_000.0 / 1000.0 * 0.0010;
         let expected_cost = 2000.0 / 1000.0 * 0.0010 + 8000.0 / 1000.0 * 0.0001;
         assert!((cost - expected_cost).abs() < 1e-12, "cost = {cost}");
@@ -5026,8 +5255,9 @@ mod tests {
                 cache_creation_tokens: 1_000,
             },
             model: "gpt-5.6-luna".to_owned(),
+            usage_reported: true,
         };
-        let (cost, savings) = estimate_turn_cost(&outcome);
+        let (cost, savings) = estimate_turn_cost(&outcome).expect("usage is marked reported");
         assert!((cost - 1.25 * 0.0010).abs() < 1e-12, "cost = {cost}");
         assert_eq!(savings, 0.0);
     }
@@ -6096,6 +6326,7 @@ mod tests {
                 output_tokens: 5,
                 cached_tokens: 0,
                 cost: 0.25,
+                cost_known: true,
             },
             elapsed_ms: 1500,
             ..Default::default()

@@ -39,6 +39,10 @@ pub struct WorkerUsage {
     pub output_tokens: u64,
     pub cached_tokens: u64,
     pub cost: f64,
+    /// Whether every settled model turn reported usage sufficient to estimate
+    /// cost. False is rendered as unknown, never as a fabricated zero.
+    #[serde(default)]
+    pub cost_known: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -108,6 +112,7 @@ mod tests {
                 output_tokens: 30,
                 cached_tokens: 90,
                 cost: 0.0002,
+                cost_known: true,
             },
             elapsed_ms: 45,
         };
