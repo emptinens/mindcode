@@ -1552,6 +1552,7 @@ async fn run_tui_client(session_id: &str, socket_path: PathBuf) -> Result<i32> {
     let tui_config = TuiConfig {
         control_socket: socket_path,
         session_id: session_id.to_owned(),
+        palette_settings_path: native_settings_path().ok(),
     };
     let outcome = tokio::task::spawn_blocking(move || mindcode_tui::run(tui_config)).await;
     match outcome {

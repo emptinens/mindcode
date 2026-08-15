@@ -1,5 +1,6 @@
 //! Theme tokens and terminal color-depth fallbacks for MindCode.
 
+use super::colors::{Rgb, Role};
 use ratatui::style::{Color, Modifier, Style};
 
 /// The semantic colors used by the visual foundation.
@@ -116,6 +117,73 @@ impl Palette {
         Style::new().fg(self.color(token))
     }
 
+    /// Return a palette with one semantic role replaced by an explicit RGB
+    /// override from the secret-free native settings file.
+    pub const fn with_override(self, token: ColorToken, color: Color) -> Self {
+        match token {
+            ColorToken::Background => Self {
+                background: color,
+                ..self
+            },
+            ColorToken::Surface => Self {
+                surface: color,
+                ..self
+            },
+            ColorToken::SurfaceAlt => Self {
+                surface_alt: color,
+                ..self
+            },
+            ColorToken::Text => Self {
+                text: color,
+                ..self
+            },
+            ColorToken::Muted => Self {
+                muted: color,
+                ..self
+            },
+            ColorToken::Border => Self {
+                border: color,
+                ..self
+            },
+            ColorToken::BorderStrong => Self {
+                border_strong: color,
+                ..self
+            },
+            ColorToken::Accent => Self {
+                accent: color,
+                ..self
+            },
+            ColorToken::AccentSoft => Self {
+                accent_soft: color,
+                ..self
+            },
+            ColorToken::Success => Self {
+                success: color,
+                ..self
+            },
+            ColorToken::Warning => Self {
+                warning: color,
+                ..self
+            },
+            ColorToken::Error => Self {
+                error: color,
+                ..self
+            },
+            ColorToken::Info => Self {
+                info: color,
+                ..self
+            },
+            ColorToken::Selection => Self {
+                selection: color,
+                ..self
+            },
+            ColorToken::Progress => Self {
+                progress: color,
+                ..self
+            },
+        }
+    }
+
     pub const fn focused_style(self) -> Style {
         Style::new()
             .fg(self.text)
@@ -167,6 +235,46 @@ impl Theme {
 
     pub const fn style(self, token: ColorToken) -> Style {
         self.palette.style(token)
+    }
+
+    /// Build a theme from the built-in palette and apply the validated
+    /// role→RGB overrides persisted by `/colors set`.
+    pub fn with_overrides<I>(kind: ThemeKind, mode: ColorMode, overrides: I) -> Self
+    where
+        I: IntoIterator<Item = (Role, Rgb)>,
+    {
+        let palette =
+            overrides
+                .into_iter()
+                .fold(palette_for(kind, mode), |palette, (role, color)| {
+                    palette
+                        .with_override(role_to_token(role), Color::Rgb(color.r, color.g, color.b))
+                });
+        Self {
+            kind,
+            mode,
+            palette,
+        }
+    }
+}
+
+fn role_to_token(role: Role) -> ColorToken {
+    match role {
+        Role::Background => ColorToken::Background,
+        Role::Surface => ColorToken::Surface,
+        Role::SurfaceAlt => ColorToken::SurfaceAlt,
+        Role::Text => ColorToken::Text,
+        Role::Muted => ColorToken::Muted,
+        Role::Border => ColorToken::Border,
+        Role::BorderStrong => ColorToken::BorderStrong,
+        Role::Accent => ColorToken::Accent,
+        Role::AccentSoft => ColorToken::AccentSoft,
+        Role::Success => ColorToken::Success,
+        Role::Warning => ColorToken::Warning,
+        Role::Error => ColorToken::Error,
+        Role::Info => ColorToken::Info,
+        Role::Selection => ColorToken::Selection,
+        Role::Progress => ColorToken::Progress,
     }
 }
 
@@ -407,6 +515,17 @@ mod tests {
             theme.palette().panel_style().bg,
             Some(theme.color(ColorToken::Surface))
         );
+    }
+
+    #[test]
+    fn role_overrides_replace_only_the_requested_render_token() {
+        let theme = Theme::with_overrides(
+            ThemeKind::GraphiteSakura,
+            ColorMode::TrueColor,
+            [(Role::Accent, Rgb::new(1, 2, 3))],
+        );
+        assert_eq!(theme.color(ColorToken::Accent), Color::Rgb(1, 2, 3));
+        assert_eq!(theme.color(ColorToken::Background), Color::Rgb(11, 11, 13));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use mindcode_protocol::ui::{
@@ -34,7 +34,7 @@ use preferences::Preferences;
 use render::{NavigationView, OverlayView, PanelFocus, RenderState, EFFORT_LEVELS};
 use ui::{
     calculate_layout_with_composer, AnimationActivity, AnimationScheduler, ColorMode, MotionMode,
-    PaneRatios, Theme, ThemeKind,
+    PaneRatios, Rgb, Role, Theme, ThemeKind,
 };
 
 const CLIENT_NAME: &str = "mindcode-tui";
@@ -187,6 +187,9 @@ impl ProviderForm {
 pub struct TuiConfig {
     pub control_socket: std::path::PathBuf,
     pub session_id: String,
+    /// Secret-free native settings path used to hot-reload `/colors set`
+    /// overrides into the live renderer. Standalone TUI clients may omit it.
+    pub palette_settings_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
@@ -282,6 +285,7 @@ where
     Ok(TuiConfig {
         control_socket,
         session_id,
+        palette_settings_path: None,
     })
 }
 
@@ -352,6 +356,8 @@ pub struct App {
     motion: MotionMode,
     preferences: Preferences,
     preferences_path: Option<PathBuf>,
+    palette_settings_path: Option<PathBuf>,
+    palette_settings_mtime: Option<SystemTime>,
     workspace_id: String,
     terminal_size: (u16, u16),
     drag_target: Option<DragTarget>,
@@ -430,6 +436,8 @@ impl App {
             motion,
             preferences,
             preferences_path,
+            palette_settings_path: None,
+            palette_settings_mtime: None,
             workspace_id: "default".into(),
             terminal_size: (140, 45),
             drag_target: None,
@@ -462,7 +470,20 @@ impl App {
             .as_ref()
             .and_then(|path| Preferences::load_or_default(path).ok())
             .unwrap_or_default();
-        Self::with_preferences(preferences, path)
+        let palette_settings_path = path
+            .as_ref()
+            .and_then(|path| path.parent().map(|parent| parent.join("settings.json")));
+        Self::with_preferences(preferences, path).with_palette_settings_path(palette_settings_path)
+    }
+
+    /// Point the renderer at the secret-free native settings file. The file is
+    /// checked only when a new snapshot arrives, so `/colors set` becomes live
+    /// without adding a second control-plane message type.
+    pub fn with_palette_settings_path(mut self, path: Option<PathBuf>) -> Self {
+        self.palette_settings_path = path;
+        self.palette_settings_mtime = None;
+        self.reload_palette_from_settings();
+        self
     }
 
     pub fn preferences(&self) -> &Preferences {
@@ -483,6 +504,48 @@ impl App {
         self.preferences.motion_override = motion;
         self.motion = motion.unwrap_or_else(default_motion_from_environment);
         self.persist_preferences();
+    }
+
+    fn reload_palette_from_settings(&mut self) {
+        let Some(path) = self.palette_settings_path.as_ref() else {
+            return;
+        };
+        let modified = fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        if modified == self.palette_settings_mtime {
+            return;
+        }
+        if modified.is_none() {
+            self.theme = Theme::new(self.preferences.theme, terminal_color_mode());
+            self.palette_settings_mtime = None;
+            return;
+        }
+        let Ok(bytes) = fs::read(path) else {
+            return;
+        };
+        if bytes.len() > 64 * 1024 {
+            return;
+        }
+        let Ok(root) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return;
+        };
+        let overrides = match root.get("color_overrides") {
+            None | Some(serde_json::Value::Null) => Vec::new(),
+            Some(serde_json::Value::Object(values)) => values
+                .iter()
+                .filter_map(|(label, value)| {
+                    let role = Role::from_label(label)?;
+                    let hex = value.as_str()?;
+                    let color = Rgb::from_hex(hex).ok()?;
+                    Some((role, color))
+                })
+                .collect(),
+            Some(_) => return,
+        };
+        self.theme =
+            Theme::with_overrides(self.preferences.theme, terminal_color_mode(), overrides);
+        self.palette_settings_mtime = modified;
     }
 
     fn persist_preferences(&mut self) {
@@ -756,6 +819,7 @@ impl App {
         {
             return false;
         }
+        self.reload_palette_from_settings();
         if let UiMessage::RenderSnapshot {
             version,
             id,
@@ -2454,6 +2518,9 @@ mod unix_runtime {
         let mut connection = UiConnection::connect(&config.control_socket)?;
         let initial_message = connection.handshake(&config.session_id)?;
         let mut app = App::load_persisted();
+        if config.palette_settings_path.is_some() {
+            app = app.with_palette_settings_path(config.palette_settings_path.clone());
+        }
         if let Some(message) = initial_message {
             app.apply_message(message);
         }
@@ -3466,6 +3533,32 @@ mod tests {
         assert_eq!(saved.theme, ThemeKind::Light);
         assert_eq!(saved.motion_override, Some(MotionMode::Reduced));
         assert_eq!(saved.ratios_for("default"), PaneRatios::DEFAULT);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn colors_settings_are_applied_to_the_live_theme() {
+        let path = std::env::temp_dir().join(format!(
+            "mindcode-tui-colors-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = fs::remove_file(&path);
+        fs::write(&path, r##"{"color_overrides":{"accent":"#010203"}}"##).unwrap();
+        let mut app = App::with_preferences(Preferences::default(), None)
+            .with_palette_settings_path(Some(path.clone()));
+        assert_eq!(
+            app.theme.color(ui::ColorToken::Accent),
+            ratatui::style::Color::Rgb(1, 2, 3)
+        );
+
+        std::thread::sleep(Duration::from_millis(10));
+        fs::write(&path, r##"{"color_overrides":{"accent":"#040506"}}"##).unwrap();
+        app.apply_message(render_message(snapshot(1), "colors"));
+        assert_eq!(
+            app.theme.color(ui::ColorToken::Accent),
+            ratatui::style::Color::Rgb(4, 5, 6)
+        );
         fs::remove_file(path).unwrap();
     }
 
