@@ -20,6 +20,7 @@ type ModelFuture = Pin<Box<dyn Future<Output = Result<ModelTurn, WorkerError>> +
 struct ScriptedClient {
     turns: Vec<ModelTurn>,
     cursor: Mutex<usize>,
+    seen_messages: Arc<Mutex<Vec<Vec<ChatMessage>>>>,
 }
 
 impl ScriptedClient {
@@ -27,17 +28,23 @@ impl ScriptedClient {
         Self {
             turns,
             cursor: Mutex::new(0),
+            seen_messages: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    fn seen_messages(&self) -> Vec<Vec<ChatMessage>> {
+        self.seen_messages.lock().unwrap().clone()
     }
 }
 
 impl ModelClient for ScriptedClient {
     fn turn(
         &self,
-        _messages: &[ChatMessage],
+        messages: &[ChatMessage],
         _tools: &[ToolSpec],
         cancel: CancellationToken,
     ) -> ModelFuture {
+        self.seen_messages.lock().unwrap().push(messages.to_vec());
         let index = {
             let mut cursor = self.cursor.lock().unwrap();
             let index = *cursor;
@@ -136,6 +143,69 @@ async fn agent_runs_tools_and_produces_a_report() {
         "hello"
     );
     assert!(report.usage.input_tokens >= 10);
+}
+
+#[tokio::test]
+async fn todo_quality_gate_reprompts_and_delimits_tool_output() {
+    let (workspace, _config, scope, guard) = fixture(PermissionTier::Workspace);
+    let client = Arc::new(ScriptedClient::new(vec![
+        ModelTurn {
+            tool_calls: vec![tool_call(
+                "todo-call",
+                "todo",
+                serde_json::json!({
+                    "action": "add",
+                    "item": "verify the patch",
+                    "maturity": "in_progress",
+                    "requirement_ref": "5.1.3"
+                }),
+            )],
+            ..Default::default()
+        },
+        turn_text("finished without explaining the open item"),
+        ModelTurn {
+            tool_calls: vec![tool_call(
+                "todo-update",
+                "todo",
+                serde_json::json!({
+                    "action": "update",
+                    "item": "1",
+                    "assessment": "blocked by the local fixture"
+                }),
+            )],
+            ..Default::default()
+        },
+        turn_text("the item is blocked by the local fixture"),
+    ]));
+    let agent = WorkerAgent::new(
+        "w-quality",
+        Arc::clone(&client) as Arc<dyn ModelClient>,
+        Arc::new(AllowAllGate),
+        scope,
+        guard,
+    );
+    let report = agent
+        .run("verify the patch", CancellationToken::new())
+        .await;
+
+    assert_eq!(report.status, WorkerStatus::Success);
+    assert!(report.deviations.is_empty());
+    let seen = client.seen_messages();
+    assert_eq!(seen.len(), 4);
+    assert!(seen[1].iter().any(|message| {
+        message.content.contains("<tool_output source=\"todo\">")
+            && message.content.contains("requirement")
+    }));
+    assert!(seen[2].iter().any(|message| {
+        message
+            .content
+            .contains("todo quality check: explain or close")
+    }));
+    assert!(seen[3].iter().any(|message| {
+        message.content.contains("<tool_output source=\"todo\">")
+            && message.content.contains("blocked by the local fixture")
+    }));
+    assert!(!workspace.path().join("unexpected").exists());
 }
 
 #[tokio::test]

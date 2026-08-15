@@ -2562,7 +2562,21 @@ async fn chat_tui_turn(
     transcript.push("assistant", String::new());
     // Send the dialog history (trimmed to the token budget) so the model
     // sees prior turns; system/UI lines never enter the request (§10.1).
-    let messages = conversation_messages(&transcript.entries, effective_context_budget());
+    let budget = effective_context_budget();
+    let (mut messages, dropped_turns) =
+        conversation_messages_with_truncation(&transcript.entries, budget);
+    if dropped_turns > 0 {
+        messages.insert(
+            0,
+            ChatMessage {
+                role: "system".to_owned(),
+                content: format!(
+                    "[Attention: {dropped_turns} earlier dialogue turns were omitted from the context; estimated budget is {budget} tokens.]"
+                ),
+                ..Default::default()
+            },
+        );
+    }
     let outcome = chat_completion_with_chunks(&messages, None, None, |delta| {
         transcript.append_last(delta);
         on_progress(transcript);
@@ -2593,6 +2607,13 @@ async fn chat_tui_turn(
 /// hard-dropped, never summarized (§10.1).  System/UI lines are never part
 /// of the conversation.
 fn conversation_messages(entries: &[TranscriptInput], budget: usize) -> Vec<ChatMessage> {
+    conversation_messages_with_truncation(entries, budget).0
+}
+
+fn conversation_messages_with_truncation(
+    entries: &[TranscriptInput],
+    budget: usize,
+) -> (Vec<ChatMessage>, usize) {
     let mut turns: Vec<ChatMessage> = Vec::new();
     for entry in entries {
         let TranscriptInput::Entry { role, text, .. } = entry else {
@@ -2606,12 +2627,15 @@ fn conversation_messages(entries: &[TranscriptInput], budget: usize) -> Vec<Chat
             });
         }
     }
+    let total_turns = turns.len();
     let mut kept: Vec<ChatMessage> = Vec::new();
+    let mut dropped_turns = 0usize;
     let mut used = 0usize;
     for (index, message) in turns.into_iter().rev().enumerate() {
         let is_newest = index == 0;
         let estimated = estimate_tokens(&message.content);
         if !is_newest && used.saturating_add(estimated) > budget {
+            dropped_turns = total_turns.saturating_sub(index);
             break;
         }
         let mut content = message.content;
@@ -2628,7 +2652,7 @@ fn conversation_messages(entries: &[TranscriptInput], budget: usize) -> Vec<Chat
         });
     }
     kept.reverse();
-    kept
+    (kept, dropped_turns)
 }
 
 /// Local token estimate (`chars/4`): cheap, deterministic, no LLM call.
@@ -4818,7 +4842,8 @@ mod tests {
                 text: "cccc".into(),
             },
         ];
-        let messages = conversation_messages(&entries, 2);
+        let (messages, dropped) = conversation_messages_with_truncation(&entries, 2);
+        assert_eq!(dropped, 1);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].content, "bbbb");
         assert_eq!(messages[1].content, "cccc");

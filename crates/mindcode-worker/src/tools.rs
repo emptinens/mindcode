@@ -43,24 +43,63 @@ pub struct FileReadResult {
     pub truncated: bool,
 }
 
-/// A worker-local task list (the `todo` tool, §11.10).  Independent of the
-/// system task graph; it exists so a worker can keep a plan across iterations.
+/// A worker-local task list (the `todo` tool, §5.1.4). Independent of the
+/// system task graph; it carries enough semantic evidence for the final
+/// quality-gate to distinguish an unfinished item from an explained blocker.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TodoList {
     pub items: Vec<TodoItem>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TodoMaturity {
+    #[default]
+    Planned,
+    InProgress,
+    Done,
+    Blocked,
+}
+
+impl TodoMaturity {
+    fn parse(value: Option<&str>) -> WorkerResult<Self> {
+        match value.unwrap_or("planned") {
+            "planned" => Ok(Self::Planned),
+            "in_progress" | "in-progress" => Ok(Self::InProgress),
+            "done" => Ok(Self::Done),
+            "blocked" => Ok(Self::Blocked),
+            other => Err(WorkerError::InvalidRequest(format!(
+                "unknown todo maturity '{other}' (planned|in_progress|done|blocked)"
+            ))),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TodoItem {
     pub text: String,
     pub done: bool,
+    pub assessment: Option<String>,
+    pub maturity: TodoMaturity,
+    pub requirement_ref: Option<String>,
 }
 
 impl TodoList {
-    /// Apply a `todo` tool action and return a human-readable rendering of the
-    /// resulting list.  `list` never mutates, `clear` empties the list, `add`
-    /// appends an open item, `check`/`uncheck` toggle the 1-based index.
+    /// Backward-compatible shorthand for the basic todo API.
     pub fn apply(&mut self, action: &str, item: Option<&str>) -> WorkerResult<String> {
+        self.apply_detailed(action, item, None, None, None)
+    }
+
+    /// Apply a todo action with semantic completion evidence. `assessment` is
+    /// intentionally plain text (not a model-generated status trusted by the
+    /// runtime); it only explains why an open item is blocked or deferred.
+    pub fn apply_detailed(
+        &mut self,
+        action: &str,
+        item: Option<&str>,
+        assessment: Option<&str>,
+        maturity: Option<&str>,
+        requirement_ref: Option<&str>,
+    ) -> WorkerResult<String> {
         match action {
             "list" => {}
             "clear" => self.items.clear(),
@@ -68,18 +107,22 @@ impl TodoList {
                 let text = item.filter(|text| !text.trim().is_empty()).ok_or_else(|| {
                     WorkerError::InvalidRequest("todo add requires a non-empty item".to_owned())
                 })?;
+                let maturity = TodoMaturity::parse(maturity)?;
                 self.items.push(TodoItem {
                     text: text.trim().to_owned(),
-                    done: false,
+                    done: maturity == TodoMaturity::Done,
+                    assessment: clean_metadata(assessment),
+                    maturity,
+                    requirement_ref: clean_metadata(requirement_ref),
                 });
             }
-            "check" | "uncheck" => {
+            "check" | "uncheck" | "update" => {
                 let index = item
                     .and_then(|value| value.trim().parse::<usize>().ok())
                     .filter(|index| *index > 0)
                     .ok_or_else(|| {
                         WorkerError::InvalidRequest(
-                            "todo check/uncheck requires a 1-based item index".to_owned(),
+                            "todo check/uncheck/update requires a 1-based item index".to_owned(),
                         )
                     })?;
                 let Some(entry) = self.items.get_mut(index - 1) else {
@@ -87,18 +130,61 @@ impl TodoList {
                         "todo item {index} does not exist"
                     )));
                 };
-                entry.done = action == "check";
+                if action != "update" {
+                    entry.done = action == "check";
+                    entry.maturity = if entry.done {
+                        TodoMaturity::Done
+                    } else {
+                        TodoMaturity::InProgress
+                    };
+                }
+                if let Some(maturity) = maturity {
+                    entry.maturity = TodoMaturity::parse(Some(maturity))?;
+                    entry.done = entry.maturity == TodoMaturity::Done;
+                }
+                if assessment.is_some() {
+                    entry.assessment = clean_metadata(assessment);
+                }
+                if requirement_ref.is_some() {
+                    entry.requirement_ref = clean_metadata(requirement_ref);
+                }
             }
             other => {
                 return Err(WorkerError::InvalidRequest(format!(
-                    "unknown todo action '{other}' (list|add|check|uncheck|clear)"
+                    "unknown todo action '{other}' (list|add|check|uncheck|update|clear)"
                 )));
             }
         }
         Ok(self.render())
     }
 
-    /// Render the list as `1. [ ] item` / `1. [x] item`, or an empty note.
+    /// Return an explanation request when planned/in-progress items lack an
+    /// assessment. Explained blockers are visible but do not deadlock the run.
+    pub fn quality_gate_prompt(&self) -> Option<String> {
+        let unresolved = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                matches!(
+                    item.maturity,
+                    TodoMaturity::Planned | TodoMaturity::InProgress
+                ) && item.assessment.as_deref().is_none_or(str::is_empty)
+            })
+            .map(|(index, item)| format!("{}. {}", index + 1, item.text))
+            .collect::<Vec<_>>();
+        if unresolved.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "todo quality check: explain or close these unfinished items before the final answer:\n{}\nUse todo update/check with an assessment for each item.",
+                unresolved.join("\n")
+            ))
+        }
+    }
+
+    /// Render the list as `1. [ ] item` / `1. [x] item`, with optional semantic
+    /// metadata on separate lines so the model can see its own evidence.
     pub fn render(&self) -> String {
         if self.items.is_empty() {
             return "todo list is empty".to_owned();
@@ -108,11 +194,25 @@ impl TodoList {
             .enumerate()
             .map(|(index, item)| {
                 let mark = if item.done { "x" } else { " " };
-                format!("{}. [{}] {}", index + 1, mark, item.text)
+                let mut line = format!("{}. [{}] {}", index + 1, mark, item.text);
+                if let Some(assessment) = &item.assessment {
+                    line.push_str(&format!("\n   assessment: {assessment}"));
+                }
+                if let Some(requirement_ref) = &item.requirement_ref {
+                    line.push_str(&format!("\n   requirement: {requirement_ref}"));
+                }
+                line
             })
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+fn clean_metadata(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 fn check_cancelled(cancel: &CancellationToken) -> WorkerResult<()> {
@@ -787,6 +887,33 @@ mod tests {
             Err(WorkerError::InvalidRequest(_))
         ));
         assert_eq!(list.apply("clear", None).unwrap(), "todo list is empty");
+    }
+
+    #[test]
+    fn todo_quality_metadata_explains_or_closes_unfinished_items() {
+        let mut list = TodoList::default();
+        list.apply_detailed(
+            "add",
+            Some("verify the patch"),
+            None,
+            Some("in_progress"),
+            Some("5.1.3"),
+        )
+        .unwrap();
+        assert!(list.quality_gate_prompt().is_some());
+        list.apply_detailed(
+            "update",
+            Some("1"),
+            Some("blocked by unavailable fixture; reported to user"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(list.quality_gate_prompt().is_none());
+        list.apply_detailed("check", Some("1"), None, None, None)
+            .unwrap();
+        assert_eq!(list.items[0].maturity, TodoMaturity::Done);
+        assert!(list.items[0].done);
     }
 
     #[test]
