@@ -43,7 +43,10 @@ use mindcode_worker::{
     WorkerAgent, WorkerError, WorkerPool, WorkerReport, WorkerResult, WorkerScope, WorkerStatus,
     WorkerUsage, DEFAULT_MAX_CONCURRENT, DEFAULT_WORKER_CONTEXT_TOKEN_BUDGET,
 };
-use mindcoded::{Daemon, DaemonConfig};
+use mindcoded::{
+    protocol::{read_message, write_message, ClientMessage, ServerMessage, PROTOCOL_VERSION},
+    Daemon, DaemonConfig,
+};
 use serde_json::{json, Value};
 use std::{
     collections::{hash_map::DefaultHasher, BTreeMap},
@@ -62,7 +65,7 @@ use std::{
     time::Duration,
     time::Instant,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 use tokio_util::sync::CancellationToken;
 
 const VERSION: &str = "0.1.3";
@@ -73,6 +76,11 @@ const SETTINGS_KEY_CONFIRMATION: &str = "configured";
 /// Minimum delay between TUI snapshot republishes while a chat turn streams;
 /// tokens still accumulate locally between publishes.
 const STREAM_REPUBLISH_INTERVAL: Duration = Duration::from_millis(120);
+const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(10);
+const DAEMON_IDLE_SECONDS: u64 = 30 * 60;
+const DAEMON_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+static NEXT_DAEMON_RPC_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_DAEMON_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 /// Default conversation-memory budget in estimated tokens (§11.3).  The
 /// estimate is a cheap local heuristic (`chars/4`); real usage comes from
 /// the provider response.  The base is 200K always; a settings override may
@@ -1121,6 +1129,255 @@ fn tui_socket_path(session_id: &str) -> PathBuf {
     tui_runtime_dir().join(format!("native-tui-{session_id}.sock"))
 }
 
+fn daemon_session_socket_path() -> PathBuf {
+    DaemonConfig::default_socket()
+}
+
+async fn connect_or_spawn_daemon() -> Result<tokio::net::UnixStream> {
+    let socket_path = daemon_session_socket_path();
+    if let Ok(stream) = tokio::net::UnixStream::connect(&socket_path).await {
+        return Ok(stream);
+    }
+
+    let executable =
+        env::current_exe().context("resolve mindcode executable for daemon startup")?;
+    let log_path = tui_runtime_dir().join("mindcoded.log");
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("open daemon log {}", log_path.display()))?;
+    let mut command = process::Command::new(executable);
+    command
+        .arg("daemon")
+        .arg("--socket")
+        .arg(&socket_path)
+        .arg("--idle-seconds")
+        .arg(DAEMON_IDLE_SECONDS.to_string())
+        .arg("--handshake-timeout-seconds")
+        .arg("5")
+        .arg("--build-id")
+        .arg(format!("native-{}", VERSION))
+        .stdin(process::Stdio::null())
+        .stdout(process::Stdio::null())
+        .stderr(process::Stdio::from(log_file));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let _child = command.spawn().context("spawn native daemon")?;
+
+    let deadline = Instant::now() + DAEMON_START_TIMEOUT;
+    let mut delay = Duration::from_millis(25);
+    loop {
+        if let Ok(stream) = tokio::net::UnixStream::connect(&socket_path).await {
+            return Ok(stream);
+        }
+        if Instant::now() >= deadline {
+            return Err(anyhow!(
+                "native daemon did not become ready within {}s; log: {}",
+                DAEMON_START_TIMEOUT.as_secs(),
+                log_path.display()
+            ));
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(Duration::from_millis(500));
+    }
+}
+
+async fn daemon_handshake(stream: &mut tokio::net::UnixStream) -> Result<()> {
+    let id = format!(
+        "native-handshake-{}",
+        NEXT_DAEMON_RPC_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    write_message(
+        stream,
+        &ClientMessage::Handshake {
+            id,
+            version: PROTOCOL_VERSION,
+            client: "mindcode-native-tui".to_owned(),
+            capabilities: vec!["session".to_owned(), "reload".to_owned()],
+        },
+    )
+    .await
+    .context("write daemon session handshake")?;
+    match read_message::<_, ServerMessage>(stream)
+        .await
+        .context("read daemon session handshake")?
+    {
+        Some(ServerMessage::HandshakeAck { accepted: true, .. }) => Ok(()),
+        Some(ServerMessage::HandshakeAck {
+            accepted: false,
+            error,
+            ..
+        }) => Err(anyhow!(
+            "daemon session handshake rejected: {}",
+            error
+                .map(|error| error.message)
+                .unwrap_or_else(|| "unknown error".to_owned())
+        )),
+        Some(other) => Err(anyhow!("unexpected daemon handshake response: {other:?}")),
+        None => Err(anyhow!("daemon closed during session handshake")),
+    }
+}
+
+async fn daemon_request(
+    stream: &mut tokio::net::UnixStream,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
+    let id = format!(
+        "native-rpc-{}",
+        NEXT_DAEMON_RPC_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    write_message(
+        stream,
+        &ClientMessage::Request {
+            id,
+            method: method.to_owned(),
+            params: Some(params),
+            stream: false,
+        },
+    )
+    .await
+    .with_context(|| format!("write daemon request {method}"))?;
+    match read_message::<_, ServerMessage>(stream)
+        .await
+        .with_context(|| format!("read daemon response {method}"))?
+    {
+        Some(ServerMessage::Response {
+            ok: true,
+            result: Some(value),
+            ..
+        }) => Ok(value),
+        Some(ServerMessage::Response {
+            ok: true,
+            result: None,
+            ..
+        }) => Ok(Value::Null),
+        Some(ServerMessage::Response {
+            ok: false,
+            error: Some(error),
+            ..
+        }) => Err(anyhow!(
+            "daemon {method} failed [{}]: {}",
+            error.code,
+            error.message
+        )),
+        Some(other) => Err(anyhow!(
+            "unexpected daemon response for {method}: {other:?}"
+        )),
+        None => Err(anyhow!("daemon closed while handling {method}")),
+    }
+}
+
+async fn locked_daemon_request(
+    stream: &Arc<AsyncMutex<tokio::net::UnixStream>>,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
+    let mut stream = stream.lock().await;
+    daemon_request(&mut stream, method, params).await
+}
+
+struct DaemonSessionLease {
+    connection: Arc<AsyncMutex<tokio::net::UnixStream>>,
+    session_id: String,
+    lease_id: String,
+    heartbeat: tokio::task::JoinHandle<()>,
+}
+
+impl DaemonSessionLease {
+    async fn open(session_id: &str) -> Result<Self> {
+        let mut stream = connect_or_spawn_daemon().await?;
+        daemon_handshake(&mut stream).await?;
+        let connection = Arc::new(AsyncMutex::new(stream));
+        let connection_id = format!(
+            "tui-{}-{}",
+            process::id(),
+            NEXT_DAEMON_CONNECTION_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        let project_path = env::current_dir()
+            .map_err(anyhow::Error::msg)?
+            .to_string_lossy()
+            .into_owned();
+        let transcript_path = session_path(session_id)?.to_string_lossy().into_owned();
+        let size_bytes = fs::metadata(&transcript_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let result = locked_daemon_request(
+            &connection,
+            "session.open",
+            json!({
+                "session_id": session_id,
+                "connection_id": connection_id,
+                "project_path": project_path,
+                "transcript_path": transcript_path,
+                "size_bytes": size_bytes,
+            }),
+        )
+        .await?;
+        let lease_id = result["session"]["lease_id"]
+            .as_str()
+            .ok_or_else(|| anyhow!("daemon session.open returned no lease"))?
+            .to_owned();
+        let heartbeat_connection = Arc::clone(&connection);
+        let heartbeat_session = session_id.to_owned();
+        let heartbeat_lease = lease_id.clone();
+        let heartbeat = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(DAEMON_HEARTBEAT_INTERVAL);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if locked_daemon_request(
+                    &heartbeat_connection,
+                    "session.touch",
+                    json!({
+                        "session_id": heartbeat_session,
+                        "lease_id": heartbeat_lease,
+                    }),
+                )
+                .await
+                .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Ok(Self {
+            connection,
+            session_id: session_id.to_owned(),
+            lease_id,
+            heartbeat,
+        })
+    }
+
+    async fn close(self) {
+        self.heartbeat.abort();
+        let _ = self.heartbeat.await;
+        let _ = locked_daemon_request(
+            &self.connection,
+            "session.close",
+            json!({
+                "session_id": self.session_id,
+                "lease_id": self.lease_id,
+            }),
+        )
+        .await;
+    }
+}
+
 /// Map the persisted profiles to a secret-free provider snapshot: the
 /// credential is represented only by its reference kind, never its value, and
 /// the selectable model ids are metadata only.
@@ -1494,37 +1751,48 @@ async fn run_tui(arguments: Vec<OsString>) -> Result<i32> {
         return stop_session_host(&session_id);
     }
 
-    // §13.2: internal entry point for the detached background host. It owns
-    // the control server, worker pool, and conversation; it never detaches
-    // again and never runs the renderer.
-    if args.detach_host {
-        write_host_pidfile(&session_id, process::id())?;
+    // Register the logical session with the central long-lived daemon before
+    // choosing the legacy per-session TUI host. The lease is kept alive while
+    // the renderer is attached, so reconnects and detached workers share one
+    // durable session identity without breaking the compatibility host path.
+    let daemon_session = DaemonSessionLease::open(&session_id).await?;
+    let outcome = async {
+        // §13.2: internal entry point for the detached background host. It owns
+        // the control server, worker pool, and conversation; it never detaches
+        // again and never runs the renderer.
+        if args.detach_host {
+            write_host_pidfile(&session_id, process::id())?;
+            let host =
+                run_tui_host_session(session_id.clone(), allow_unsafe_shell, allow_network).await?;
+            let outcome = host.await_shutdown().await;
+            let _ = remove_host_pidfile(&session_id);
+            return outcome.map(|()| 0);
+        }
+
+        // §13.2: host the session in a detached daemon, then attach. If a host
+        // is already live, attach to it instead of spawning a second one.
+        if args.detach {
+            if !session_host_alive(&socket_path).await {
+                let pid =
+                    spawn_detached_host(&session_id, allow_unsafe_shell, allow_network).await?;
+                println!("detached session host: pid {pid}");
+            }
+            return run_tui_client(&session_id, socket_path).await;
+        }
+
+        // Default: attach to a live detached host when one exists; otherwise
+        // run the host and client in-process (the pre-§13.2 behavior).
+        if session_host_alive(&socket_path).await {
+            return run_tui_client(&session_id, socket_path).await;
+        }
         let host =
             run_tui_host_session(session_id.clone(), allow_unsafe_shell, allow_network).await?;
-        let outcome = host.await_shutdown().await;
-        let _ = remove_host_pidfile(&session_id);
-        return outcome.map(|()| 0);
+        let outcome = run_tui_client(&session_id, socket_path).await;
+        host.shutdown().await;
+        outcome
     }
-
-    // §13.2: host the session in a detached daemon, then attach. If a host is
-    // already live, attach to it instead of spawning a second one.
-    if args.detach {
-        if !session_host_alive(&socket_path).await {
-            let pid = spawn_detached_host(&session_id, allow_unsafe_shell, allow_network).await?;
-            println!("detached session host: pid {pid}");
-        }
-        return run_tui_client(&session_id, socket_path).await;
-    }
-
-    // Default: attach to a live detached host when one exists; otherwise run
-    // the host and client in-process (the pre-§13.2 behavior, where workers
-    // live and die with the TUI process).
-    if session_host_alive(&socket_path).await {
-        return run_tui_client(&session_id, socket_path).await;
-    }
-    let host = run_tui_host_session(session_id.clone(), allow_unsafe_shell, allow_network).await?;
-    let outcome = run_tui_client(&session_id, socket_path).await;
-    host.shutdown().await;
+    .await;
+    daemon_session.close().await;
     outcome
 }
 
