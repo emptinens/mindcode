@@ -233,15 +233,29 @@ struct GitCommandOutput {
     truncated: bool,
 }
 
+/// Full argv for a git tool invocation.  Hardening (§10.4.8.2): every git
+/// tool invocation disables repository hooks and fsmonitor before the
+/// subcommand, so a hostile `.git/hooks` or fsmonitor hook can never run from
+/// a read-only query.  `env` is additionally cleared to the safe allowlist by
+/// `process_run`.
+fn git_argv(args: &[String]) -> Vec<String> {
+    let mut argv = Vec::with_capacity(args.len() + 5);
+    argv.push("git".to_owned());
+    argv.push("-c".to_owned());
+    argv.push("core.hooksPath=/dev/null".to_owned());
+    argv.push("-c".to_owned());
+    argv.push("core.fsmonitor=false".to_owned());
+    argv.extend(args.iter().cloned());
+    argv
+}
+
 async fn git_command(
     cwd: &Path,
     args: Vec<String>,
     max_output_bytes: usize,
     cancellation: CancellationToken,
 ) -> CoreToolResult<GitCommandOutput> {
-    let mut argv = Vec::with_capacity(args.len() + 1);
-    argv.push("git".to_owned());
-    argv.extend(args);
+    let argv = git_argv(&args);
     let result = process_run(
         ProcessRunRequest {
             argv,
@@ -492,7 +506,29 @@ fn path_bytes_len(path: &Path) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_status;
+    use super::{git_argv, parse_status};
+
+    #[test]
+    fn git_argv_disables_hooks_and_fsmonitor_before_the_subcommand() {
+        let argv = git_argv(&[
+            "--no-optional-locks".to_owned(),
+            "status".to_owned(),
+            "--porcelain=v2".to_owned(),
+        ]);
+        assert_eq!(argv[0], "git");
+        assert_eq!(
+            &argv[1..5],
+            &[
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false"
+            ]
+        );
+        // The hardening flags precede the subcommand, as git requires.
+        assert_eq!(argv[5], "--no-optional-locks");
+        assert_eq!(argv[6], "status");
+    }
 
     #[test]
     fn preserves_exact_xy_codes_for_all_tracked_change_kinds() {
