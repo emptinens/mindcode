@@ -38,6 +38,9 @@ pub struct WorkerUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cached_tokens: u64,
+    /// Number of provider API turns attributed to this worker.
+    #[serde(default)]
+    pub requests: u64,
     pub cost: f64,
     /// Whether every settled model turn reported usage sufficient to estimate
     /// cost. False is rendered as unknown, never as a fabricated zero.
@@ -111,6 +114,7 @@ mod tests {
                 input_tokens: 120,
                 output_tokens: 30,
                 cached_tokens: 90,
+                requests: 2,
                 cost: 0.0002,
                 cost_known: true,
             },

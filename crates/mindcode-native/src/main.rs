@@ -55,7 +55,7 @@ use std::{
     pin::Pin,
     process,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::Duration,
     time::Instant,
 };
@@ -75,6 +75,15 @@ const STREAM_REPUBLISH_INTERVAL: Duration = Duration::from_millis(120);
 /// the provider response.  The base is 200K always; a settings override may
 /// raise or lower it.
 const CONTEXT_TOKEN_BUDGET: usize = 200_000;
+static PROCESS_STARTED_AT: OnceLock<Instant> = OnceLock::new();
+
+fn process_boot_ms() -> u64 {
+    PROCESS_STARTED_AT
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -458,6 +467,7 @@ struct DaemonArgs {
 
 #[tokio::main]
 async fn main() {
+    PROCESS_STARTED_AT.get_or_init(Instant::now);
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
     let code = match dispatch(arguments).await {
         Ok(code) => code,
@@ -1181,6 +1191,28 @@ fn credential_state(provider: &ProviderConfig) -> CredState {
     }
 }
 
+/// Read process memory without a provider call or a platform-specific
+/// dependency. Linux exposes both VmRSS and proportional set size (PSS); the
+/// latter is the metric used for the per-session baseline in §5.6.2.
+#[cfg(target_os = "linux")]
+fn process_memory_metrics() -> Option<(u64, u64)> {
+    fn value_kb(path: &str, key: &str) -> Option<u64> {
+        let raw = fs::read_to_string(path).ok()?;
+        raw.lines()
+            .find_map(|line| line.strip_prefix(key))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())
+    }
+    let rss = value_kb("/proc/self/status", "VmRSS:")?;
+    let pss = value_kb("/proc/self/smaps_rollup", "Pss:").unwrap_or(0);
+    Some((rss, pss))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_memory_metrics() -> Option<(u64, u64)> {
+    None
+}
+
 /// Secret-free `/status` transcript line (§12.3): session usage, cost, and the
 /// active provider's credential source + context budget. No credential value.
 fn status_line(stats: &SessionStats) -> String {
@@ -1194,11 +1226,28 @@ fn status_line(stats: &SessionStats) -> String {
         .and_then(|settings| settings.context_token_budget)
         .map(|budget| budget.to_string())
         .unwrap_or_else(|| "200000".to_owned());
+    let total_tokens = stats
+        .input_tokens
+        .saturating_add(stats.output_tokens)
+        .saturating_add(stats.cached_tokens);
+    let ram = if stats.ram_rss_kb > 0 || stats.ram_pss_kb > 0 {
+        format!(
+            "ram: {} KiB RSS · {} KiB PSS",
+            stats.ram_rss_kb, stats.ram_pss_kb
+        )
+    } else {
+        "ram: unavailable".to_owned()
+    };
     let mut lines = vec![
         format!(
-            "session: {} in · {} out tokens",
-            stats.input_tokens, stats.output_tokens
+            "session: {} in · {} out · {} cached tokens ({} total)",
+            stats.input_tokens, stats.output_tokens, stats.cached_tokens, total_tokens
         ),
+        format!(
+            "requests: {} · boot: {} ms",
+            stats.api_requests, stats.boot_ms
+        ),
+        ram,
         if stats.cost_is_known() {
             format!("cost: ${:.4} (saved ${:.4})", stats.cost, stats.savings)
         } else {
@@ -1748,7 +1797,11 @@ async fn run_tui_host_session(
     // an empty conversation falls back to the start hint.  Token/cost
     // counters resume too (§10.3) and are shared between the processor and
     // the mid-stream republish closure.
-    let (mut transcript, loaded_stats) = load_session(&session_id);
+    let (mut transcript, mut loaded_stats) = load_session(&session_id);
+    if loaded_stats.boot_ms == 0 {
+        loaded_stats.boot_ms = process_boot_ms();
+    }
+    loaded_stats.refresh_runtime_metrics();
     let mut memory = load_memory_store();
     let stats = Arc::new(std::sync::Mutex::new(loaded_stats));
     let initial_stats = *stats.lock().unwrap();
@@ -1803,7 +1856,11 @@ async fn run_tui_host_session(
                         // `/status` shows session usage + provider credential
                         // status (§12.3); handled here for access to the stats.
                         if let Some(("status", _)) = slash_command(&text) {
-                            let current = *processor_stats.lock().unwrap();
+                            let current = {
+                                let mut stats = processor_stats.lock().unwrap();
+                                stats.refresh_runtime_metrics();
+                                *stats
+                            };
                             let sandbox = sandbox_status_line(allow_unsafe_shell, allow_network);
                             transcript.push(
                                 "system",
@@ -1814,6 +1871,7 @@ async fn run_tui_host_session(
                             let _ = processor_server
                                 .publish(&tui_snapshot(&transcript.entries, current, &permissions))
                                 .await;
+                            let _ = save_session(&processor_session_id, &transcript, current);
                             continue;
                         }
                         // `/debug-visual` dumps the current transcript as a
@@ -2118,6 +2176,8 @@ fn tui_snapshot(
     input.telemetry.last_cost = stats.last_cost_known.then_some(stats.last_cost);
     input.telemetry.last_savings = stats.last_cost_known.then_some(stats.last_savings);
     input.telemetry.savings = Some(stats.savings);
+    input.telemetry.cached_tokens = Some(stats.cached_tokens);
+    input.telemetry.api_requests = Some(stats.api_requests);
     input.permissions = permissions.to_vec();
     input
 }
@@ -2385,10 +2445,15 @@ fn save_session(
         "usage": {
             "input_tokens": stats.input_tokens,
             "output_tokens": stats.output_tokens,
+            "cached_tokens": stats.cached_tokens,
+            "api_requests": stats.api_requests,
             "cost": if stats.cost_is_known() { json!(stats.cost) } else { Value::Null },
             "cost_unknown": stats.cost_unknown,
             "has_attempts": stats.has_attempts,
             "savings": stats.savings,
+            "boot_ms": stats.boot_ms,
+            "ram_rss_kb": stats.ram_rss_kb,
+            "ram_pss_kb": stats.ram_pss_kb,
         },
     });
     fs::write(&path, serde_json::to_vec_pretty(&value)?)?;
@@ -2457,6 +2522,14 @@ fn load_session(session_id: &str) -> (TuiTranscript, SessionStats) {
             .get("output_tokens")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
+        stats.cached_tokens = usage
+            .get("cached_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        stats.api_requests = usage
+            .get("api_requests")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
         stats.cost = usage
             .get("cost")
             .and_then(serde_json::Value::as_f64)
@@ -2480,6 +2553,18 @@ fn load_session(session_id: &str) -> (TuiTranscript, SessionStats) {
             .get("savings")
             .and_then(serde_json::Value::as_f64)
             .unwrap_or(0.0);
+        stats.boot_ms = usage
+            .get("boot_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        stats.ram_rss_kb = usage
+            .get("ram_rss_kb")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        stats.ram_pss_kb = usage
+            .get("ram_pss_kb")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
     }
     // Replay dialog turns and worker reports in transcript order. Files from
     // before §13.2 carry no `sequence` and fall back to document order (0).
@@ -3434,6 +3519,8 @@ struct ChatOutcome {
 struct SessionStats {
     input_tokens: u64,
     output_tokens: u64,
+    cached_tokens: u64,
+    api_requests: u64,
     cost: f64,
     savings: f64,
     last_input_tokens: u64,
@@ -3443,6 +3530,11 @@ struct SessionStats {
     has_attempts: bool,
     cost_unknown: bool,
     last_cost_known: bool,
+    /// Time from process start until this host's first snapshot was ready.
+    boot_ms: u64,
+    /// Last observed process memory, persisted as a numeric session metric.
+    ram_rss_kb: u64,
+    ram_pss_kb: u64,
 }
 
 impl SessionStats {
@@ -3452,6 +3544,13 @@ impl SessionStats {
         self.output_tokens = self
             .output_tokens
             .saturating_add(outcome.usage.output_tokens);
+        self.api_requests = self.api_requests.saturating_add(1);
+        self.cached_tokens = self.cached_tokens.saturating_add(
+            outcome
+                .usage
+                .cached_read_tokens
+                .saturating_add(outcome.usage.cache_creation_tokens),
+        );
         match estimate_turn_cost(outcome) {
             Some((turn_cost, turn_savings)) => {
                 self.cost += turn_cost;
@@ -3475,6 +3574,13 @@ impl SessionStats {
         self.has_attempts && !self.cost_unknown
     }
 
+    fn refresh_runtime_metrics(&mut self) {
+        if let Some((rss_kb, pss_kb)) = process_memory_metrics() {
+            self.ram_rss_kb = rss_kb;
+            self.ram_pss_kb = pss_kb;
+        }
+    }
+
     /// Fold one finished worker's usage into the running session counters
     /// (§10.4.7).  The worker's `cost` is already cache-aware, so it is added
     /// verbatim; per-worker savings are not tracked in this release.
@@ -3482,6 +3588,8 @@ impl SessionStats {
         self.has_attempts = true;
         self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
+        self.cached_tokens = self.cached_tokens.saturating_add(usage.cached_tokens);
+        self.api_requests = self.api_requests.saturating_add(usage.requests);
         if usage.cost_known {
             self.cost += usage.cost;
             self.last_cost = usage.cost;
@@ -5439,6 +5547,8 @@ mod tests {
             assert!(stats.savings > 0.0);
             assert_eq!(stats.last_input_tokens, 10);
             assert_eq!(stats.last_output_tokens, 4);
+            assert_eq!(stats.cached_tokens, 6);
+            assert_eq!(stats.api_requests, 1);
             assert_eq!(stats.last_savings, stats.savings);
 
             save_session("usage", &transcript, stats).unwrap();
@@ -5477,6 +5587,27 @@ mod tests {
             assert_eq!(loaded.attempts[0].model, "deepseek-v4-flash");
             assert_eq!(loaded.attempts[0].cost, None);
         });
+    }
+
+    #[test]
+    fn status_line_exposes_cost_tokens_ram_and_boot_metrics() {
+        let stats = SessionStats {
+            input_tokens: 12,
+            output_tokens: 8,
+            cached_tokens: 4,
+            api_requests: 2,
+            boot_ms: 17,
+            ram_rss_kb: 128,
+            ram_pss_kb: 96,
+            has_attempts: true,
+            cost: 0.25,
+            ..Default::default()
+        };
+        let text = status_line(&stats);
+        assert!(text.contains("12 in · 8 out · 4 cached tokens (24 total)"));
+        assert!(text.contains("requests: 2 · boot: 17 ms"));
+        assert!(text.contains("ram: 128 KiB RSS · 96 KiB PSS"));
+        assert!(text.contains("cost: $0.2500"));
     }
 
     #[test]
@@ -6628,6 +6759,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 cached_tokens: 0,
+                requests: 1,
                 cost: 0.25,
                 cost_known: true,
             },

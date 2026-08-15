@@ -378,6 +378,7 @@ impl WorkerAgent {
             };
             saw_turn = true;
             cost_known &= turn.cost_known;
+            report.usage.requests = report.usage.requests.saturating_add(1);
             report.usage.input_tokens += turn.usage.input_tokens;
             report.usage.output_tokens += turn.usage.output_tokens;
             report.usage.cached_tokens += turn.usage.cached_read_tokens;
