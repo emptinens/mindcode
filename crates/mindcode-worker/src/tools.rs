@@ -11,6 +11,7 @@ use mindcode_core_tools::{
     SandboxConfig,
 };
 use std::path::{Component, Path, PathBuf};
+use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
 const MAX_FILE_BYTES: usize = 1024 * 1024;
@@ -282,13 +283,22 @@ pub async fn read_file(
             target.display()
         )));
     }
-    let bytes = tokio::fs::read(&target)
+    // Read only one byte past the cap so an untrusted file cannot force an
+    // unbounded allocation. Redact the bounded raw text before exposing it to
+    // the model; this is deliberately before the result is marked/truncated.
+    let file = tokio::fs::File::open(&target)
+        .await
+        .map_err(|_| WorkerError::Io(format!("cannot read: {}", target.display())))?;
+    let mut bytes = Vec::with_capacity(MAX_FILE_BYTES + 1);
+    file.take((MAX_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
         .await
         .map_err(|_| WorkerError::Io(format!("cannot read: {}", target.display())))?;
     let truncated = bytes.len() > MAX_FILE_BYTES;
-    let kept = &bytes[..bytes.len().min(MAX_FILE_BYTES)];
+    bytes.truncate(MAX_FILE_BYTES);
+    let raw = String::from_utf8_lossy(&bytes);
     Ok(FileReadResult {
-        content: String::from_utf8_lossy(kept).into_owned(),
+        content: redact_secrets(&raw),
         truncated,
     })
 }

@@ -154,6 +154,29 @@ async fn shell_prompts_in_ask_everything() {
 }
 
 #[tokio::test]
+async fn read_file_redacts_credentials_before_reaching_the_caller() {
+    let fixture = Fixture::new(PermissionTier::Workspace);
+    std::fs::create_dir(fixture.root().join("src")).unwrap();
+    std::fs::write(
+        fixture.root().join("src/notes.md"),
+        "VEXZY_API_KEY=forge-read-file-secret-12345\nplain text\n",
+    )
+    .unwrap();
+
+    let result = read_file(
+        &fixture.scope,
+        &fixture.guard,
+        Path::new("src/notes.md"),
+        &cancel(),
+    )
+    .await
+    .unwrap();
+    assert!(result.content.contains("[redacted]"));
+    assert!(!result.content.contains("forge-read-file-secret-12345"));
+    assert!(result.content.contains("plain text"));
+}
+
+#[tokio::test]
 async fn shell_output_is_redacted_before_reaching_the_caller() {
     // §13.1: a worker can echo an in-workspace secret back out; the output
     // boundary must scrub it before it reaches the model transcript.
