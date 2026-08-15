@@ -21,7 +21,7 @@ pub mod tools;
 pub use agent::{
     default_tool_defs, AllowAllGate, ApprovalDecision, ApprovalGate, ApprovalRequest,
     DecisionFuture, DenyAllGate, ModelClient, ModelTurn, ResolvedToolCall, WorkerAgent,
-    DEFAULT_MAX_ITERATIONS,
+    DEFAULT_MAX_ITERATIONS, DEFAULT_WORKER_CONTEXT_TOKEN_BUDGET,
 };
 pub use error::{WorkerError, WorkerResult};
 pub use guard::{OwnershipGuard, ToolAccess};

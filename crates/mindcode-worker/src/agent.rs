@@ -14,8 +14,9 @@ use mindcode_core_tools::{NetworkPolicy, ProcessRunResult};
 use mindcode_transport::{ChatMessage, ChatUsage, ToolCall, ToolCallFunction, ToolSpec};
 use serde_json::Value;
 use std::collections::HashSet;
+use std::fs;
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -81,7 +82,8 @@ pub struct ModelTurn {
 }
 
 /// The protocol-agnostic model client the loop drives. Implemented over the
-/// real [`mindcode_transport::Transport`] in the native binary; mocked in tests.
+/// real [`mindcode_transport::Transport`] in the native binary; mocked in
+/// tests.
 pub trait ModelClient: Send + Sync {
     fn turn(
         &self,
@@ -147,6 +149,10 @@ fn approval_cache_key(tool_name: &str, target: &str) -> String {
 }
 
 pub const DEFAULT_MAX_ITERATIONS: usize = 52;
+/// Worker-side ToFu-lite budget: externalize tool/search output before this
+/// many estimated tokens, while never trimming `read_file` source content.
+pub const DEFAULT_WORKER_CONTEXT_TOKEN_BUDGET: usize = 120_000;
+const TOOL_OUTPUT_PREVIEW_CHARS: usize = 2_048;
 
 const DEFAULT_WORKER_SYSTEM_PROMPT: &str = "\
 You are a MindCode worker agent. Complete the task by calling the available \
@@ -263,6 +269,9 @@ pub struct WorkerAgent {
     system_prompt: String,
     max_iterations: usize,
     approval_cache_ttl: Duration,
+    context_token_budget: usize,
+    tool_output_dir: Option<PathBuf>,
+    tool_output_sequence: Mutex<u64>,
 }
 
 impl WorkerAgent {
@@ -288,6 +297,9 @@ impl WorkerAgent {
             system_prompt: DEFAULT_WORKER_SYSTEM_PROMPT.to_owned(),
             max_iterations: DEFAULT_MAX_ITERATIONS,
             approval_cache_ttl: DEFAULT_APPROVAL_CACHE_TTL,
+            context_token_budget: DEFAULT_WORKER_CONTEXT_TOKEN_BUDGET,
+            tool_output_dir: None,
+            tool_output_sequence: Mutex::new(0),
         }
     }
 
@@ -310,6 +322,19 @@ impl WorkerAgent {
     /// accepted for deterministic tests and means approvals are never reused.
     pub fn with_approval_ttl(mut self, ttl: Duration) -> Self {
         self.approval_cache_ttl = ttl;
+        self
+    }
+
+    /// Configure the approximate worker context budget used by ToFu-lite.
+    pub fn with_context_token_budget(mut self, budget: usize) -> Self {
+        self.context_token_budget = budget.max(1);
+        self
+    }
+
+    /// Store recoverable, redacted tool output in a session artifact directory
+    /// when ToFu-lite externalizes a large command/search result.
+    pub fn with_tool_output_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.tool_output_dir = Some(path.into());
         self
     }
 
@@ -364,6 +389,10 @@ impl WorkerAgent {
                 report.status = WorkerStatus::Cancelled;
                 break;
             }
+            // ToFu-lite runs before every provider call. It externalizes only
+            // command/search/test output; source reads remain intact because
+            // re-reading source costs more than keeping it in the prefix.
+            self.compact_tool_messages(&mut messages, &mut report);
             let turn = match self
                 .client
                 .turn(&messages, &self.tools, cancel.clone())
@@ -749,6 +778,76 @@ impl WorkerAgent {
         }
     }
 
+    /// Externalize the oldest eligible tool results until the estimated worker
+    /// context is back under budget. This intentionally leaves `read_file`
+    /// results untouched: source is recoverable through the repository and
+    /// trimming it would force an expensive re-read.
+    fn compact_tool_messages(&self, messages: &mut [ChatMessage], report: &mut WorkerReport) {
+        let mut estimated = messages
+            .iter()
+            .map(|message| estimate_context_tokens(&message.content))
+            .sum::<usize>();
+        if estimated <= self.context_token_budget {
+            return;
+        }
+        for message in messages.iter_mut() {
+            if estimated <= self.context_token_budget || message.role != "tool" {
+                continue;
+            }
+            let Some(source) = tool_output_source(&message.content).map(str::to_owned) else {
+                continue;
+            };
+            if !matches!(
+                source.as_str(),
+                "run_shell" | "run_tests" | "git" | "rg" | "agentgrep"
+            ) || message.content.contains("[ToFu-lite:")
+            {
+                continue;
+            }
+            let old_tokens = estimate_context_tokens(&message.content);
+            let preview = preview_tool_output(&message.content);
+            let artifact = self.externalize_tool_output(&source, &message.content);
+            let artifact_line = artifact.as_deref().map_or(
+                "full output could not be persisted; this preview is the only retained view",
+                |name| name,
+            );
+            let replacement = format!(
+                "<tool_output source=\"{source}\">\n[ToFu-lite: full output externalized as {artifact_line}; preview follows]\n{preview}\n</tool_output>"
+            );
+            let new_tokens = estimate_context_tokens(&replacement);
+            message.content = replacement;
+            estimated = estimated
+                .saturating_sub(old_tokens)
+                .saturating_add(new_tokens);
+            report
+                .findings
+                .push(format!("externalized {source} output as {artifact_line}"));
+        }
+    }
+
+    fn externalize_tool_output(&self, source: &str, content: &str) -> Option<String> {
+        let directory = self.tool_output_dir.as_ref()?;
+        fs::create_dir_all(directory).ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).ok()?;
+        }
+        let mut sequence = self.tool_output_sequence.lock().ok()?;
+        let filename = format!("{:06}-{}.txt", *sequence, safe_artifact_component(source));
+        *sequence = sequence.saturating_add(1);
+        let path = directory.join(&filename);
+        let temporary = directory.join(format!(".{filename}.tmp"));
+        fs::write(&temporary, content).ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600)).ok()?;
+        }
+        fs::rename(temporary, path).ok()?;
+        Some(filename)
+    }
+
     /// Decide a file-path action against the real tier; on `NeedsApproval`,
     /// consult the gate (cached by tool name via `approval_cache`).
     async fn authorize_file(
@@ -869,6 +968,44 @@ fn delimit_tool_output(tool: &str, result: &str) -> String {
     format!("<tool_output source=\"{source}\">\n{safe}\n</tool_output>")
 }
 
+fn estimate_context_tokens(text: &str) -> usize {
+    text.chars().count().div_ceil(4)
+}
+
+fn tool_output_source(content: &str) -> Option<&str> {
+    let prefix = "<tool_output source=\"";
+    let rest = content.strip_prefix(prefix)?;
+    let end = rest.find("\">")?;
+    let source = &rest[..end];
+    (!source.is_empty()).then_some(source)
+}
+
+fn preview_tool_output(content: &str) -> String {
+    let mut preview: String = content.chars().take(TOOL_OUTPUT_PREVIEW_CHARS).collect();
+    if content.chars().count() > TOOL_OUTPUT_PREVIEW_CHARS {
+        preview.push('…');
+    }
+    preview
+}
+
+fn safe_artifact_component(source: &str) -> String {
+    let value: String = source
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if value.is_empty() {
+        "tool".to_owned()
+    } else {
+        value
+    }
+}
+
 fn arg_path(arguments: &Value) -> WorkerResult<String> {
     arg_string(arguments, "path")
 }
@@ -939,5 +1076,88 @@ fn command_run(argv: &[String], result: &ProcessRunResult) -> CommandRun {
         command: argv.join(" "),
         exit_code: result.exit_code,
         output_len: result.stdout.len() as u64 + result.stderr.len() as u64,
+    }
+}
+
+#[cfg(test)]
+mod tofu_tests {
+    use super::*;
+
+    struct NoopClient;
+
+    impl ModelClient for NoopClient {
+        fn turn(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+            _cancel: CancellationToken,
+        ) -> Pin<Box<dyn Future<Output = WorkerResult<ModelTurn>> + Send>> {
+            Box::pin(async { Err(WorkerError::Cancelled) })
+        }
+    }
+
+    #[test]
+    fn tofu_externalizes_command_output_but_keeps_source_reads() {
+        let workspace = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        let guard = OwnershipGuard::new(
+            workspace.path().to_path_buf(),
+            config.path().to_path_buf(),
+            PermissionTier::Workspace,
+        )
+        .unwrap();
+        let agent = WorkerAgent::new(
+            "tofu",
+            Arc::new(NoopClient),
+            Arc::new(AllowAllGate),
+            WorkerScope::all(),
+            guard,
+        )
+        .with_context_token_budget(10)
+        .with_tool_output_dir(artifacts.path());
+        let long_command = delimit_tool_output("run_shell", &"command-output ".repeat(2_000));
+        let long_source = delimit_tool_output("read_file", &"source-code ".repeat(2_000));
+        let mut messages = vec![
+            ChatMessage {
+                role: "user".into(),
+                content: "task".into(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: long_command.clone(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: long_source.clone(),
+                ..Default::default()
+            },
+        ];
+        let mut report = WorkerReport::default();
+        agent.compact_tool_messages(&mut messages, &mut report);
+
+        assert!(messages[1].content.contains("[ToFu-lite:"));
+        assert!(messages[1].content.contains("preview follows"));
+        assert_eq!(messages[2].content, long_source);
+        assert_eq!(report.findings.len(), 1);
+        let artifact = std::fs::read_dir(artifacts.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(artifact.path()).unwrap(),
+            long_command
+        );
+    }
+
+    #[test]
+    fn tool_output_source_and_artifact_names_are_bounded() {
+        let delimited = delimit_tool_output("run-shell!", "output");
+        assert_eq!(tool_output_source(&delimited), Some("run_shell_"));
+        assert_eq!(safe_artifact_component("run-shell!"), "run_shell_");
+        assert!(preview_tool_output(&"x".repeat(3_000)).ends_with('…'));
     }
 }

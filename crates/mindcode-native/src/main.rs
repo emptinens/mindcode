@@ -38,7 +38,7 @@ use mindcode_worker::{
     bwrap_available, ApprovalDecision, ApprovalGate, ApprovalRequest, DecisionFuture, HookSet,
     ModelClient, ModelTurn, OwnershipGuard, PermissionTier, PoolOutcome, ResolvedToolCall,
     WorkerAgent, WorkerError, WorkerPool, WorkerReport, WorkerResult, WorkerScope, WorkerStatus,
-    WorkerUsage, DEFAULT_MAX_CONCURRENT,
+    WorkerUsage, DEFAULT_MAX_CONCURRENT, DEFAULT_WORKER_CONTEXT_TOKEN_BUDGET,
 };
 use mindcoded::{Daemon, DaemonConfig};
 use serde_json::{json, Value};
@@ -1894,6 +1894,7 @@ async fn run_tui_host_session(
                                 transcript.push("system", "usage: /work <task>");
                             } else {
                                 match spawn_worker(
+                                    &processor_session_id,
                                     task,
                                     tier,
                                     allow_unsafe_shell,
@@ -4183,6 +4184,7 @@ static NEXT_WORKER_ID: AtomicU64 = AtomicU64::new(1);
 /// Returns the transcript confirmation line; the report arrives later through
 /// `worker_event_tx` as [`WorkerEvent::Finished`].
 async fn spawn_worker(
+    session_id: &str,
     task: &str,
     tier: PermissionTier,
     allow_unsafe_shell: bool,
@@ -4212,6 +4214,13 @@ async fn spawn_worker(
         fail_closed: true,
     };
     let guard = OwnershipGuard::new(cwd, config_home, tier).map_err(anyhow::Error::msg)?;
+    let tool_output_dir = sessions_dir()?
+        .join(session_id)
+        .join("worker-outputs")
+        .join(&worker_id);
+    let worker_context_budget = settings
+        .context_token_budget
+        .unwrap_or(DEFAULT_WORKER_CONTEXT_TOKEN_BUDGET);
     let agent = Arc::new(
         WorkerAgent::new(
             worker_id.clone(),
@@ -4222,6 +4231,8 @@ async fn spawn_worker(
         )
         .with_hooks(hooks)
         .with_max_iterations(settings.worker_max_iterations)
+        .with_context_token_budget(worker_context_budget)
+        .with_tool_output_dir(tool_output_dir)
         .with_approval_ttl(Duration::from_secs(settings.approval_cache_ttl_seconds))
         .with_unsafe_shell(allow_unsafe_shell)
         .with_allow_network(allow_network),
