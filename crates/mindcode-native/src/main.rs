@@ -18,6 +18,7 @@ use mindcode_settings::{
 };
 use mindcode_state::{MemoryRecord, MemoryScope, MemoryStore, MemoryType};
 use mindcode_transport::{
+    soft_interrupt::{LoopPoint, SoftInterruptQueue},
     ChatCompletionsRequest, ChatMessage, ChatUsage, MessagesRequest, ToolSpec, Transport,
 };
 use mindcode_tui::debug_visual::{sanitize_frame_text, FrameDump, FrameRecorder};
@@ -53,7 +54,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     process,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::{Arc, Mutex},
     time::Duration,
     time::Instant,
@@ -1712,15 +1713,28 @@ async fn run_tui_host_session(
 
     // The renderer is a dumb client: provider setup actions arrive as input
     // events, this channel hands them to a task that mutates settings and
-    // republishes a fresh snapshot.
+    // republishes a fresh snapshot. Composer submissions typed while a model
+    // turn is streaming are diverted to the soft-interrupt queue so they are
+    // injected only after the provider connection reaches a safe point.
     let (action_tx, mut action_rx) = tokio::sync::mpsc::unbounded_channel::<UiActionInput>();
+    let soft_interrupts = Arc::new(Mutex::new(SoftInterruptQueue::default()));
+    let turn_active = Arc::new(AtomicBool::new(false));
+    let handler_queue = soft_interrupts.clone();
+    let handler_turn_active = turn_active.clone();
+    let handler_action_tx = action_tx.clone();
     let handler: InputHandler = Arc::new(move |message| {
         if let UiMessage::InputEvent {
             event: UiInputEventKind::Action(action),
             ..
         } = message
         {
-            let _ = action_tx.send(action);
+            if action.action == "composer_submit" && handler_turn_active.load(Ordering::Acquire) {
+                if let Some(text) = action.value {
+                    handler_queue.lock().unwrap().push(false, text);
+                }
+            } else {
+                let _ = handler_action_tx.send(action);
+            }
         }
     });
 
@@ -1744,6 +1758,9 @@ async fn run_tui_host_session(
 
     let processor_server = server.clone();
     let processor_session_id = session_id.clone();
+    let processor_action_tx = action_tx.clone();
+    let processor_soft_interrupts = soft_interrupts.clone();
+    let processor_turn_active = turn_active.clone();
     let processor_stats = stats.clone();
     // Shared approval registry: worker agents register a permission request
     // here and the processor loop publishes it + forwards the user's decision.
@@ -1870,6 +1887,7 @@ async fn run_tui_host_session(
                                 }
                             }
                         };
+                        processor_turn_active.store(true, Ordering::Release);
                         let outcome =
                             dispatch_tui_input_streaming_with_memory(
                                 &text,
@@ -1880,6 +1898,22 @@ async fn run_tui_host_session(
                                 &processor_session_id,
                             )
                             .await;
+                        processor_turn_active.store(false, Ordering::Release);
+                        // Point D: the transport stream is quiescent and any
+                        // submissions captured mid-stream can be replayed as
+                        // ordinary composer actions, FIFO with urgent items
+                        // first if that policy is extended later.
+                        let queued = processor_soft_interrupts
+                            .lock()
+                            .unwrap()
+                            .drain(LoopPoint::AllToolsDone);
+                        for queued_text in queued {
+                            let _ = processor_action_tx.send(UiActionInput {
+                                action: "composer_submit".to_owned(),
+                                target: None,
+                                value: Some(queued_text),
+                            });
+                        }
                         match outcome {
                             Ok((true, Some(turn))) => {
                                 processor_stats.lock().unwrap().record(&turn);
