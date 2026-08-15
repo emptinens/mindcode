@@ -12,6 +12,7 @@ pub mod error;
 pub mod guard;
 pub mod hooks;
 pub mod permission;
+pub mod pipeline;
 pub mod pool;
 pub mod report;
 pub mod risk;
@@ -28,6 +29,10 @@ pub use guard::{OwnershipGuard, ToolAccess};
 pub use hooks::{run_pre_tool, HookDecision, HookSet};
 pub use mindcode_core_tools::bwrap_available;
 pub use permission::PermissionTier;
+pub use pipeline::{
+    phase_prompt, run_pipeline, run_pipeline_with_agent, PhaseEvidence, PipelineContext,
+    PipelineError, PipelineExecutor, PipelinePhase, PipelineReport, PipelineState, PIPELINE_PHASES,
+};
 pub use pool::{PoolOutcome, WorkerPool, DEFAULT_MAX_CONCURRENT, MAX_CONCURRENT_CAP};
 pub use report::{CommandRun, TestRun, WorkerReport, WorkerStatus, WorkerUsage};
 pub use risk::{classify, ShellRisk};
