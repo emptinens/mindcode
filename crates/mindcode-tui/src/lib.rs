@@ -2967,6 +2967,7 @@ mod tests {
     use std::fmt::Write as _;
     use std::fs;
     use std::path::PathBuf;
+    use std::time::Instant;
 
     fn snapshot(sequence: u64) -> UiRenderSnapshot {
         use mindcode_protocol::ui::*;
@@ -4184,6 +4185,65 @@ mod tests {
         assert!(content.contains("gpt-5.6-luna"));
         assert!(content.contains("Assistant"));
         assert!(content.contains("hello"));
+    }
+
+    #[test]
+    #[ignore = "manual benchmark; requires explicit owner consent"]
+    fn tui_frame_benchmark_200_turns() {
+        use mindcode_protocol::ui::*;
+
+        let mut synthetic = snapshot(1);
+        synthetic.transcript = (0..400)
+            .map(|index| {
+                UiTranscriptBlock::Markdown(UiMarkdownBlock {
+                    id: format!("turn-{index}"),
+                    sequence: index + 1,
+                    role: if index % 2 == 0 {
+                        "user".into()
+                    } else {
+                        "assistant".into()
+                    },
+                    text: format!(
+                        "Synthetic turn {index}: inspect the patch, preserve boundaries, and report a concise result."
+                    ),
+                    created_at_ms: Some(index + 1),
+                    streaming: false,
+                })
+            })
+            .collect();
+        let app = App {
+            latest_snapshot: Some(synthetic),
+            show_welcome: false,
+            motion: MotionMode::Reduced,
+            ..App::default()
+        };
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let started = Instant::now();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let first_frame_ms = started.elapsed().as_secs_f64() * 1_000.0;
+
+        let mut samples = Vec::with_capacity(100);
+        for _ in 0..100 {
+            let started = Instant::now();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            samples.push(started.elapsed().as_secs_f64() * 1_000.0);
+        }
+        samples.sort_by(f64::total_cmp);
+        let percentile = |level: f64| {
+            let position = (level * samples.len() as f64).ceil() as usize;
+            samples[position.saturating_sub(1).min(samples.len() - 1)]
+        };
+        let p50_ms = percentile(0.50);
+        let p95_ms = percentile(0.95);
+        println!(
+            "TUI_FRAME_BENCH turns=200 first_frame_ms={first_frame_ms:.3} p50_ms={p50_ms:.3} p95_ms={p95_ms:.3}"
+        );
+        assert!(
+            first_frame_ms < 15.0,
+            "first frame {first_frame_ms:.3}ms exceeded 15ms"
+        );
+        assert!(p95_ms < 40.0, "p95 {p95_ms:.3}ms exceeded 40ms");
     }
 
     #[test]
