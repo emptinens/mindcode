@@ -3,9 +3,10 @@
 //! A synchronous gate that runs before every worker tool call. Hooks live in a
 //! global directory (`~/.config/mindcode/hooks`) and a project-local directory
 //! (`.mindcode/hooks`); a project-local script shadows the global one by name.
-//! The contract is exit `0` = allow, exit `2` = block (stderr, capped), and any
-//! other exit / timeout / missing binary = **fail-open** — a broken policy
-//! degrades to "no policy", never to a hard lock-out.
+//! The contract is exit `0` = allow, exit `2` = block (stderr, capped), and
+//! any other exit / timeout / execution failure = **fail-closed** by default.
+//! An explicit observer mode can opt into fail-open behavior, but security
+//! hooks used by workers keep the default hard lock-out.
 //!
 //! Hooks gate worker tools only, never the Leader chat flow, and they receive a
 //! secret-free payload (no credential values ever). `MINDCODE_HOOKS_DISABLED=1`
@@ -30,10 +31,40 @@ pub enum HookDecision {
 
 /// Where to look for hook scripts. `None` means the directory is absent and is
 /// simply skipped.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct HookSet {
     pub global: Option<PathBuf>,
     pub project: Option<PathBuf>,
+    /// Broken/timeout/unexpected hook execution blocks worker tools by
+    /// default. Set false only for an explicitly non-security observer hook.
+    pub fail_closed: bool,
+}
+
+impl Default for HookSet {
+    fn default() -> Self {
+        Self {
+            global: None,
+            project: None,
+            fail_closed: true,
+        }
+    }
+}
+
+impl HookSet {
+    /// Construct a hook set with the security-default fail-closed policy.
+    pub fn new(global: Option<PathBuf>, project: Option<PathBuf>) -> Self {
+        Self {
+            global,
+            project,
+            fail_closed: true,
+        }
+    }
+
+    /// Opt into fail-open behavior for an observer-only hook set.
+    pub fn with_fail_closed(mut self, fail_closed: bool) -> Self {
+        self.fail_closed = fail_closed;
+        self
+    }
 }
 
 impl HookSet {
@@ -88,8 +119,23 @@ pub async fn run_pre_tool(
             };
             HookDecision::Block(reason)
         }
-        // Missing binary, unexpected exit, timeout, exec failure: fail-open.
-        _ => HookDecision::Allow,
+        // Missing binary, unexpected exit, timeout, exec failure: the
+        // security-default is fail-closed. An absent hook path was handled
+        // above and remains an intentional "no policy" allow.
+        Ok(result) => {
+            if hooks.fail_closed {
+                HookDecision::Block(format!(
+                    "pre_tool hook failed closed (exit {:?})",
+                    result.exit_code
+                ))
+            } else {
+                HookDecision::Allow
+            }
+        }
+        Err(_) if hooks.fail_closed => {
+            HookDecision::Block("pre_tool hook failed closed".to_owned())
+        }
+        Err(_) => HookDecision::Allow,
     }
 }
 
@@ -130,6 +176,7 @@ mod tests {
         let hooks = HookSet {
             global: Some(tmp.path().to_path_buf()),
             project: None,
+            fail_closed: true,
         };
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let decision = runtime.block_on(run_pre_tool(
@@ -154,6 +201,35 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn unexpected_hook_exit_fails_closed_by_default() {
+        let tmp = tempdir().unwrap();
+        write_hook(tmp.path(), "pre_tool", "#!/bin/sh\nexit 3\n");
+        let hooks = HookSet::new(Some(tmp.path().to_path_buf()), None);
+        let decision = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(run_pre_tool(
+                &hooks,
+                &serde_json::json!({"tool": "run_shell"}),
+                &CancellationToken::new(),
+            ));
+        assert_eq!(
+            decision,
+            HookDecision::Block("pre_tool hook failed closed (exit Some(3))".to_owned())
+        );
+
+        let permissive = hooks.with_fail_closed(false);
+        let decision = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(run_pre_tool(
+                &permissive,
+                &serde_json::json!({"tool": "run_shell"}),
+                &CancellationToken::new(),
+            ));
+        assert_eq!(decision, HookDecision::Allow);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn project_local_hook_shadows_global() {
         let tmp = tempdir().unwrap();
         let global = tmp.path().join("global");
@@ -165,6 +241,7 @@ mod tests {
         let hooks = HookSet {
             global: Some(global),
             project: Some(project),
+            fail_closed: true,
         };
         let decision = tokio::runtime::Runtime::new()
             .unwrap()

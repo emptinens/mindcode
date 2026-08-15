@@ -2606,6 +2606,7 @@ async fn chat_tui_turn(
 /// text is truncated if it alone exceeds the budget); older turns are
 /// hard-dropped, never summarized (§10.1).  System/UI lines are never part
 /// of the conversation.
+#[cfg(test)]
 fn conversation_messages(entries: &[TranscriptInput], budget: usize) -> Vec<ChatMessage> {
     conversation_messages_with_truncation(entries, budget).0
 }
@@ -3657,6 +3658,7 @@ async fn spawn_worker(
     let hooks = HookSet {
         global: Some(config_home.join("hooks")),
         project: Some(cwd.join(".mindcode").join("hooks")),
+        fail_closed: true,
     };
     let guard = OwnershipGuard::new(cwd, config_home, tier).map_err(anyhow::Error::msg)?;
     let agent = Arc::new(
