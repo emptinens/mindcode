@@ -84,7 +84,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     (length(policy_digest) = 64 AND policy_digest NOT GLOB '*[^0-9a-f]*')
   ),
   report_id TEXT,
-  verification TEXT
+  verification TEXT,
+  ledger TEXT
 );
 CREATE INDEX IF NOT EXISTS tasks_status_idx ON tasks(status);
 CREATE INDEX IF NOT EXISTS tasks_owner_idx ON tasks(owner);
@@ -275,6 +276,9 @@ pub struct TaskRecord {
     /// close once this artifact is structurally honest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<VerifyArtifact>,
+    /// Honest cost/usage ledger for this step (§6.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger: Option<TaskStepLedger>,
 }
 
 fn deserialize_optional_nullable_digest<'de, D>(
@@ -319,6 +323,9 @@ pub struct TaskInput {
     /// Verify evidence attached to a step (§6.5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<VerifyArtifact>,
+    /// Honest cost/usage ledger for a step (§6.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger: Option<TaskStepLedger>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -423,6 +430,17 @@ pub struct DagValidationReport {
     pub nodes: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// Honest cost/usage ledger for one task step (§6.3). `cost: null` is
+/// intentional when provider usage was absent; it is never fabricated as `0`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskStepLedger {
+    pub phase: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
+    pub cost: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -938,6 +956,7 @@ impl TaskGraph {
                 report_id: current.report_id.clone(),
                 idempotency_key: None,
                 verification: current.verification.clone(),
+                ledger: current.ledger.clone(),
             })
             .map_err(|error| StateError::InvalidTask(error.to_string()))?;
             let merged_object = merged
@@ -1089,6 +1108,7 @@ impl TaskGraph {
             "policy_digest",
             "report_id",
             "verification",
+            "ledger",
         ];
         if !mutable.iter().any(|key| object.contains_key(*key)) {
             return Ok(current);
@@ -1181,6 +1201,17 @@ impl TaskGraph {
         } else {
             current.verification.clone()
         };
+        let next_ledger = if let Some(value) = object.get("ledger") {
+            if value.is_null() {
+                None
+            } else {
+                Some(serde_json::from_value(value.clone()).map_err(|error| {
+                    StateError::InvalidTask(format!("invalid ledger patch: {error}"))
+                })?)
+            }
+        } else {
+            current.ledger.clone()
+        };
         let status = next_status;
         let mut owner = next_owner;
         let mut claimed_at = next_claimed_at;
@@ -1253,9 +1284,9 @@ impl TaskGraph {
             claimed_at = Some(now_string(None)?);
         }
 
-        let mut sql = String::from("UPDATE tasks SET status=?1, owner=?2, kind=?3, effort=?4, priority=?5, blocked_by=?6, claimed_at=?7, started_at=?8, finished_at=?9, files_touched=?10, read_set=?11, write_set=?12, isolation=?13, sets_explicit=?14, lease_id=?15, version=version+1, policy_epoch=?16, policy_digest=?17, report_id=?18, verification=?19 WHERE id=?20");
+        let mut sql = String::from("UPDATE tasks SET status=?1, owner=?2, kind=?3, effort=?4, priority=?5, blocked_by=?6, claimed_at=?7, started_at=?8, finished_at=?9, files_touched=?10, read_set=?11, write_set=?12, isolation=?13, sets_explicit=?14, lease_id=?15, version=version+1, policy_epoch=?16, policy_digest=?17, report_id=?18, verification=?19, ledger=?20 WHERE id=?21");
         if expected_version.is_some() {
-            sql.push_str(" AND version=?21");
+            sql.push_str(" AND version=?22");
         }
         let mut bind = vec![
             SqlValue::Text(status.as_str().into()),
@@ -1277,6 +1308,7 @@ impl TaskGraph {
             SqlValue::optional_text(next_policy_digest),
             SqlValue::optional_text(next_report_id),
             SqlValue::optional_text(json_optional_verification(&next_verification)?),
+            SqlValue::optional_text(json_optional_ledger(&next_ledger)?),
             SqlValue::Text(id.clone()),
         ];
         if let Some(expected) = expected_version {
@@ -1495,6 +1527,20 @@ impl TaskGraph {
         self.update(task_id, Value::Object(object), None)
     }
 
+    /// Record the honest cost/usage ledger for a step (§6.3). Unknown cost is
+    /// stored as `null`, never fabricated as zero.
+    pub fn set_step_ledger(
+        &self,
+        task_id: &str,
+        ledger: TaskStepLedger,
+    ) -> StateResult<TaskRecord> {
+        let value = serde_json::to_value(&ledger)
+            .map_err(|error| StateError::InvalidTask(error.to_string()))?;
+        let mut object = Map::new();
+        object.insert("ledger".to_owned(), value);
+        self.update(task_id, Value::Object(object), None)
+    }
+
     /// Validate the live DAG against a preset (§6.5). `light` enforces a flat
     /// fan-out under a 16-node cap; `deep` enforces the 1000-node cap and an
     /// honest verify gate on every closed node.
@@ -1583,7 +1629,7 @@ impl TaskGraph {
     }
 }
 
-const SELECT_TASKS: &str = "SELECT id,status,owner,kind,effort,priority,blocked_by,claimed_at,started_at,finished_at,files_touched,read_set,write_set,isolation,sets_explicit,lease_id,version,policy_epoch,policy_digest,report_id,verification FROM tasks";
+const SELECT_TASKS: &str = "SELECT id,status,owner,kind,effort,priority,blocked_by,claimed_at,started_at,finished_at,files_touched,read_set,write_set,isolation,sets_explicit,lease_id,version,policy_epoch,policy_digest,report_id,verification,ledger FROM tasks";
 
 #[derive(Debug, Clone)]
 enum SqlValue {
@@ -1690,6 +1736,7 @@ fn migrate_schema(connection: &mut Connection, database_path: &Path) -> StateRes
         ("policy_digest", "TEXT"),
         ("report_id", "TEXT"),
         ("verification", "TEXT"),
+        ("ledger", "TEXT"),
     ];
     for (name, definition) in additions {
         if !columns.contains(name) {
@@ -1931,6 +1978,12 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<TaskRecord> {
                 ))
             })?),
         },
+        ledger: match row.get::<_, Option<String>>(21)? {
+            None => None,
+            Some(raw) => Some(serde_json::from_str(&raw).map_err(|error| {
+                rusqlite::Error::InvalidParameterName(format!("invalid stored ledger: {error}"))
+            })?),
+        },
     })
 }
 
@@ -2022,7 +2075,7 @@ fn bump_graph_version(connection: &Connection) -> StateResult<u64> {
 }
 
 fn insert_prepared(connection: &Connection, task: &PreparedTask) -> StateResult<()> {
-    connection.execute("INSERT INTO tasks(id,status,owner,kind,effort,priority,blocked_by,claimed_at,started_at,finished_at,files_touched,read_set,write_set,isolation,sets_explicit,lease_id,version,policy_epoch,policy_digest,report_id,verification) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,0,?17,?18,?19,?20)", params![task.id, task.status.as_str(), task.owner, task.kind.as_str(), task.effort.as_str(), task.priority, json_array(&task.blocked_by)?, task.claimed_at, task.started_at, task.finished_at, json_array(&task.files_touched)?, json_array(&task.read_set)?, json_array(&task.write_set)?, task.isolation.as_str(), if task.explicit_sets { 1 } else { 0 }, task.lease_id, u64_to_i64(task.policy_epoch, "policy_epoch")?, task.policy_digest, task.report_id, json_optional_verification(&task.verification)?])?;
+    connection.execute("INSERT INTO tasks(id,status,owner,kind,effort,priority,blocked_by,claimed_at,started_at,finished_at,files_touched,read_set,write_set,isolation,sets_explicit,lease_id,version,policy_epoch,policy_digest,report_id,verification,ledger) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,0,?17,?18,?19,?20,?21)", params![task.id, task.status.as_str(), task.owner, task.kind.as_str(), task.effort.as_str(), task.priority, json_array(&task.blocked_by)?, task.claimed_at, task.started_at, task.finished_at, json_array(&task.files_touched)?, json_array(&task.read_set)?, json_array(&task.write_set)?, task.isolation.as_str(), if task.explicit_sets { 1 } else { 0 }, task.lease_id, u64_to_i64(task.policy_epoch, "policy_epoch")?, task.policy_digest, task.report_id, json_optional_verification(&task.verification)?, json_optional_ledger(&task.ledger)?])?;
     Ok(())
 }
 
@@ -2368,6 +2421,7 @@ struct PreparedTask {
     report_id: Option<String>,
     idempotency_key: Option<String>,
     verification: Option<VerifyArtifact>,
+    ledger: Option<TaskStepLedger>,
 }
 
 impl PreparedTask {
@@ -2482,6 +2536,7 @@ impl PreparedTask {
             report_id,
             idempotency_key,
             verification: input.verification,
+            ledger: input.ledger,
         })
     }
 
@@ -2661,6 +2716,17 @@ fn sqlite_integer(value: u64, field: &str) -> StateResult<i64> {
     u64_to_i64(value, field)
 }
 
+fn json_optional_ledger(value: &Option<TaskStepLedger>) -> StateResult<Option<String>> {
+    match value {
+        None => Ok(None),
+        Some(ledger) => {
+            Ok(Some(serde_json::to_string(ledger).map_err(|error| {
+                StateError::InvalidTask(error.to_string())
+            })?))
+        }
+    }
+}
+
 fn json_optional_verification(value: &Option<VerifyArtifact>) -> StateResult<Option<String>> {
     match value {
         None => Ok(None),
@@ -2808,6 +2874,7 @@ fn validate_patch_keys(patch: &Value) -> StateResult<()> {
         "policy_digest",
         "report_id",
         "verification",
+        "ledger",
         "expectedVersion",
         "expected_version",
         "version",
@@ -3126,5 +3193,27 @@ mod tests {
             .unwrap();
         let read = graph.read("a").unwrap().unwrap();
         assert_eq!(read.verification, Some(honest_artifact(&["a"])));
+    }
+
+    #[test]
+    fn step_ledger_round_trips_and_keeps_unknown_cost_null() {
+        let graph = graph();
+        graph
+            .create(TaskInput {
+                id: Some("a".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let ledger = TaskStepLedger {
+            phase: "settled".into(),
+            input_tokens: 100,
+            output_tokens: 20,
+            cached_tokens: 30,
+            cost: None,
+        };
+        graph.set_step_ledger("a", ledger.clone()).unwrap();
+        let read = graph.read("a").unwrap().unwrap();
+        assert_eq!(read.ledger, Some(ledger));
+        assert_eq!(read.ledger.as_ref().unwrap().cost, None);
     }
 }

@@ -19,7 +19,7 @@ use mindcode_core_tools::{
 use mindcode_state::{
     ClaimOptions, ConflictMode, DagPreset, ListOptions, SessionIndex, SessionIndexConfig,
     SessionListOptions, SessionRecord, SessionSearchOptions, StateError, TaskGraph,
-    TaskGraphConfig, TaskInput, TaskStatus, VerifyArtifact, DEFAULT_LEASE_TTL_MS,
+    TaskGraphConfig, TaskInput, TaskStatus, TaskStepLedger, VerifyArtifact, DEFAULT_LEASE_TTL_MS,
     JS_MAX_SAFE_INTEGER,
 };
 use protocol::{
@@ -93,6 +93,7 @@ const SERVER_CAPABILITIES: &[&str] = &[
     "task_graph.snapshot",
     "task_graph.validate",
     "task_graph.set_verification",
+    "task_graph.set_ledger",
     "task_graph.close",
     "task_graph.watch",
     "session",
@@ -1181,6 +1182,13 @@ struct SetVerificationParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SetLedgerParams {
+    task_id: String,
+    ledger: TaskStepLedger,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CloseParams {
     task_id: String,
     preset: Option<DagPreset>,
@@ -2163,6 +2171,22 @@ async fn execute_request(
                 Some(Err(error)) => Ok(RequestResult::state_error(error)),
             }
         }
+        "task_graph.set_ledger" => {
+            let request = match parse_params::<SetLedgerParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let graph = Arc::clone(&state.task_graph);
+            let result = run_state_call(&cancellation, move || {
+                graph.set_step_ledger(&request.task_id, request.ledger)
+            })
+            .await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(task)) => RequestResult::serialized(json!({ "task": task })),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
         "task_graph.close" => {
             let request = match parse_params::<CloseParams>(params) {
                 Ok(value) => value,
@@ -2209,6 +2233,7 @@ fn is_mutation_method(method: &str) -> bool {
             | "task_graph.release_lease"
             | "task_graph.recover"
             | "task_graph.set_verification"
+            | "task_graph.set_ledger"
             | "task_graph.close"
             | "session_index.upsert"
             | "session_index.remove"

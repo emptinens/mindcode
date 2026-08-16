@@ -949,6 +949,28 @@ async fn task_graph_preset_validate_and_verify_gate() {
         .await,
     );
 
+    // The honest step ledger persists unknown cost as null, never zero.
+    let led = ok_result(
+        rpc(
+            &mut stream,
+            "set-ledger-a",
+            "task_graph.set_ledger",
+            json!({
+                "task_id":"a",
+                "ledger":{
+                    "phase":"settled",
+                    "input_tokens":100,
+                    "output_tokens":20,
+                    "cached_tokens":30,
+                    "cost":null
+                }
+            }),
+        )
+        .await,
+    );
+    assert_eq!(led["task"]["ledger"]["phase"], "settled");
+    assert_eq!(led["task"]["ledger"]["cost"], Value::Null);
+
     // Deep close without an honest verify gate is rejected.
     assert_invalid_code(
         rpc(
