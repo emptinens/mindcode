@@ -11,11 +11,15 @@ clap = { version = "4.6", features = ["derive", "env"] }
 libc = "0.2"
 mindcode-core-tools = { path = "../mindcode-core-tools" }
 mindcode-protocol = { path = "../mindcode-protocol" }
+mindcode-runtime = { path = "../mindcode-runtime" }
+mindcode-settings = { path = "../mindcode-settings" }
 mindcode-state = { path = "../mindcode-state" }
+mindcode-worker = { path = "../mindcode-worker" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.53", features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "time", "io-util", "fs"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 
 [dev-dependencies]
+mindcode-transport = { path = "../mindcode-transport" }
 tempfile = "3.27"

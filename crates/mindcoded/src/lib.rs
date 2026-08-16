@@ -4,6 +4,7 @@ mod instance;
 pub mod mcp_stdio;
 pub mod protocol;
 pub mod session_manager;
+pub mod worker_runtime;
 
 use anyhow::{bail, Context, Result};
 use instance::InstanceLock;
@@ -224,6 +225,7 @@ struct DaemonState {
     session_index: Arc<SessionIndex>,
     session_manager: Arc<SessionManager>,
     mcp_stdio: Arc<McpStdioSupervisor>,
+    worker_runtime: Arc<worker_runtime::WorkerRuntime>,
     request_ledger: Arc<Mutex<RequestLedger>>,
     metrics: Arc<Metrics>,
     reload_requested: AtomicBool,
@@ -276,6 +278,14 @@ impl Daemon {
         }
         let session_index = Arc::new(SessionIndex::new(session_index_config));
         let session_manager = Arc::new(SessionManager::new(Arc::clone(&session_index)));
+        // The daemon owns the bounded worker executor. Credentials are resolved
+        // daemon-side by `WorkerRuntime::prepare`, so they never cross the
+        // control socket. `DEFAULT_MAX_CONCURRENT` is a compile-time constant
+        // inside the allowed bounds, so construction cannot fail here.
+        let worker_runtime = Arc::new(
+            worker_runtime::WorkerRuntime::new(mindcode_worker::DEFAULT_MAX_CONCURRENT)
+                .expect("default worker concurrency is within the allowed bounds"),
+        );
         Self {
             state: Arc::new(DaemonState {
                 daemon_token: OnceLock::new(),
@@ -283,6 +293,7 @@ impl Daemon {
                 session_index,
                 session_manager,
                 mcp_stdio: Arc::new(McpStdioSupervisor::new()),
+                worker_runtime,
                 request_ledger: Arc::new(Mutex::new(RequestLedger::default())),
                 reload_requested: AtomicBool::new(false),
                 config,
@@ -299,6 +310,13 @@ impl Daemon {
 
     pub fn config(&self) -> &DaemonConfig {
         &self.state.config
+    }
+
+    /// The daemon's bounded worker executor (§6.5 convergence). Credentials
+    /// are resolved daemon-side by `WorkerRuntime::prepare`, never transported
+    /// over the control socket.
+    pub fn worker_runtime(&self) -> &worker_runtime::WorkerRuntime {
+        &self.state.worker_runtime
     }
 
     pub fn shutdown(&self) {
