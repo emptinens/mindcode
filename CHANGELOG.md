@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — 2026-08-16 VEXZY removal amendment
+
+- Remove the built-in VEXZY provider entirely: delete `mindcode-vexzy`, the
+  daemon model-catalog cache, `vexzy.catalog.*` RPC routes, `VEXZY_API_KEY`
+  credential handling, first-run seeding, and catalog-driven Worker-model
+  eligibility.  Every provider is now a uniform custom profile
+  (`name`/`base_url`/`protocol`/key) with allowlist-driven, fail-closed
+  eligibility.  VEXZY can be added manually as an ordinary custom profile
+  (`https://api.echogate.one/v1`, `openai-compatible`, key via `/settings`).
+- Remove the CLI `model eligible` / `effort worker` catalog-inspection
+  subcommands; the `/model` and `/effort` TUI commands remain.
+
 ## 0.1.3 — approved migration (unreleased)
 
 - Approve the target contract for a Linux x86_64 Rust-first single `mindcode`

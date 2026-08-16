@@ -1,15 +1,15 @@
 # MindCode
 
 MindCode `0.1.3` — Rust-first Linux x64 single executable с multi-provider
-contract (amendment `2026-08-13`): **VEXZY** — built-in profile, custom
-providers — через два протокола. Версия `0.1.2` checkpointed в локальной
-истории, но ещё не tagged.
+contract (amendment `2026-08-13`, `2026-08-16`): все провайдеры — обычные
+custom-профили, каждый через один из двух протоколов. Версия `0.1.2`
+checkpointed в локальной истории, но ещё не tagged.
 
 ### Текущее состояние
 
 Репозиторий — Rust workspace; единый бинарник `mindcode` реализует
-`auth status`, `model`, `effort`, `provider`, `settings`, `setup-token`,
-`doctor`, `update|upgrade`, `daemon` (in-process), `tui` и `chat`. Bare prompt
+`auth status`, `provider`, `settings`, `setup-token`, `doctor`,
+`update|upgrade`, `daemon` (in-process), `tui` и `chat`. Bare prompt
 (`mindcode hello`) и `mindcode chat` стримят completion через активный
 провайдер. TypeScript и Bun-пайплайн удалены полностью.
 
@@ -22,12 +22,13 @@ providers — через два протокола. Версия `0.1.2` checkpo
   не требуют Bun или Node. JS plugins/hooks запускаются только при явном
   выборе: сначала Bun, затем Node; ни один runtime не является скрытым
   fallback для core.
-- **Multi-provider (amendment `2026-08-13`):** два протокола —
+- **Multi-provider (amendment `2026-08-13`, `2026-08-16`):** два протокола —
   `openai-compatible` (`/models`, `/chat/completions`) и `anthropic-compatible`
-  (`/v1/models`, `/v1/messages`). Пресетов провайдеров нет: пользователь вводит `name`,
-  `base_url`, `protocol` и ключ. VEXZY — built-in `openai-compatible` profile
-  (`https://api.echogate.one/v1`, ключ `VEXZY_API_KEY`), редактируемый и
-  удаляемый.
+  (`/v1/models`, `/v1/messages`). Пресетов провайдеров нет и built-in
+  провайдеров нет: пользователь сам добавляет `name`, `base_url`, `protocol`
+  и ключ. VEXZY тоже добавляется как обычный custom-профиль:
+  `base_url` `https://api.echogate.one/v1`, `protocol` `openai-compatible`,
+  ключ — через `/settings`.
 - **Credentials:** приоритет env → on-disk secret store
   `~/.config/mindcode/credentials.json` (файл 0600, директория 0700) →
   fail-closed. Store отделён от secret-free `settings.json` (метаданные +
@@ -38,11 +39,10 @@ providers — через два протокола. Версия `0.1.2` checkpo
 
 ## Worker policy
 
-- **Eligibility:** VEXZY — catalog-driven (`/v1/models`: `available=true` +
-  Worker capabilities + `supported_reasoning_efforts`); custom providers —
-  per-profile allowlist model IDs, пустой allowlist = fail-closed.
+- **Eligibility:** каждый провайдер — per-profile allowlist model IDs, пустой
+  allowlist = fail-closed. Каталог-элиджибилити больше не используется.
 - Пользователь выбирает **одну глобальную Worker-модель** из eligible моделей
-  активного провайдера; stale/ineligible ID отклоняется.
+  активного провайдера; id вне allowlist отклоняется.
 - Global selection применяется одинаково к foreground, resume, background,
   in-process и pane Worker paths.  Leader model остаётся отдельной настройкой.
 - Global Worker-effort lock — **опционален**.  Lock принимает только
@@ -70,15 +70,6 @@ providers — через два протокола. Версия `0.1.2` checkpo
       "anthropic-compatible": ["/v1/models", "/v1/messages"]
     },
     "presets": false,
-    "builtin": {
-      "vexzy": {
-        "protocol": "openai-compatible",
-        "base_url": "https://api.echogate.one/v1",
-        "credential_env": "VEXZY_API_KEY",
-        "editable": true,
-        "removable": true
-      }
-    },
     "custom": {
       "fields": ["name", "base_url", "protocol", "key"],
       "eligibility": "per-profile allowlist model IDs",
@@ -111,8 +102,6 @@ providers — через два протокола. Версия `0.1.2` checkpo
     "public_remote_endpoints": true
   },
   "eligibility": {
-    "vexzy": "catalog_driven",
-    "catalog_fields": ["available", "worker_capabilities", "supported_reasoning_efforts"],
     "custom": "per_profile_allowlist",
     "custom_default": "empty",
     "fail_closed": true
@@ -125,11 +114,7 @@ providers — через два протокола. Версия `0.1.2` checkpo
       "resolution": ["env", "store", "fail-closed"],
       "exit_on_missing_credential": 1
     },
-    "model": {
-      "status": "public",
-      "sets_global_worker_model": true,
-      "subcommands": ["eligible"]
-    },
+    "model": {"status": "removed", "error": "unknown_command"},
     "provider": {
       "status": "public",
       "switches_active_provider": true,
@@ -142,11 +127,7 @@ providers — через два протокола. Версия `0.1.2` checkpo
       "subcommands": ["show", "key", "allowlist", "model", "effort"],
       "key_command_output": "configured"
     },
-    "effort": {
-      "status": "public",
-      "sets_leader_effort": true,
-      "subcommands": ["worker"]
-    },
+    "effort": {"status": "removed", "error": "unknown_command"},
     "config": {"status": "removed", "error": "unknown_command"},
     "submodel": {"status": "removed", "error": "unknown_command"}
   },
@@ -157,7 +138,7 @@ providers — через два протокола. Версия `0.1.2` checkpo
   },
   "worker": {
     "selection": "global",
-    "eligible_catalog_only": true,
+    "allowlist_only": true,
     "effort_lock": "optional-global",
     "allowed_efforts": ["none", "low", "medium", "high", "xhigh", "max"]
   },
@@ -165,11 +146,13 @@ providers — через два протокола. Версия `0.1.2` checkpo
 }
 ```
 
-Удалённые команды `/config` и `/submodel` не имеют alias или скрытого
-compatibility route.  Они возвращают стабильную `unknown_command` ошибку и не
-изменяют состояние.  Fixture также покрывает `--help`, providers/protocols,
-model listing и selection, lock set/unset, credential precedence и redaction,
-transport rules, eligibility, missing-runtime plugin error и exit status.
+Удалённые команды `/config`, `/submodel` (а также CLI-подкоманды
+`model eligible` и `effort worker`, которые были каталог-инспекцией VEXZY) не
+имеют alias или скрытого compatibility route.  Они возвращают стабильную
+`unknown_command` ошибку и не изменяют состояние.  Fixture также покрывает
+`--help`, providers/protocols, model listing и selection, lock set/unset,
+credential precedence и redaction, transport rules, eligibility,
+missing-runtime plugin error и exit status.
 
 ## Установка и запуск
 
@@ -190,10 +173,11 @@ cargo build -p mindcode-native --locked
 ./target/debug/mindcode tui          # in-process daemon + Rust TUI
 ```
 
-Для built-in VEXZY profile ключ читается из env (`VEXZY_API_KEY`); для custom
-providers ключ хранится в on-disk secret store
-`~/.config/mindcode/credentials.json` (0600/0700) — приоритет env → store →
-fail-closed.
+Каждый провайдер — custom-профиль; ключ хранится в on-disk secret store
+`~/.config/mindcode/credentials.json` (0600/0700) с приоритетом env → store →
+fail-closed.  Пример добавления VEXZY как обычного custom-профиля:
+`base_url` `https://api.echogate.one/v1`, `protocol` `openai-compatible`,
+ключ через `/settings`.
 
 Не помещайте ключ в settings, README, tests, fixtures или диагностические
 артефакты.  Сборочные и runtime-команды, параметры выбора провайдера,
@@ -202,15 +186,15 @@ compatibility fixture.
 
 ## Локальная разработка и релизы
 
-Репозиторий local-only: remote не добавляется, `fetch` и `push` не выполняются.
-Изменения коммитятся атомарно; generated binaries, caches и credentials не
-попадают в Git.  `PLAN.md` — implementation contract, а
-`VEXZY_ROADMAP.md` — последовательность migration milestones.
+Репозиторий public: `git@github.com:emptinens/mindcode.git`. Изменения
+коммитятся атомарно; generated binaries, caches и credentials не попадают в
+Git.  `PLAN.md` — implementation contract, `STATUS.md` — текущий статус.
 
 ### Будущее `0.1.5` (superseded planning)
 
 Планировочная граница `0.1.5` (profiles только в `0.1.5`, credentials
-env-only, profile HTTP только на loopback) была заменена amendment-ом
-`2026-08-13`: профили и публичные remote endpoints — часть `0.1.3`.  Любая
-будущая работа `0.1.5` должна сохранять provider contract `0.1.3` и не
-возвращать `/config` или `/submodel`.
+env-only, profile HTTP только на loopback) была заменена amendment-ами
+`2026-08-13` и `2026-08-16`: профили и публичные remote endpoints — часть
+`0.1.3`, а built-in VEXZY удалён в пользу единообразных custom-профилей.
+Любая будущая работа `0.1.5` должна сохранять provider contract `0.1.3` и не
+возвращать `/config`, `/submodel` или built-in провайдеров.
