@@ -920,3 +920,111 @@ async fn task_graph_watch_rejects_connections_over_the_bounded_limit() {
     shutdown(&mut control).await;
     daemon.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn task_graph_preset_validate_and_verify_gate() {
+    let directory = tempdir().unwrap();
+    let socket = directory.path().join("run/mindcoded.sock");
+    let state_dir = directory.path().join("state");
+    let daemon = tokio::spawn(
+        Daemon::new(DaemonConfig {
+            socket: socket.clone(),
+            state_dir: Some(state_dir.clone()),
+            idle_seconds: Some(60),
+            handshake_timeout: Duration::from_secs(2),
+            build_id: "task-graph-preset".into(),
+        })
+        .run(),
+    );
+    wait_for_socket(&socket).await;
+    let mut stream = connect(&socket).await;
+
+    ok_result(
+        rpc(
+            &mut stream,
+            "route-a",
+            "task_graph.route",
+            json!({"task":{"id":"a"}}),
+        )
+        .await,
+    );
+
+    // Deep close without an honest verify gate is rejected.
+    assert_invalid_code(
+        rpc(
+            &mut stream,
+            "close-a-noverify",
+            "task_graph.close",
+            json!({"task_id":"a","preset":"deep"}),
+        )
+        .await,
+        "VERIFY_GATE",
+    );
+
+    // Attach honest evidence, then the deep close succeeds.
+    let artifact = json!({
+        "findings":["pass"],
+        "evidence":["src/lib.rs:1"],
+        "edge_cases":[],
+        "what_i_did_not_check":["network"],
+        "open_questions":[],
+        "confidence":0.9,
+        "verified_nodes":["a"]
+    });
+    ok_result(
+        rpc(
+            &mut stream,
+            "set-verify-a",
+            "task_graph.set_verification",
+            json!({"task_id":"a","verification":artifact}),
+        )
+        .await,
+    );
+    let closed = ok_result(
+        rpc(
+            &mut stream,
+            "close-a",
+            "task_graph.close",
+            json!({"task_id":"a","preset":"deep"}),
+        )
+        .await,
+    );
+    assert_eq!(closed["task"]["status"], "completed");
+
+    // Validation reports the closed deep node as structurally honest.
+    let report = ok_result(
+        rpc(
+            &mut stream,
+            "validate-deep",
+            "task_graph.validate",
+            json!({"preset":"deep"}),
+        )
+        .await,
+    );
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["nodes"], 1);
+
+    // Light validation of a node with a dependency reports the flatness error.
+    ok_result(
+        rpc(
+            &mut stream,
+            "route-b",
+            "task_graph.route",
+            json!({"task":{"id":"b","blocked_by":["a"]}}),
+        )
+        .await,
+    );
+    let light_report = ok_result(
+        rpc(
+            &mut stream,
+            "validate-light",
+            "task_graph.validate",
+            json!({"preset":"light"}),
+        )
+        .await,
+    );
+    assert_eq!(light_report["ok"], false);
+
+    shutdown(&mut stream).await;
+    daemon.await.unwrap().unwrap();
+}

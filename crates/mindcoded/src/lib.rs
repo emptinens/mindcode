@@ -17,9 +17,10 @@ use mindcode_core_tools::{
     GitRevParseRequest, GitRootRequest, GitStatusRequest, ProcessRunRequest,
 };
 use mindcode_state::{
-    ClaimOptions, ConflictMode, ListOptions, SessionIndex, SessionIndexConfig, SessionListOptions,
-    SessionRecord, SessionSearchOptions, StateError, TaskGraph, TaskGraphConfig, TaskInput,
-    TaskStatus, DEFAULT_LEASE_TTL_MS, JS_MAX_SAFE_INTEGER,
+    ClaimOptions, ConflictMode, DagPreset, ListOptions, SessionIndex, SessionIndexConfig,
+    SessionListOptions, SessionRecord, SessionSearchOptions, StateError, TaskGraph,
+    TaskGraphConfig, TaskInput, TaskStatus, VerifyArtifact, DEFAULT_LEASE_TTL_MS,
+    JS_MAX_SAFE_INTEGER,
 };
 use protocol::{
     read_message, write_message, ClientMessage, RemoteErrorPayload, ServerMessage, PROTOCOL_VERSION,
@@ -90,6 +91,9 @@ const SERVER_CAPABILITIES: &[&str] = &[
     "task_graph.release_lease",
     "task_graph.recover",
     "task_graph.snapshot",
+    "task_graph.validate",
+    "task_graph.set_verification",
+    "task_graph.close",
     "task_graph.watch",
     "session",
     "session.open",
@@ -1164,6 +1168,27 @@ struct UpdateParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ValidateParams {
+    preset: Option<DagPreset>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetVerificationParams {
+    task_id: String,
+    verification: VerifyArtifact,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloseParams {
+    task_id: String,
+    preset: Option<DagPreset>,
+    expected_version: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LeaseParams {
     lease_id: String,
     owner: Option<String>,
@@ -2108,6 +2133,53 @@ async fn execute_request(
                 Some(Err(error)) => Ok(RequestResult::state_error(error)),
             }
         }
+        "task_graph.validate" => {
+            let request = match parse_params::<ValidateParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let preset = request.preset.unwrap_or_default();
+            let graph = Arc::clone(&state.task_graph);
+            let result = run_state_call(&cancellation, move || graph.validate(preset)).await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(value)) => RequestResult::serialized(value),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
+        "task_graph.set_verification" => {
+            let request = match parse_params::<SetVerificationParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let graph = Arc::clone(&state.task_graph);
+            let result = run_state_call(&cancellation, move || {
+                graph.set_verification(&request.task_id, request.verification)
+            })
+            .await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(task)) => RequestResult::serialized(json!({ "task": task })),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
+        "task_graph.close" => {
+            let request = match parse_params::<CloseParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let preset = request.preset.unwrap_or_default();
+            let graph = Arc::clone(&state.task_graph);
+            let result = run_state_call(&cancellation, move || {
+                graph.close(&request.task_id, preset, request.expected_version)
+            })
+            .await?;
+            match result {
+                None => Ok(RequestResult::cancelled()),
+                Some(Ok(task)) => RequestResult::serialized(json!({ "task": task })),
+                Some(Err(error)) => Ok(RequestResult::state_error(error)),
+            }
+        }
         _ => Ok(RequestResult::error(
             "unsupported_method",
             format!("unsupported daemon method: {method}"),
@@ -2136,6 +2208,8 @@ fn is_mutation_method(method: &str) -> bool {
             | "task_graph.renew_lease"
             | "task_graph.release_lease"
             | "task_graph.recover"
+            | "task_graph.set_verification"
+            | "task_graph.close"
             | "session_index.upsert"
             | "session_index.remove"
             | "mcp.stdio.open"

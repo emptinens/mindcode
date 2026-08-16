@@ -83,7 +83,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     policy_digest IS NULL OR
     (length(policy_digest) = 64 AND policy_digest NOT GLOB '*[^0-9a-f]*')
   ),
-  report_id TEXT
+  report_id TEXT,
+  verification TEXT
 );
 CREATE INDEX IF NOT EXISTS tasks_status_idx ON tasks(status);
 CREATE INDEX IF NOT EXISTS tasks_owner_idx ON tasks(owner);
@@ -249,7 +250,7 @@ pub enum ConflictMode {
     Reject,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskRecord {
     pub id: String,
     pub status: TaskStatus,
@@ -270,6 +271,10 @@ pub struct TaskRecord {
     pub policy_epoch: u64,
     pub policy_digest: Option<String>,
     pub report_id: Option<String>,
+    /// Verify evidence attached to the step (§6.5). In `deep` a node may only
+    /// close once this artifact is structurally honest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<VerifyArtifact>,
 }
 
 fn deserialize_optional_nullable_digest<'de, D>(
@@ -311,6 +316,9 @@ pub struct TaskInput {
     pub report_id: Option<String>,
     #[serde(alias = "idempotencyKey")]
     pub idempotency_key: Option<String>,
+    /// Verify evidence attached to a step (§6.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<VerifyArtifact>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -407,6 +415,16 @@ pub struct TaskGraphSnapshot {
     pub tasks: Vec<TaskRecord>,
 }
 
+/// Outcome of a preset validation pass over the live task DAG (§6.5).
+#[derive(Debug, Clone, Serialize)]
+pub struct DagValidationReport {
+    pub ok: bool,
+    pub preset: String,
+    pub nodes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TaskGraphConfig {
     pub state_dir: PathBuf,
@@ -500,6 +518,7 @@ pub enum StateError {
         expected: u64,
         actual: u64,
     },
+    VerifyGate(String),
     LeaseConflict(String),
     LeaseOwnerMismatch(String),
     DatabaseClosed,
@@ -517,6 +536,7 @@ impl StateError {
             Self::DependencyNotFound { .. } => "DEPENDENCY_NOT_FOUND",
             Self::DependencyCycle(_) => "DEPENDENCY_CYCLE",
             Self::VersionConflict { .. } => "VERSION_CONFLICT",
+            Self::VerifyGate(_) => "VERIFY_GATE",
             Self::LeaseConflict(_) => "LEASE_CONFLICT",
             Self::LeaseOwnerMismatch(_) => "LEASE_OWNER_MISMATCH",
             Self::DatabaseClosed => "DATABASE_CLOSED",
@@ -554,6 +574,7 @@ impl fmt::Display for StateError {
                     "Version conflict for {task_id}: expected {expected}, actual {actual}"
                 )
             }
+            Self::VerifyGate(message) => write!(f, "{message}"),
             Self::LeaseConflict(id) => write!(f, "Lease is already in use: {id}"),
             Self::LeaseOwnerMismatch(id) => write!(f, "Lease owner mismatch: {id}"),
             Self::DatabaseClosed => write!(f, "Task graph database is closed"),
@@ -916,6 +937,7 @@ impl TaskGraph {
                 policy_digest: Some(current.policy_digest.clone()),
                 report_id: current.report_id.clone(),
                 idempotency_key: None,
+                verification: current.verification.clone(),
             })
             .map_err(|error| StateError::InvalidTask(error.to_string()))?;
             let merged_object = merged
@@ -1066,6 +1088,7 @@ impl TaskGraph {
             "policy_epoch",
             "policy_digest",
             "report_id",
+            "verification",
         ];
         if !mutable.iter().any(|key| object.contains_key(*key)) {
             return Ok(current);
@@ -1147,6 +1170,17 @@ impl TaskGraph {
         };
         let next_report_id = optional_nullable_string(object, "report_id")?
             .unwrap_or_else(|| current.report_id.clone());
+        let next_verification = if let Some(value) = object.get("verification") {
+            if value.is_null() {
+                None
+            } else {
+                Some(serde_json::from_value(value.clone()).map_err(|error| {
+                    StateError::InvalidTask(format!("invalid verification patch: {error}"))
+                })?)
+            }
+        } else {
+            current.verification.clone()
+        };
         let status = next_status;
         let mut owner = next_owner;
         let mut claimed_at = next_claimed_at;
@@ -1219,9 +1253,9 @@ impl TaskGraph {
             claimed_at = Some(now_string(None)?);
         }
 
-        let mut sql = String::from("UPDATE tasks SET status=?1, owner=?2, kind=?3, effort=?4, priority=?5, blocked_by=?6, claimed_at=?7, started_at=?8, finished_at=?9, files_touched=?10, read_set=?11, write_set=?12, isolation=?13, sets_explicit=?14, lease_id=?15, version=version+1, policy_epoch=?16, policy_digest=?17, report_id=?18 WHERE id=?19");
+        let mut sql = String::from("UPDATE tasks SET status=?1, owner=?2, kind=?3, effort=?4, priority=?5, blocked_by=?6, claimed_at=?7, started_at=?8, finished_at=?9, files_touched=?10, read_set=?11, write_set=?12, isolation=?13, sets_explicit=?14, lease_id=?15, version=version+1, policy_epoch=?16, policy_digest=?17, report_id=?18, verification=?19 WHERE id=?20");
         if expected_version.is_some() {
-            sql.push_str(" AND version=?20");
+            sql.push_str(" AND version=?21");
         }
         let mut bind = vec![
             SqlValue::Text(status.as_str().into()),
@@ -1242,6 +1276,7 @@ impl TaskGraph {
             SqlValue::Integer(u64_to_i64(next_policy_epoch, "policy_epoch")?),
             SqlValue::optional_text(next_policy_digest),
             SqlValue::optional_text(next_report_id),
+            SqlValue::optional_text(json_optional_verification(&next_verification)?),
             SqlValue::Text(id.clone()),
         ];
         if let Some(expected) = expected_version {
@@ -1446,6 +1481,88 @@ impl TaskGraph {
         read_graph_version(&connection)
     }
 
+    /// Attach verify evidence to a step (§6.5). The preset gate is enforced on
+    /// `close`, not here, so a worker can record evidence before finishing.
+    pub fn set_verification(
+        &self,
+        task_id: &str,
+        artifact: VerifyArtifact,
+    ) -> StateResult<TaskRecord> {
+        let value = serde_json::to_value(&artifact)
+            .map_err(|error| StateError::InvalidTask(error.to_string()))?;
+        let mut object = Map::new();
+        object.insert("verification".to_owned(), value);
+        self.update(task_id, Value::Object(object), None)
+    }
+
+    /// Validate the live DAG against a preset (§6.5). `light` enforces a flat
+    /// fan-out under a 16-node cap; `deep` enforces the 1000-node cap and an
+    /// honest verify gate on every closed node.
+    pub fn validate(&self, preset: DagPreset) -> StateResult<DagValidationReport> {
+        let connection = self.connection()?;
+        let tx = connection.unchecked_transaction()?;
+        let tasks = read_all_tasks(&tx)?;
+        tx.commit()?;
+        let nodes = tasks.iter().map(dag_node_from_task).collect::<Vec<_>>();
+        let result = validate_dag(&nodes, preset);
+        Ok(DagValidationReport {
+            ok: result.is_ok(),
+            preset: preset.label().to_owned(),
+            nodes: nodes.len(),
+            error: result.err().map(|error| error.to_string()),
+        })
+    }
+
+    /// Close a step (§6.5): move it to `Completed` only after the preset gate
+    /// passes. In `deep` a structurally honest verify artifact covering every
+    /// completed dependency is mandatory; in `light` the close is structural.
+    pub fn close(
+        &self,
+        task_id: &str,
+        preset: DagPreset,
+        expected_version: Option<u64>,
+    ) -> StateResult<TaskRecord> {
+        let id = nonempty(task_id, "task_id")?;
+        if let Some(version) = expected_version {
+            ensure_u64(version, "expected_version")?;
+        }
+        self.write_transaction(|tx| {
+            let current =
+                read_task(tx, &id)?.ok_or_else(|| StateError::TaskNotFound(id.clone()))?;
+            if let Some(expected) = expected_version {
+                if current.version != expected {
+                    return Err(StateError::VersionConflict {
+                        task_id: id.clone(),
+                        expected,
+                        actual: current.version,
+                    });
+                }
+            }
+            if matches!(current.status, TaskStatus::Completed) {
+                return Ok(current);
+            }
+            // Build the candidate closed graph and run the preset gate before
+            // any write, so a rejected close never mutates state.
+            let mut tasks = read_all_tasks(tx)?;
+            for task in &mut tasks {
+                if task.id == id {
+                    task.status = TaskStatus::Completed;
+                }
+            }
+            let nodes = tasks.iter().map(dag_node_from_task).collect::<Vec<_>>();
+            if let Err(error) = validate_dag(&nodes, preset) {
+                return Err(StateError::VerifyGate(format!(
+                    "{} preset rejects closing {}: {error}",
+                    preset.label(),
+                    id
+                )));
+            }
+            let mut object = Map::new();
+            object.insert("status".to_owned(), Value::String("completed".to_owned()));
+            self.update_in_transaction(tx, &id, &Value::Object(object), expected_version)
+        })
+    }
+
     fn write_transaction<T, F>(&self, callback: F) -> StateResult<T>
     where
         F: FnOnce(&Transaction<'_>) -> StateResult<T>,
@@ -1466,7 +1583,7 @@ impl TaskGraph {
     }
 }
 
-const SELECT_TASKS: &str = "SELECT id,status,owner,kind,effort,priority,blocked_by,claimed_at,started_at,finished_at,files_touched,read_set,write_set,isolation,sets_explicit,lease_id,version,policy_epoch,policy_digest,report_id FROM tasks";
+const SELECT_TASKS: &str = "SELECT id,status,owner,kind,effort,priority,blocked_by,claimed_at,started_at,finished_at,files_touched,read_set,write_set,isolation,sets_explicit,lease_id,version,policy_epoch,policy_digest,report_id,verification FROM tasks";
 
 #[derive(Debug, Clone)]
 enum SqlValue {
@@ -1572,6 +1689,7 @@ fn migrate_schema(connection: &mut Connection, database_path: &Path) -> StateRes
         ("policy_epoch", "INTEGER NOT NULL DEFAULT 0"),
         ("policy_digest", "TEXT"),
         ("report_id", "TEXT"),
+        ("verification", "TEXT"),
     ];
     for (name, definition) in additions {
         if !columns.contains(name) {
@@ -1805,6 +1923,14 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<TaskRecord> {
         policy_digest: validate_policy_digest(policy_digest, "stored policy_digest")
             .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?,
         report_id: row.get(19)?,
+        verification: match row.get::<_, Option<String>>(20)? {
+            None => None,
+            Some(raw) => Some(serde_json::from_str(&raw).map_err(|error| {
+                rusqlite::Error::InvalidParameterName(format!(
+                    "invalid stored verification: {error}"
+                ))
+            })?),
+        },
     })
 }
 
@@ -1896,7 +2022,7 @@ fn bump_graph_version(connection: &Connection) -> StateResult<u64> {
 }
 
 fn insert_prepared(connection: &Connection, task: &PreparedTask) -> StateResult<()> {
-    connection.execute("INSERT INTO tasks(id,status,owner,kind,effort,priority,blocked_by,claimed_at,started_at,finished_at,files_touched,read_set,write_set,isolation,sets_explicit,lease_id,version,policy_epoch,policy_digest,report_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,0,?17,?18,?19)", params![task.id, task.status.as_str(), task.owner, task.kind.as_str(), task.effort.as_str(), task.priority, json_array(&task.blocked_by)?, task.claimed_at, task.started_at, task.finished_at, json_array(&task.files_touched)?, json_array(&task.read_set)?, json_array(&task.write_set)?, task.isolation.as_str(), if task.explicit_sets { 1 } else { 0 }, task.lease_id, u64_to_i64(task.policy_epoch, "policy_epoch")?, task.policy_digest, task.report_id])?;
+    connection.execute("INSERT INTO tasks(id,status,owner,kind,effort,priority,blocked_by,claimed_at,started_at,finished_at,files_touched,read_set,write_set,isolation,sets_explicit,lease_id,version,policy_epoch,policy_digest,report_id,verification) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,0,?17,?18,?19,?20)", params![task.id, task.status.as_str(), task.owner, task.kind.as_str(), task.effort.as_str(), task.priority, json_array(&task.blocked_by)?, task.claimed_at, task.started_at, task.finished_at, json_array(&task.files_touched)?, json_array(&task.read_set)?, json_array(&task.write_set)?, task.isolation.as_str(), if task.explicit_sets { 1 } else { 0 }, task.lease_id, u64_to_i64(task.policy_epoch, "policy_epoch")?, task.policy_digest, task.report_id, json_optional_verification(&task.verification)?])?;
     Ok(())
 }
 
@@ -2241,6 +2367,7 @@ struct PreparedTask {
     policy_digest: Option<String>,
     report_id: Option<String>,
     idempotency_key: Option<String>,
+    verification: Option<VerifyArtifact>,
 }
 
 impl PreparedTask {
@@ -2354,6 +2481,7 @@ impl PreparedTask {
             policy_digest,
             report_id,
             idempotency_key,
+            verification: input.verification,
         })
     }
 
@@ -2377,6 +2505,32 @@ impl PreparedTask {
         copy.finished_at = finished_at;
         copy.lease_id = lease_id;
         copy
+    }
+}
+
+/// Convert a durable task row into the preset-validation node shape (§6.5).
+/// A node is `closed` only when completed: failed/cancelled nodes stay open for
+/// `fix_node_for` rather than silently passing a verify gate.
+fn dag_node_from_task(task: &TaskRecord) -> DagNode {
+    let status = match task.status {
+        TaskStatus::Pending | TaskStatus::Blocked => NodeStatus::Pending,
+        TaskStatus::Claimed => NodeStatus::Runnable,
+        TaskStatus::Running => NodeStatus::Running,
+        TaskStatus::Completed => NodeStatus::Completed,
+        TaskStatus::Failed | TaskStatus::Cancelled => NodeStatus::Failed,
+    };
+    DagNode {
+        id: task.id.clone(),
+        kind: match task.kind {
+            TaskKind::Research => NodeKind::Research,
+            TaskKind::Implement => NodeKind::Implement,
+            TaskKind::Verify => NodeKind::Verify,
+            TaskKind::Integrate => NodeKind::Integrate,
+        },
+        dependencies: task.blocked_by.clone(),
+        status,
+        closed: matches!(task.status, TaskStatus::Completed),
+        verification: task.verification.clone(),
     }
 }
 
@@ -2505,6 +2659,17 @@ fn u64_to_i64(value: u64, field: &str) -> StateResult<i64> {
 }
 fn sqlite_integer(value: u64, field: &str) -> StateResult<i64> {
     u64_to_i64(value, field)
+}
+
+fn json_optional_verification(value: &Option<VerifyArtifact>) -> StateResult<Option<String>> {
+    match value {
+        None => Ok(None),
+        Some(artifact) => {
+            Ok(Some(serde_json::to_string(artifact).map_err(|error| {
+                StateError::InvalidTask(error.to_string())
+            })?))
+        }
+    }
 }
 
 fn json_array(values: &[String]) -> StateResult<String> {
@@ -2642,6 +2807,7 @@ fn validate_patch_keys(patch: &Value) -> StateResult<()> {
         "policy_epoch",
         "policy_digest",
         "report_id",
+        "verification",
         "expectedVersion",
         "expected_version",
         "version",
@@ -2833,5 +2999,132 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.tasks[0].status, TaskStatus::Pending);
         assert_eq!(snapshot.version, snapshot.graph_version);
+    }
+
+    fn honest_artifact(verified_nodes: &[&str]) -> VerifyArtifact {
+        VerifyArtifact {
+            findings: vec!["pass".into()],
+            evidence: vec!["src/lib.rs:1".into()],
+            edge_cases: Vec::new(),
+            what_i_did_not_check: vec!["network".into()],
+            open_questions: Vec::new(),
+            confidence: 0.9,
+            verified_nodes: verified_nodes
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn deep_close_requires_an_honest_verify_gate() {
+        let graph = graph();
+        graph
+            .create(TaskInput {
+                id: Some("a".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let error = graph.close("a", DagPreset::Deep, None).unwrap_err();
+        assert_eq!(error.code(), "VERIFY_GATE");
+
+        graph
+            .set_verification("a", honest_artifact(&["a"]))
+            .unwrap();
+        let closed = graph.close("a", DagPreset::Deep, None).unwrap();
+        assert_eq!(closed.status, TaskStatus::Completed);
+        assert!(closed.verification.is_some());
+    }
+
+    #[test]
+    fn deep_close_covers_completed_dependencies() {
+        let graph = graph();
+        graph
+            .create(TaskInput {
+                id: Some("dep".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        graph
+            .create(TaskInput {
+                id: Some("child".into()),
+                blocked_by: Some(vec!["dep".into()]),
+                ..Default::default()
+            })
+            .unwrap();
+        graph
+            .set_verification("dep", honest_artifact(&["dep"]))
+            .unwrap();
+        graph.close("dep", DagPreset::Deep, None).unwrap();
+
+        // The child's artifact does not list its completed dependency.
+        graph
+            .set_verification("child", honest_artifact(&["child"]))
+            .unwrap();
+        assert!(matches!(
+            graph.close("child", DagPreset::Deep, None),
+            Err(StateError::VerifyGate(_))
+        ));
+
+        graph
+            .set_verification("child", honest_artifact(&["child", "dep"]))
+            .unwrap();
+        let closed = graph.close("child", DagPreset::Deep, None).unwrap();
+        assert_eq!(closed.status, TaskStatus::Completed);
+    }
+
+    #[test]
+    fn light_close_is_structural_and_needs_no_artifact() {
+        let graph = graph();
+        graph
+            .create(TaskInput {
+                id: Some("a".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let closed = graph.close("a", DagPreset::Light, None).unwrap();
+        assert_eq!(closed.status, TaskStatus::Completed);
+    }
+
+    #[test]
+    fn validate_reports_light_flatness_and_deep_acceptance() {
+        let graph = graph();
+        graph
+            .create(TaskInput {
+                id: Some("a".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        graph
+            .create(TaskInput {
+                id: Some("b".into()),
+                blocked_by: Some(vec!["a".into()]),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let light = graph.validate(DagPreset::Light).unwrap();
+        assert!(!light.ok);
+        assert!(light.error.unwrap().contains("light preset forbids"));
+
+        let deep = graph.validate(DagPreset::Deep).unwrap();
+        assert!(deep.ok);
+        assert_eq!(deep.nodes, 2);
+    }
+
+    #[test]
+    fn verification_round_trips_through_update_and_persists() {
+        let graph = graph();
+        graph
+            .create(TaskInput {
+                id: Some("a".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        graph
+            .set_verification("a", honest_artifact(&["a"]))
+            .unwrap();
+        let read = graph.read("a").unwrap().unwrap();
+        assert_eq!(read.verification, Some(honest_artifact(&["a"])));
     }
 }

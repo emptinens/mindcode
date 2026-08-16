@@ -10,7 +10,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DagPreset {
     #[default]
     Light,
@@ -18,6 +19,14 @@ pub enum DagPreset {
 }
 
 impl DagPreset {
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "light" => Self::Light,
+            "deep" => Self::Deep,
+            _ => return None,
+        })
+    }
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::Light => "light",
@@ -75,7 +84,7 @@ pub enum NodeStatus {
 /// A typed handoff artifact carried on dependency edges (§12.1).  The honest
 /// `what_i_did_not_check` field is structural: an artifact that claims to have
 /// verified everything is rejected, not rewarded.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct VerifyArtifact {
     pub findings: Vec<String>,
     /// `file:line` evidence, kept as opaque strings.
