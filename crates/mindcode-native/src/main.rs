@@ -2188,6 +2188,7 @@ async fn run_tui_host_session(
     let (worker_event_tx, mut worker_event_rx) = mpsc::unbounded_channel::<WorkerEvent>();
     let worker_pool = WorkerPool::with_defaults(DEFAULT_MAX_CONCURRENT)
         .map_err(|error| anyhow!(error.to_string()))?;
+    let active_scopes: ActiveScopes = Arc::new(Mutex::new(BTreeMap::new()));
     let processor_daemon_control = Arc::clone(&daemon_control);
     let processor = tokio::spawn(async move {
         // Session-scoped worker permission tier (§10.4.2); default is the
@@ -2268,6 +2269,7 @@ async fn run_tui_host_session(
                                     pending: pending.clone(),
                                     worker_event_tx: worker_event_tx.clone(),
                                     pool: worker_pool.clone(),
+                                    active_scopes: active_scopes.clone(),
                                 })
                                 .await {
                                     Ok(message) => transcript.push("system", message),
@@ -2389,6 +2391,9 @@ async fn run_tui_host_session(
                 }
                 Some(event) = worker_event_rx.recv() => {
                     if let WorkerEvent::Finished(report) = event {
+                        if let Ok(mut active) = active_scopes.lock() {
+                            active.remove(&report.id);
+                        }
                         processor_stats.lock().unwrap().record_worker(&report.usage);
                         // §13.2: worker reports use a dedicated role so they
                         // persist across host restarts and reattach as their
@@ -4784,6 +4789,7 @@ struct WorkerLaunch<'a> {
     pending: Arc<Mutex<PendingApprovals>>,
     worker_event_tx: mpsc::UnboundedSender<WorkerEvent>,
     pool: WorkerPool,
+    active_scopes: ActiveScopes,
 }
 
 /// Deterministic Ares-style signals collected before a worker step. The
@@ -4847,6 +4853,71 @@ fn ares_decide_for_task(task: &str) -> AresDecision {
     })
 }
 
+/// Active worker scopes keyed by worker id. Parallel workers must receive
+/// non-overlapping ownership; a new worker that would overlap an active one is
+/// refused instead of silently sharing the workspace.
+type ActiveScopes = Arc<Mutex<BTreeMap<String, WorkerScope>>>;
+
+/// Pick a workspace subdirectory explicitly named by the task, if any. Only
+/// existing top-level directories are recognized, so a task like
+/// "fix crates/foo" scopes the worker to `crates/foo` while unrelated prose
+/// leaves the scope default (the whole workspace).
+fn task_workspace_dir(cwd: &Path, task: &str) -> Option<PathBuf> {
+    let directories = fs::read_dir(cwd)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+        .map(|entry| entry.file_name())
+        .collect::<Vec<_>>();
+    task.split_whitespace()
+        .filter_map(|word| {
+            let cleaned: String = word
+                .chars()
+                .filter(|character| {
+                    character.is_alphanumeric() || matches!(character, '-' | '_' | '.' | '/')
+                })
+                .collect();
+            // A task path like `crates/foo/bar.rs` scopes to its first
+            // top-level component, so only existing top-level dirs match.
+            let head = cleaned.split('/').next().unwrap_or_default();
+            directories
+                .iter()
+                .find(|directory| directory.as_os_str() == head)
+                .map(PathBuf::from)
+        })
+        .next()
+}
+
+/// Assign an explicit, disjoint scope to a worker (§6.5). Default is the whole
+/// workspace when no other worker is active; a task that names an existing
+/// workspace subdirectory gets exactly that directory. Overlap with any active
+/// scope fails closed.
+fn assign_worker_scope(cwd: &Path, task: &str, active: &[WorkerScope]) -> Result<WorkerScope> {
+    if let Some(directory) = task_workspace_dir(cwd, task) {
+        let scope = WorkerScope::new(vec![directory.clone()]).map_err(|error| {
+            anyhow!(
+                "invalid worker scope entry {}: {}",
+                error.entry,
+                error.reason
+            )
+        })?;
+        if active.iter().any(|other| other.intersects(&scope)) {
+            return Err(anyhow!(
+                "worker scope {} overlaps an active worker",
+                directory.display()
+            ));
+        }
+        return Ok(scope);
+    }
+    let scope = WorkerScope::all();
+    if active.iter().any(|other| other.intersects(&scope)) {
+        return Err(anyhow!(
+            "a workspace-scoped worker is already active; scope this task to a subdirectory"
+        ));
+    }
+    Ok(scope)
+}
+
 /// Resolve the active provider into a worker model client, build an ownership
 /// guard around the launch directory, and spawn the agent on the bounded pool.
 /// Returns the transcript confirmation line; the report arrives later through
@@ -4861,6 +4932,7 @@ async fn spawn_worker(request: WorkerLaunch<'_>) -> Result<String> {
         pending,
         worker_event_tx,
         pool,
+        active_scopes,
     } = request;
     let settings = load_native_settings()?;
     let ares = ares_decide_for_task(task);
@@ -4870,12 +4942,21 @@ async fn spawn_worker(request: WorkerLaunch<'_>) -> Result<String> {
         pending: pending.clone(),
         worker_event_tx: worker_event_tx.clone(),
     };
-    let scope = WorkerScope::all();
+    let cwd = env::current_dir().map_err(anyhow::Error::msg)?;
+    // Assign a disjoint scope under the registry lock, then keep the worker id
+    // registered until its `Finished` event is processed.
+    let scope = {
+        let mut active = active_scopes
+            .lock()
+            .map_err(|_| anyhow!("worker scope registry poisoned"))?;
+        let scope = assign_worker_scope(&cwd, task, &active.values().cloned().collect::<Vec<_>>())?;
+        active.insert(worker_id.clone(), scope.clone());
+        scope
+    };
     let config_home = native_settings_path()?
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| anyhow!("MindCode config home is unavailable"))?;
-    let cwd = env::current_dir().map_err(anyhow::Error::msg)?;
     // §11.4: shell hooks live globally and project-locally; project-local
     // scripts shadow the global ones by name.
     let hooks = HookSet {
@@ -7001,6 +7082,60 @@ mod tests {
             ares_decide_for_task("verify the migration tests").effort,
             WorkerEffort::Medium
         );
+    }
+
+    #[test]
+    fn task_workspace_dir_matches_only_existing_top_level_dirs() {
+        let directory = tempdir().unwrap();
+        fs::create_dir_all(directory.path().join("crates")).unwrap();
+        fs::create_dir_all(directory.path().join("src")).unwrap();
+        assert_eq!(
+            task_workspace_dir(directory.path(), "fix crates/foo/bar.rs"),
+            Some(PathBuf::from("crates"))
+        );
+        assert_eq!(
+            task_workspace_dir(directory.path(), "refactor the src module"),
+            Some(PathBuf::from("src"))
+        );
+        assert_eq!(
+            task_workspace_dir(directory.path(), "build everything"),
+            None
+        );
+    }
+
+    #[test]
+    fn assign_worker_scope_defaults_to_workspace_and_rejects_overlap() {
+        let directory = tempdir().unwrap();
+        fs::create_dir_all(directory.path().join("crates")).unwrap();
+        fs::create_dir_all(directory.path().join("src")).unwrap();
+
+        let idle = assign_worker_scope(directory.path(), "build everything", &[]).unwrap();
+        assert!(idle.is_all());
+
+        // A task naming an existing subdirectory is scoped to exactly that dir.
+        let scoped = assign_worker_scope(
+            directory.path(),
+            "fix crates/foo",
+            &[WorkerScope::new(vec![PathBuf::from("src")]).unwrap()],
+        )
+        .unwrap();
+        assert_eq!(scoped.entries(), &[PathBuf::from("crates")]);
+
+        // Overlap with an active worker fails closed.
+        assert!(assign_worker_scope(
+            directory.path(),
+            "fix crates/foo",
+            &[WorkerScope::new(vec![PathBuf::from("crates")]).unwrap()],
+        )
+        .is_err());
+
+        // The whole-workspace default is refused while any worker is active.
+        assert!(assign_worker_scope(
+            directory.path(),
+            "build everything",
+            &[WorkerScope::new(vec![PathBuf::from("src")]).unwrap()],
+        )
+        .is_err());
     }
 
     #[test]
