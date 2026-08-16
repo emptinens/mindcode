@@ -981,6 +981,7 @@ dependencies = [
  "libc",
  "mindcode-protocol",
  "mindcode-provider",
+ "mindcode-runtime",
  "mindcode-settings",
  "mindcode-state",
  "mindcode-transport",
@@ -1010,6 +1011,20 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "mindcode-runtime"
+version = "0.1.3"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "mindcode-provider",
+ "mindcode-settings",
+ "mindcode-transport",
+ "mindcode-worker",
+ "serde_json",
+ "tokio-util",
 ]
 
 [[package]]

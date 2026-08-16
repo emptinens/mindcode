@@ -1,0 +1,17 @@
+[package]
+name = "mindcode-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Shared provider/model/credential resolution and Worker model client for MindCode"
+
+[dependencies]
+anyhow = "1.0"
+futures-util = "0.3"
+serde_json = "1"
+tokio-util = { version = "0.7", features = ["rt"] }
+mindcode-provider = { path = "../mindcode-provider" }
+mindcode-settings = { path = "../mindcode-settings" }
+mindcode-transport = { path = "../mindcode-transport" }
+mindcode-worker = { path = "../mindcode-worker" }

@@ -19,6 +19,7 @@ mindcoded = { path = "../mindcoded" }
 mindcode-state = { path = "../mindcode-state" }
 mindcode-protocol = { path = "../mindcode-protocol" }
 mindcode-provider = { path = "../mindcode-provider" }
+mindcode-runtime = { path = "../mindcode-runtime" }
 mindcode-settings = { path = "../mindcode-settings" }
 mindcode-tui = { path = "../mindcode-tui" }
 mindcode-transport = { path = "../mindcode-transport" }
