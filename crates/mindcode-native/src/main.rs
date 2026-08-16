@@ -4214,7 +4214,6 @@ fn model_price_per_1k(model: &str) -> (f64, f64) {
         }
     }
     match model {
-        "gpt-5.6-luna" => (0.0010, 0.0020),
         "moonshotai/Kimi-K3" | "kimi-k3" => (0.0006, 0.0024),
         "opencode-go" => (0.0002, 0.0006),
         _ => (0.0005, 0.0015),
@@ -5401,7 +5400,7 @@ mod tests {
             OsString::from("--provider"),
             OsString::from("vexzy"),
             OsString::from("--worker-model"),
-            OsString::from("gpt-5.6-luna"),
+            OsString::from("worker-model-x"),
             OsString::from("--worker-effort-lock"),
             OsString::from("max"),
             OsString::from("auth"),
@@ -5409,7 +5408,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(options.provider.as_deref(), Some("vexzy"));
-        assert_eq!(options.worker_model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(options.worker_model.as_deref(), Some("worker-model-x"));
         assert_eq!(options.worker_effort_lock.as_deref(), Some("max"));
         assert_eq!(
             remaining,
@@ -5418,13 +5417,13 @@ mod tests {
 
         let (options, remaining) = scan_run_options(&[
             OsString::from("--provider=vexzy"),
-            OsString::from("--worker-model=gpt-5.6-luna"),
+            OsString::from("--worker-model=worker-model-x"),
             OsString::from("--worker-effort-lock=off"),
             OsString::from("list"),
         ])
         .unwrap();
         assert_eq!(options.provider.as_deref(), Some("vexzy"));
-        assert_eq!(options.worker_model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(options.worker_model.as_deref(), Some("worker-model-x"));
         assert_eq!(options.worker_effort_lock.as_deref(), Some("off"));
         assert_eq!(remaining, vec![OsString::from("list")]);
 
@@ -5441,7 +5440,7 @@ mod tests {
 
     #[test]
     fn worker_model_and_effort_lock_overrides_validate_fail_closed() {
-        assert!(parse_worker_model_override("gpt-5.6-luna").is_ok());
+        assert!(parse_worker_model_override("worker-model-x").is_ok());
         assert!(parse_worker_model_override("").is_err());
         assert!(parse_worker_model_override("two words").is_err());
 
@@ -6279,7 +6278,7 @@ mod tests {
                     cached_read_tokens: 6,
                     ..Default::default()
                 },
-                model: "gpt-5.6-luna".into(),
+                model: "opencode-go".into(),
                 usage_reported: true,
             });
             assert_eq!(stats.input_tokens, 10);
@@ -6388,7 +6387,7 @@ mod tests {
                     output_tokens: output,
                     ..Default::default()
                 },
-                model: "gpt-5.6-luna".into(),
+                model: "opencode-go".into(),
                 usage_reported: true,
             });
         }
@@ -6402,7 +6401,7 @@ mod tests {
 
     #[test]
     fn estimate_turn_cost_savings_accounts_for_cached_tokens() {
-        // gpt-5.6-luna input is $0.001/1K; cache reads cost 0.1× that. Reading
+        // opencode-go input is $0.0002/1K; cache reads cost 0.1× that. Reading
         // 8000 cached tokens must cost far less than billing them at full rate.
         let outcome = ChatOutcome {
             text: String::new(),
@@ -6412,12 +6411,12 @@ mod tests {
                 cached_read_tokens: 8_000,
                 cache_creation_tokens: 0,
             },
-            model: "gpt-5.6-luna".to_owned(),
+            model: "opencode-go".to_owned(),
             usage_reported: true,
         };
         let (cost, savings) = estimate_turn_cost(&outcome).expect("usage is marked reported");
-        let expected_naive = 10_000.0 / 1000.0 * 0.0010;
-        let expected_cost = 2000.0 / 1000.0 * 0.0010 + 8000.0 / 1000.0 * 0.0001;
+        let expected_naive = 10_000.0 / 1000.0 * 0.0002;
+        let expected_cost = 2000.0 / 1000.0 * 0.0002 + 8000.0 / 1000.0 * 0.00002;
         assert!((cost - expected_cost).abs() < 1e-12, "cost = {cost}");
         assert!(
             (savings - (expected_naive - expected_cost)).abs() < 1e-12,
@@ -6438,11 +6437,11 @@ mod tests {
                 cached_read_tokens: 0,
                 cache_creation_tokens: 1_000,
             },
-            model: "gpt-5.6-luna".to_owned(),
+            model: "opencode-go".to_owned(),
             usage_reported: true,
         };
         let (cost, savings) = estimate_turn_cost(&outcome).expect("usage is marked reported");
-        assert!((cost - 1.25 * 0.0010).abs() < 1e-12, "cost = {cost}");
+        assert!((cost - 1.25 * 0.0002).abs() < 1e-12, "cost = {cost}");
         assert_eq!(savings, 0.0);
     }
 
@@ -6455,10 +6454,10 @@ mod tests {
             fs::create_dir_all(&config_dir).unwrap();
             fs::write(
                 config_dir.join("pricing.json"),
-                r#"{"gpt-5.6-luna": [9.0, 18.0], "kimi": [0.1, 0.2]}"#,
+                r#"{"opencode-go": [9.0, 18.0], "kimi": [0.1, 0.2]}"#,
             )
             .unwrap();
-            let (input, output) = model_price_per_1k("gpt-5.6-luna");
+            let (input, output) = model_price_per_1k("opencode-go");
             assert_eq!(input, 9.0);
             assert_eq!(output, 18.0);
             // Unknown models still fall back to the conservative default.
@@ -6488,7 +6487,7 @@ mod tests {
                 OsString::from("--base-url"),
                 OsString::from("https://edited.example/v1"),
                 OsString::from("--allowlist"),
-                OsString::from("gpt-5.6-luna"),
+                OsString::from("model-c"),
             ]);
             assert_eq!(code, 0);
             let loaded = load_sandbox_settings(dir);
@@ -6504,7 +6503,7 @@ mod tests {
                     .iter()
                     .map(ModelId::as_str)
                     .collect::<Vec<_>>(),
-                ["gpt-5.6-luna"]
+                ["model-c"]
             );
             assert!(vexzy.active);
             assert_eq!(
@@ -6614,7 +6613,7 @@ mod tests {
                 OsString::from("settings"),
                 OsString::from("allowlist"),
                 OsString::from("vexzy"),
-                OsString::from("gpt-5.6-luna,model-b"),
+                OsString::from("model-c,model-b"),
             ]);
             assert_eq!(code, 0);
             let loaded = load_sandbox_settings(dir);
@@ -6627,7 +6626,7 @@ mod tests {
                     .iter()
                     .map(ModelId::as_str)
                     .collect::<Vec<_>>(),
-                ["gpt-5.6-luna", "model-b"]
+                ["model-c", "model-b"]
             );
 
             let missing = run_dispatch_exit(vec![
@@ -6647,7 +6646,7 @@ mod tests {
                     .iter()
                     .map(ModelId::as_str)
                     .collect::<Vec<_>>(),
-                ["gpt-5.6-luna", "model-b"]
+                ["model-c", "model-b"]
             );
         });
     }
@@ -6659,12 +6658,12 @@ mod tests {
             let code = run_dispatch_exit(vec![
                 OsString::from("settings"),
                 OsString::from("model"),
-                OsString::from("gpt-5.6-luna"),
+                OsString::from("model-c"),
             ]);
             assert_eq!(code, 0);
             assert_eq!(
                 load_sandbox_settings(dir).global_worker_model.as_deref(),
-                Some("gpt-5.6-luna")
+                Some("model-c")
             );
 
             let invalid = run_dispatch_exit(vec![
@@ -6675,7 +6674,7 @@ mod tests {
             assert_eq!(invalid, 1);
             assert_eq!(
                 load_sandbox_settings(dir).global_worker_model.as_deref(),
-                Some("gpt-5.6-luna")
+                Some("model-c")
             );
         });
     }
@@ -6720,7 +6719,7 @@ mod tests {
     fn settings_show_dump_is_secret_free() {
         with_sandbox_env(|dir| {
             let mut settings = NativeSettings {
-                global_worker_model: Some("gpt-5.6-luna".to_owned()),
+                global_worker_model: Some("model-c".to_owned()),
                 worker_effort_lock: Some(WorkerEffort::Max),
                 ..Default::default()
             };
@@ -6752,7 +6751,7 @@ mod tests {
             let value = settings_show_value(&loaded, effective_active(&loaded, None));
             let text = serde_json::to_string(&value).unwrap();
             assert!(text.contains("\"active_provider\":\"custom-a\""));
-            assert!(text.contains("\"global_worker_model\":\"gpt-5.6-luna\""));
+            assert!(text.contains("\"global_worker_model\":\"model-c\""));
             assert!(text.contains("\"worker_effort_lock\":\"max\""));
             assert!(text.contains("\"credential\":\"store:custom-a\""));
             assert!(text.contains("\"protocol\":\"openai-compatible\""));
@@ -7294,17 +7293,17 @@ mod tests {
                 seed_builtin_active(dir);
                 let mut transcript = TuiTranscript::default();
 
-                assert!(dispatch_tui_input("/model gpt-5.6-luna", &mut transcript)
+                assert!(dispatch_tui_input("/model model-c", &mut transcript)
                     .await
                     .unwrap());
                 assert_eq!(
                     load_sandbox_settings(dir).global_worker_model.as_deref(),
-                    Some("gpt-5.6-luna")
+                    Some("model-c")
                 );
                 let TranscriptInput::Entry { text, .. } = transcript.entries.last().unwrap() else {
                     panic!("expected entry");
                 };
-                assert!(text.contains("gpt-5.6-luna"));
+                assert!(text.contains("model-c"));
 
                 assert!(dispatch_tui_input("/effort max", &mut transcript)
                     .await
@@ -7744,7 +7743,7 @@ mod tests {
                                 event: UiInputEventKind::Action(UiActionInput {
                                     action: "composer_submit".to_owned(),
                                     target: None,
-                                    value: Some("/model gpt-5.6-luna".to_owned()),
+                                    value: Some("/model model-c".to_owned()),
                                 }),
                             };
                             stream.write_all(&encode_ui_frame(&input).unwrap()).unwrap();
@@ -7773,10 +7772,10 @@ mod tests {
                 .await
                 .unwrap();
 
-                assert!(reply.contains("gpt-5.6-luna"));
+                assert!(reply.contains("model-c"));
                 assert_eq!(
                     load_sandbox_settings(dir).global_worker_model.as_deref(),
-                    Some("gpt-5.6-luna")
+                    Some("model-c")
                 );
                 processor.abort();
                 server.close().await;
