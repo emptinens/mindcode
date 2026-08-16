@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build the Rust-first single `mindcode` executable for Linux x86_64.
-# No Bun or Node is required; this is the 0.1.3 release artifact.
+# No Bun or Node is required; this is the 0.1.4 release artifact.
 set -eu
 
 cd "$(dirname "$0")/.."

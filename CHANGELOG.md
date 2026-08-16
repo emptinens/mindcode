@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.4 — 2026-08-16
+
+- Ship effort on the wire for both provider protocols, the test runner,
+  todo quality gate, MemoryStore and WorkerReport leader context, P1 marker,
+  ToFu-lite, retry/backoff, honest cost ledger, `/status` metrics, injection
+  delimiters, markdown/mermaid/colors, CI fixtures, pipeline coordinator,
+  VEXZY removal, `mindcode-runtime`, and the daemon WorkerRuntime.
+
 ## Unreleased — 2026-08-16 VEXZY removal amendment
 
 - Remove the built-in VEXZY provider entirely: delete `mindcode-vexzy`, the

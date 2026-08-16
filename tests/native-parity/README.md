@@ -1,6 +1,6 @@
 mindcode --help public compatibility fixture
 
-Captured from the current 0.1.3 native binary (crates/mindcode-native) on
+Captured from the current 0.1.4 native binary (crates/mindcode-native) on
 Linux x86_64.  Paths, credentials, timestamps, and terminal-control output
 are intentionally excluded; the fixture records exact stdout, stderr, and
 exit status only.
@@ -17,8 +17,8 @@ Capture procedure:
 
 Vectors:
 
-- mindcode-help-0.1.3.txt     `--help` (stdout, exit 0)
-- mindcode-version-0.1.3.txt  `--version` (stdout, exit 0)
+- mindcode-help-0.1.4.txt     `--help` (stdout, exit 0)
+- mindcode-version-0.1.4.txt  `--version` (stdout, exit 0)
 - auth-missing-key.*          `auth status` with no active provider
                               (exit 1, "no active provider is configured"
                               on stderr)

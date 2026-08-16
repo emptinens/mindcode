@@ -56,11 +56,11 @@ fn native_cli_matches_canonical_parity_vectors() {
     let home = tempfile::tempdir().unwrap();
     let help = run_isolated(&["--help"], home.path());
     assert_eq!(help.status.code(), Some(0));
-    assert_eq!(help.stdout, fixture("mindcode-help-0.1.3.txt"));
+    assert_eq!(help.stdout, fixture("mindcode-help-0.1.4.txt"));
     assert!(help.stderr.is_empty());
     let version = run_isolated(&["--version"], home.path());
     assert_eq!(version.status.code(), Some(0));
-    assert_eq!(version.stdout, fixture("mindcode-version-0.1.3.txt"));
+    assert_eq!(version.stdout, fixture("mindcode-version-0.1.4.txt"));
     assert!(version.stderr.is_empty());
     assert_vector("auth-missing-key", &["auth", "status"], home.path());
     assert_vector("print-missing-key", &["hello"], home.path());
@@ -72,7 +72,7 @@ fn compatibility_fixture_keeps_the_multi_provider_contract_machine_readable() {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/compatibility.json");
     let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    assert_eq!(value["version"], "0.1.3");
+    assert_eq!(value["version"], "0.1.4");
     assert_eq!(value["platform"], "linux-x64");
     assert_eq!(value["providers"]["presets"], false);
     assert_eq!(

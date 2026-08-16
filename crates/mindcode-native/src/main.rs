@@ -67,7 +67,7 @@ use std::{
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 use tokio_util::sync::CancellationToken;
 
-const VERSION: &str = "0.1.3";
+const VERSION: &str = "0.1.4";
 /// The only stdout write of `settings key`; asserting the constant guarantees
 /// the credential value and the store path can never be echoed.
 const SETTINGS_KEY_CONFIRMATION: &str = "configured";
@@ -2400,7 +2400,7 @@ fn tui_hint() -> TranscriptInput {
         sequence: 0,
         role: "system".to_owned(),
         text:
-            "MindCode 0.1.3 — type a message to chat, /help for commands, Ctrl+P for provider setup"
+            "MindCode 0.1.4 — type a message to chat, /help for commands, Ctrl+P for provider setup"
                 .to_owned(),
     }
 }

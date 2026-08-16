@@ -21,7 +21,7 @@ run_clean() {
 }
 
 # Version and help need no configuration and no JS runtime.
-run_clean --version | grep -q "mindcode 0.1.3"
+run_clean --version | grep -q "mindcode 0.1.4"
 run_clean --help | grep -q "tui"
 
 # First run has no provider profiles: every provider is a custom profile,

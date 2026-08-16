@@ -1,6 +1,6 @@
 # MindCode
 
-MindCode `0.1.3` — Rust-first Linux x64 single executable с multi-provider
+MindCode `0.1.4` — Rust-first Linux x64 single executable с multi-provider
 contract (amendment `2026-08-13`, `2026-08-16`): все провайдеры — обычные
 custom-профили, каждый через один из двух протоколов. Версия `0.1.2`
 checkpointed в локальной истории, но ещё не tagged.
@@ -57,12 +57,12 @@ checkpointed в локальной истории, но ещё не tagged.
 
 ## Команды и совместимость
 
-Публичный compatibility fixture для `0.1.3` должен быть одинаковым в CLI,
+Публичный compatibility fixture для `0.1.4` должен быть одинаковым в CLI,
 документации и tests.  Его минимальная форма — `tests/fixtures/compatibility.json`:
 
 ```json
 {
-  "version": "0.1.3",
+  "version": "0.1.4",
   "platform": "linux-x64",
   "providers": {
     "protocols": {
@@ -195,6 +195,6 @@ Git.  `PLAN.md` — implementation contract, `STATUS.md` — текущий ст
 Планировочная граница `0.1.5` (profiles только в `0.1.5`, credentials
 env-only, profile HTTP только на loopback) была заменена amendment-ами
 `2026-08-13` и `2026-08-16`: профили и публичные remote endpoints — часть
-`0.1.3`, а built-in VEXZY удалён в пользу единообразных custom-профилей.
-Любая будущая работа `0.1.5` должна сохранять provider contract `0.1.3` и не
+`0.1.4`, а built-in VEXZY удалён в пользу единообразных custom-профилей.
+Любая будущая работа `0.1.5` должна сохранять provider contract `0.1.4` и не
 возвращать `/config`, `/submodel` или built-in провайдеров.
