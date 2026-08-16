@@ -28,7 +28,7 @@ fn corpus() -> MemoryStore {
         ),
         (
             "provider-secret",
-            "provider credentials resolve from environment before the local secret store",
+            "provider access keys resolve from environment before the local disk store",
         ),
         (
             "daemon-reload",
@@ -64,7 +64,7 @@ fn corpus() -> MemoryStore {
         ),
         (
             "tui-colors",
-            "the TUI colors command writes secret free palette overrides and hot reloads them",
+            "the TUI colors command writes palette overrides without touching disk and hot reloads them",
         ),
         (
             "tui-markdown",
