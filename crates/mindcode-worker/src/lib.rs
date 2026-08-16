@@ -36,7 +36,10 @@ pub use pipeline::{
 pub use pool::{PoolOutcome, WorkerPool, DEFAULT_MAX_CONCURRENT, MAX_CONCURRENT_CAP};
 pub use report::{CommandRun, TestRun, WorkerReport, WorkerStatus, WorkerUsage};
 pub use risk::{classify, ShellRisk};
-pub use scope::{ScopeError, WorkerScope};
+pub use scope::{
+    assign_worker_scope, task_workspace_dir, ActiveScopes, ScopeAssignmentError, ScopeError,
+    ScopeLease, WorkerScope,
+};
 pub use tools::{
     append_file, default_test_argv, read_file, resolve_path, run_agentgrep, run_git, run_rg,
     run_shell, run_shell_sandboxed, run_tests, write_file, FileReadResult, TestRunResult, TodoItem,
