@@ -28,6 +28,9 @@ pub use harness_import::{
     import_session, HarnessImportError, ImportedMessage, ImportedSession, ResumeTarget,
 };
 
+pub mod ares;
+pub use ares::{ares_classify, AresDecision, AresSignals};
+
 pub mod dag_preset;
 pub use dag_preset::{
     fix_node_for, validate_dag, DagNode, DagPreset, DagValidationError, NodeKind, NodeStatus,
@@ -2253,7 +2256,6 @@ impl PreparedTask {
             .map(|value| nonempty(&value, "owner"))
             .transpose()?;
         let kind = input.kind.unwrap_or(TaskKind::Implement);
-        let effort = input.effort.unwrap_or(TaskEffort::Medium);
         let priority = input.priority.unwrap_or(0);
         ensure_js_safe_i64(priority, "priority")?;
         let explicit_sets = input.read_set.is_some() || input.write_set.is_some();
@@ -2265,6 +2267,17 @@ impl PreparedTask {
             normalize_targets(input.files_touched.unwrap_or_default(), "files_touched")?;
         let read_set = normalize_targets(input.read_set.unwrap_or_default(), "read_set")?;
         let write_set = normalize_targets(input.write_set.unwrap_or_default(), "write_set")?;
+        // Explicit effort always wins; otherwise the deterministic Ares
+        // heuristic classifies the step before dispatch (§6.3).
+        let effort = input.effort.unwrap_or_else(|| {
+            ares_classify(AresSignals {
+                kind,
+                read_set_len: read_set.len(),
+                write_set_len: write_set.len(),
+                blocked_by_len: blocked_by.len(),
+            })
+            .effort
+        });
         let isolation = input.isolation.unwrap_or(TaskIsolation::Shared);
         let lease_id = input
             .lease_id
