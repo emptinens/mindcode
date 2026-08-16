@@ -7,15 +7,6 @@
       "anthropic-compatible": ["/v1/models", "/v1/messages"]
     },
     "presets": false,
-    "builtin": {
-      "vexzy": {
-        "protocol": "openai-compatible",
-        "base_url": "https://api.echogate.one/v1",
-        "credential_env": "VEXZY_API_KEY",
-        "editable": true,
-        "removable": true
-      }
-    },
     "custom": {
       "fields": ["name", "base_url", "protocol", "key"],
       "eligibility": "per-profile allowlist model IDs",
@@ -48,8 +39,6 @@
     "public_remote_endpoints": true
   },
   "eligibility": {
-    "vexzy": "catalog_driven",
-    "catalog_fields": ["available", "worker_capabilities", "supported_reasoning_efforts"],
     "custom": "per_profile_allowlist",
     "custom_default": "empty",
     "fail_closed": true
@@ -62,11 +51,7 @@
       "resolution": ["env", "store", "fail-closed"],
       "exit_on_missing_credential": 1
     },
-    "model": {
-      "status": "public",
-      "sets_global_worker_model": true,
-      "subcommands": ["eligible"]
-    },
+    "model": {"status": "removed", "error": "unknown_command"},
     "provider": {
       "status": "public",
       "switches_active_provider": true,
@@ -79,11 +64,7 @@
       "subcommands": ["show", "key", "allowlist", "model", "effort"],
       "key_command_output": "configured"
     },
-    "effort": {
-      "status": "public",
-      "sets_leader_effort": true,
-      "subcommands": ["worker"]
-    },
+    "effort": {"status": "removed", "error": "unknown_command"},
     "config": {"status": "removed", "error": "unknown_command"},
     "submodel": {"status": "removed", "error": "unknown_command"}
   },
@@ -94,7 +75,7 @@
   },
   "worker": {
     "selection": "global",
-    "eligible_catalog_only": true,
+    "allowlist_only": true,
     "effort_lock": "optional-global",
     "allowed_efforts": ["none", "low", "medium", "high", "xhigh", "max"]
   },

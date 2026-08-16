@@ -20,11 +20,11 @@ fn provider_config_rejects_unknown_fields() {
 fn provider_config_allowlist_defaults_empty() {
     let config: ProviderConfig = serde_json::from_str(
         r#"{
-            "id": "vexzy",
-            "name": "VEXZY",
+            "id": "custom-a",
+            "name": "Custom A",
             "protocol": "openai-compatible",
-            "base_url": "https://api.echogate.one/v1",
-            "credential": {"env": "VEXZY_API_KEY"},
+            "base_url": "https://custom.example/v1",
+            "credential": {"env": "CUSTOM_API_KEY"},
             "active": true
         }"#,
     )
@@ -70,17 +70,17 @@ fn invalid_model_and_provider_ids_are_rejected() {
 
 #[test]
 fn credential_ref_round_trips_both_shapes() {
-    let env_ref = CredentialRef::env("VEXZY_API_KEY");
+    let env_ref = CredentialRef::env("CUSTOM_API_KEY");
     let json = serde_json::to_string(&env_ref).unwrap();
-    assert_eq!(json, r#"{"env":"VEXZY_API_KEY"}"#);
+    assert_eq!(json, r#"{"env":"CUSTOM_API_KEY"}"#);
     assert_eq!(
         serde_json::from_str::<CredentialRef>(&json).unwrap(),
         env_ref
     );
 
-    let store_ref = CredentialRef::store("vexzy");
+    let store_ref = CredentialRef::store("custom-a");
     let json = serde_json::to_string(&store_ref).unwrap();
-    assert_eq!(json, r#"{"store":"vexzy"}"#);
+    assert_eq!(json, r#"{"store":"custom-a"}"#);
     assert_eq!(
         serde_json::from_str::<CredentialRef>(&json).unwrap(),
         store_ref

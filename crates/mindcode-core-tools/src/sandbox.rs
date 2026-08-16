@@ -356,7 +356,7 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::create_dir_all(&config_home).unwrap();
         let secret = config_home.join("credentials.json");
-        std::fs::write(&secret, "{\"vexzy\":\"super-secret-value\"}").unwrap();
+        std::fs::write(&secret, "{\"api_key\":\"super-secret-value\"}").unwrap();
 
         let config = SandboxConfig::new(workspace.clone(), config_home.clone());
         let cancel = CancellationToken::new();

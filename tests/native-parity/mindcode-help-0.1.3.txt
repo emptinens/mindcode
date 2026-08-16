@@ -11,8 +11,6 @@ Options:
 
 Commands:
   auth status       Show active provider authentication status
-  model eligible    Inspect eligible Worker models of the active provider
-  effort worker     Validate a Worker model and optional effort lock
   provider          Manage provider profiles (list, use, add, remove, edit)
   settings          Manage settings (show, key, allowlist, model, effort lock)
   setup-token       Show credential setup instructions

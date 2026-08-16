@@ -24,10 +24,14 @@ run_clean() {
 run_clean --version | grep -q "mindcode 0.1.3"
 run_clean --help | grep -q "tui"
 
-# First-run seeds the built-in VEXZY profile (active, env credential).
-run_clean provider list | grep -q '"id":"vexzy"'
-run_clean auth status | grep -q '"apiProvider":"vexzy"'
-run_clean settings show | grep -q '"active_provider":"vexzy"'
+# First run has no provider profiles: every provider is a custom profile,
+# so the provider table is empty and `auth status` fails closed.
+run_clean provider list | grep -q '^\[\]$'
+run_clean settings show | grep -q '"active_provider":null'
+if run_clean auth status 2>/dev/null; then
+  echo "auth status should fail closed with no active provider" >&2
+  exit 1
+fi
 
 # The daemon is in-process; verify its entrypoint parses without a JS runtime.
 run_clean daemon --help | grep -q "mindcode daemon"

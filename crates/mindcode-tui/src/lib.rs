@@ -3067,12 +3067,12 @@ mod tests {
             activity: Vec::new(),
             permissions: Vec::new(),
             providers: vec![UiProviderSnapshot {
-                id: "vexzy".into(),
-                name: "VEXZY".into(),
+                id: "custom-a".into(),
+                name: "Custom A".into(),
                 protocol: "openai-compatible".into(),
-                base_url: "https://api.echogate.one/v1".into(),
+                base_url: "https://custom.example/v1".into(),
                 active: true,
-                credential: Some("env:VEXZY_API_KEY".into()),
+                credential: Some("env:CUSTOM_KEY".into()),
                 configured: true,
                 allowlist: vec!["gpt-5.6-luna".into()],
             }],
@@ -3146,12 +3146,12 @@ mod tests {
         let mut current = snapshot(1);
         current.providers = vec![
             UiProviderSnapshot {
-                id: "vexzy".into(),
-                name: "VEXZY".into(),
+                id: "provider-0".into(),
+                name: "Provider 0".into(),
                 protocol: "openai-compatible".into(),
-                base_url: "https://api.echogate.one/v1".into(),
+                base_url: "https://provider-0.example/v1".into(),
                 active: true,
-                credential: Some("env:VEXZY_API_KEY".into()),
+                credential: Some("env:PROVIDER_0_KEY".into()),
                 configured: true,
                 allowlist: vec!["gpt-5.6-luna".into()],
             },
@@ -3205,8 +3205,8 @@ mod tests {
         assert_eq!(app.overlay, OverlayView::Models);
         assert!(app.input_buffer.is_empty());
 
-        // The active provider (vexzy) exposes one model; selecting it emits
-        // the model_select action with the model id as its target.
+        // The active provider exposes one model; selecting it emits the
+        // model_select action with the model id as its target.
         let mut enter = submit_message();
         assert!(app.contextualize_input(&mut enter));
         match enter {

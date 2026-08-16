@@ -1,13 +1,11 @@
 //! MindCode local daemon lifecycle and protocol service.
 
-pub mod catalog_cache;
 mod instance;
 pub mod mcp_stdio;
 pub mod protocol;
 pub mod session_manager;
 
 use anyhow::{bail, Context, Result};
-use catalog_cache::{CatalogCache, CatalogPutError, CatalogPutParams};
 use instance::InstanceLock;
 use mcp_stdio::{
     McpStdioConnectionState, McpStdioError, McpStdioErrorCode, McpStdioStatus, McpStdioSupervisor,
@@ -118,9 +116,6 @@ const SERVER_CAPABILITIES: &[&str] = &[
     "mcp.stdio.close",
     "mcp.stdio.status",
     "auth.token",
-    "vexzy.catalog.get",
-    "vexzy.catalog.put",
-    "vexzy.catalog.status",
 ];
 
 type SharedWriter = Arc<AsyncMutex<OwnedWriteHalf>>;
@@ -229,7 +224,6 @@ struct DaemonState {
     session_index: Arc<SessionIndex>,
     session_manager: Arc<SessionManager>,
     mcp_stdio: Arc<McpStdioSupervisor>,
-    catalog_cache: Arc<CatalogCache>,
     request_ledger: Arc<Mutex<RequestLedger>>,
     metrics: Arc<Metrics>,
     reload_requested: AtomicBool,
@@ -289,7 +283,6 @@ impl Daemon {
                 session_index,
                 session_manager,
                 mcp_stdio: Arc::new(McpStdioSupervisor::new()),
-                catalog_cache: Arc::new(CatalogCache::new()),
                 request_ledger: Arc::new(Mutex::new(RequestLedger::default())),
                 reload_requested: AtomicBool::new(false),
                 config,
@@ -1359,22 +1352,6 @@ fn parse_params<T: DeserializeOwned>(
     serde_json::from_value(params).map_err(|error| RequestResult::invalid_params(error.to_string()))
 }
 
-fn parse_empty_params_named(
-    params: Option<Value>,
-    operation: &str,
-) -> std::result::Result<(), RequestResult> {
-    match params {
-        Some(Value::Object(object)) if object.is_empty() => Ok(()),
-        Some(Value::Object(_)) | Some(_) | None => Err(RequestResult::invalid_params(format!(
-            "{operation} params must be an empty object"
-        ))),
-    }
-}
-
-fn catalog_put_error(error: CatalogPutError) -> RequestResult {
-    RequestResult::error(error.code(), error.message())
-}
-
 fn parse_empty_params(params: Option<Value>) -> std::result::Result<(), RequestResult> {
     match params {
         Some(Value::Object(object)) if object.is_empty() => Ok(()),
@@ -1645,28 +1622,6 @@ async fn execute_request(
             match git_rev_parse(request, cancellation).await {
                 Ok(value) => RequestResult::serialized(value),
                 Err(error) => Ok(RequestResult::core_tool_error(error)),
-            }
-        }
-        "vexzy.catalog.get" => {
-            if let Err(error) = parse_empty_params_named(params, "catalog get") {
-                return Ok(error);
-            }
-            RequestResult::serialized(state.catalog_cache.get())
-        }
-        "vexzy.catalog.status" => {
-            if let Err(error) = parse_empty_params_named(params, "catalog status") {
-                return Ok(error);
-            }
-            RequestResult::serialized(state.catalog_cache.status())
-        }
-        "vexzy.catalog.put" => {
-            let request = match parse_params::<CatalogPutParams>(params) {
-                Ok(value) => value,
-                Err(error) => return Ok(error),
-            };
-            match state.catalog_cache.put(request) {
-                Ok(value) => RequestResult::serialized(value),
-                Err(error) => Ok(catalog_put_error(error)),
             }
         }
         "mcp.stdio.open" => {
@@ -2240,7 +2195,6 @@ fn is_mutation_method(method: &str) -> bool {
             | "mcp.stdio.open"
             | "mcp.stdio.send"
             | "mcp.stdio.close"
-            | "vexzy.catalog.put"
     )
 }
 
@@ -3322,129 +3276,6 @@ mod tests {
             after_close,
             ServerMessage::Response { ok: true, result: Some(result), .. }
                 if result["message"].is_null() && result["closed"] == true
-        ));
-
-        shutdown(&mut stream).await;
-        drop(stream);
-        task.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn vexzy_catalog_rpc_matches_model_broker_wire_schema() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("run/mindcoded.sock");
-        let task = tokio::spawn(Daemon::new(test_config(path.clone())).run());
-        wait_for_socket(&path).await;
-        let mut stream = connect_and_handshake(&path).await;
-
-        let status = request(
-            &mut stream,
-            "catalog-status-empty",
-            "vexzy.catalog.status",
-            Some(json!({})),
-        )
-        .await;
-        assert!(matches!(
-            status,
-            ServerMessage::Response { ok: true, result: Some(result), .. }
-                if result == json!({"state":"empty","has_snapshot":false})
-        ));
-
-        let snapshot = json!({
-            "schema_version": 1,
-            "fetched_at_ms": 100,
-            "digest": "fdccc8661cf7582246eb441b934761d82e768a0116dc57491002e30aad826c04",
-            "models": []
-        });
-        let put = request(
-            &mut stream,
-            "catalog-put-1",
-            "vexzy.catalog.put",
-            Some(json!({"snapshot": snapshot})),
-        )
-        .await;
-        assert!(matches!(
-            put,
-            ServerMessage::Response { ok: true, result: Some(result), .. }
-                if result == json!({"stored":true})
-        ));
-
-        let get = request(
-            &mut stream,
-            "catalog-get-1",
-            "vexzy.catalog.get",
-            Some(json!({})),
-        )
-        .await;
-        assert!(matches!(
-            get,
-            ServerMessage::Response { ok: true, result: Some(result), .. }
-                if result == json!({"snapshot": snapshot})
-        ));
-
-        let ready = request(
-            &mut stream,
-            "catalog-status-ready",
-            "vexzy.catalog.status",
-            Some(json!({})),
-        )
-        .await;
-        assert!(matches!(
-            ready,
-            ServerMessage::Response { ok: true, result: Some(result), .. }
-                if result == json!({
-                    "state":"ready",
-                    "has_snapshot":true,
-                    "fetched_at_ms":100,
-                    "digest":"fdccc8661cf7582246eb441b934761d82e768a0116dc57491002e30aad826c04"
-                })
-        ));
-
-        // `put` is a mutation and is replayed by the daemon request ledger.
-        drop(stream);
-        let mut stream = connect_and_handshake(&path).await;
-        let replay = request(
-            &mut stream,
-            "catalog-put-1",
-            "vexzy.catalog.put",
-            Some(json!({"snapshot": snapshot})),
-        )
-        .await;
-        assert!(matches!(
-            replay,
-            ServerMessage::Response { ok: true, result: Some(result), .. }
-                if result == json!({"stored":true})
-        ));
-
-        let unknown = request(
-            &mut stream,
-            "catalog-unknown",
-            "vexzy.catalog.put",
-            Some(json!({"snapshot": snapshot, "expected_generation": 1})),
-        )
-        .await;
-        assert!(matches!(
-            unknown,
-            ServerMessage::Response { ok: false, error: Some(error), .. }
-                if error.code == "INVALID_PARAMS"
-        ));
-
-        let stale = request(
-            &mut stream,
-            "catalog-stale",
-            "vexzy.catalog.put",
-            Some(json!({"snapshot": {
-                "schema_version": 1,
-                "fetched_at_ms": 99,
-                "digest": "ff946ef3ef426df6bd7ec36f60548a5348b97aec5cb2d3c3b1835d1cb0d8fa83",
-                "models": []
-            }})),
-        )
-        .await;
-        assert!(matches!(
-            stale,
-            ServerMessage::Response { ok: false, error: Some(error), .. }
-                if error.code == "catalog_stale"
         ));
 
         shutdown(&mut stream).await;

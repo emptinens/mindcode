@@ -1,1 +1,0 @@
-{"apiProvider":"vexzy","authMethod":"none","credential":"not configured","loggedIn":false,"provider":{"credential":"env:VEXZY_API_KEY","id":"vexzy","protocol":"openai-compatible"}}

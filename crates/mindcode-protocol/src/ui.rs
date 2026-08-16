@@ -528,8 +528,7 @@ pub struct UiProviderSnapshot {
     /// fail-closed).  Only a bool; the value never enters a snapshot.
     #[serde(default)]
     pub configured: bool,
-    /// Model ids selectable for this profile (the allowlist; for the built-in
-    /// VEXZY profile this is the catalog-driven fallback).  Metadata only,
+    /// Model ids selectable for this profile (the allowlist).  Metadata only,
     /// never credentials.
     #[serde(
         default,
@@ -2032,14 +2031,14 @@ mod tests {
                 agent_id: Some("agent-luna".into()),
             }],
             providers: vec![UiProviderSnapshot {
-                id: "vexzy".into(),
-                name: "VEXZY".into(),
+                id: "custom-a".into(),
+                name: "Custom A".into(),
                 protocol: "openai-compatible".into(),
-                base_url: "https://api.echogate.one/v1".into(),
+                base_url: "https://custom.example/v1".into(),
                 active: true,
-                credential: Some("env:VEXZY_API_KEY".into()),
+                credential: Some("env:CUSTOM_KEY".into()),
                 configured: true,
-                allowlist: vec!["gpt-5.6-luna".into()],
+                allowlist: vec!["model-a".into()],
             }],
             writer: UiWriterState {
                 mode: "writer".into(),

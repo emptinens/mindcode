@@ -159,7 +159,7 @@ async fn read_file_redacts_credentials_before_reaching_the_caller() {
     std::fs::create_dir(fixture.root().join("src")).unwrap();
     std::fs::write(
         fixture.root().join("src/notes.md"),
-        "VEXZY_API_KEY=forge-read-file-secret-12345\nplain text\n",
+        "PROVIDER_API_KEY=forge-read-file-secret-12345\nplain text\n",
     )
     .unwrap();
 

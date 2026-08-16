@@ -426,7 +426,7 @@ fn validate_cwd(cwd: &Path) -> CoreToolResult<()> {
 
 fn is_credential_shaped_key(key: &str) -> bool {
     let normalized = key.to_ascii_uppercase().replace(['-', '.'], "_");
-    if normalized == "VEXZY_API_KEY" || normalized == "AUTHORIZATION" {
+    if normalized == "AUTHORIZATION" {
         return true;
     }
     let words: Vec<&str> = normalized.split('_').collect();

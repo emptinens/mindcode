@@ -271,7 +271,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let config_home = tempfile::tempdir().unwrap();
         let secret = config_home.path().join("credentials.json");
-        std::fs::write(&secret, "{\"vexzy\":\"super-secret-value\"}").unwrap();
+        std::fs::write(&secret, "{\"api_key\":\"super-secret-value\"}").unwrap();
 
         let entry = "probe.sh";
         let script = format!(

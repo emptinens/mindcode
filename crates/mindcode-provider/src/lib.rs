@@ -58,6 +58,74 @@ impl fmt::Display for Protocol {
     }
 }
 
+/// The fixed set of reasoning efforts valid for a Worker.
+pub const SUPPORTED_WORKER_EFFORTS: [WorkerEffort; 6] = [
+    WorkerEffort::None,
+    WorkerEffort::Low,
+    WorkerEffort::Medium,
+    WorkerEffort::High,
+    WorkerEffort::Xhigh,
+    WorkerEffort::Max,
+];
+
+/// Neutral Worker reasoning-effort ladder, shared by both wire protocols.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkerEffort {
+    None,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl WorkerEffort {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
+impl fmt::Display for WorkerEffort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkerEffortParseError;
+
+impl fmt::Display for WorkerEffortParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("unsupported Worker effort")
+    }
+}
+
+impl std::error::Error for WorkerEffortParseError {}
+
+impl FromStr for WorkerEffort {
+    type Err = WorkerEffortParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "none" => Ok(Self::None),
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::Xhigh),
+            "max" => Ok(Self::Max),
+            _ => Err(WorkerEffortParseError),
+        }
+    }
+}
+
 impl FromStr for Protocol {
     type Err = ProviderConfigError;
 
@@ -596,25 +664,25 @@ mod tests {
         }
         let model = ModelId::new("gpt-5.6-luna".to_owned()).unwrap();
         assert_eq!(model.as_str(), "gpt-5.6-luna");
-        let provider = ProviderId::new("vexzy".to_owned()).unwrap();
-        assert_eq!(provider.as_str(), "vexzy");
+        let provider = ProviderId::new("custom-a".to_owned()).unwrap();
+        assert_eq!(provider.as_str(), "custom-a");
         assert_eq!(model.to_string(), "gpt-5.6-luna");
-        assert_eq!(provider.to_string(), "vexzy");
+        assert_eq!(provider.to_string(), "custom-a");
     }
 
     #[test]
     fn credential_ref_serde_shapes_are_exact() {
-        let env_ref: CredentialRef = serde_json::from_str(r#"{"env":"VEXZY_API_KEY"}"#).unwrap();
-        assert_eq!(env_ref, CredentialRef::Env("VEXZY_API_KEY".to_owned()));
-        let store_ref: CredentialRef = serde_json::from_str(r#"{"store":"vexzy"}"#).unwrap();
-        assert_eq!(store_ref, CredentialRef::Store("vexzy".to_owned()));
+        let env_ref: CredentialRef = serde_json::from_str(r#"{"env":"CUSTOM_API_KEY"}"#).unwrap();
+        assert_eq!(env_ref, CredentialRef::Env("CUSTOM_API_KEY".to_owned()));
+        let store_ref: CredentialRef = serde_json::from_str(r#"{"store":"custom-a"}"#).unwrap();
+        assert_eq!(store_ref, CredentialRef::Store("custom-a".to_owned()));
         assert_eq!(
             serde_json::to_string(&env_ref).unwrap(),
-            r#"{"env":"VEXZY_API_KEY"}"#
+            r#"{"env":"CUSTOM_API_KEY"}"#
         );
         assert_eq!(
             serde_json::to_string(&store_ref).unwrap(),
-            r#"{"store":"vexzy"}"#
+            r#"{"store":"custom-a"}"#
         );
         for invalid in [
             r#"{}"#,
@@ -633,11 +701,11 @@ mod tests {
     fn provider_config_allowlist_defaults_empty_and_denies_unknown_fields() {
         let config: ProviderConfig = serde_json::from_str(
             r#"{
-                "id": "vexzy",
-                "name": "VEXZY",
+                "id": "custom-a",
+                "name": "Custom A",
                 "protocol": "openai-compatible",
-                "base_url": "https://api.echogate.one/v1",
-                "credential": {"env": "VEXZY_API_KEY"},
+                "base_url": "https://custom.example/v1",
+                "credential": {"env": "CUSTOM_API_KEY"},
                 "active": true
             }"#,
         )

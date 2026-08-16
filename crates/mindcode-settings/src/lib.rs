@@ -12,7 +12,9 @@
 
 #![forbid(unsafe_code)]
 
-pub use mindcode_provider::{CredentialRef, ModelId, Protocol, ProviderConfig, ProviderId};
+pub use mindcode_provider::{
+    CredentialRef, ModelId, Protocol, ProviderConfig, ProviderId, WorkerEffort,
+};
 
 pub mod cred_state;
 pub use cred_state::{transition as transition_cred_state, CredEvent, CredState};
@@ -22,7 +24,6 @@ pub use system_prompt::{
     SystemPromptError, SystemPromptOverrides, DEFAULT_LEADER_PROMPT, DEFAULT_WORKER_PROMPT,
 };
 
-use mindcode_vexzy::WorkerEffort;
 use serde_json::{Map, Value};
 use std::{
     collections::BTreeMap,
@@ -40,11 +41,6 @@ pub const SETTINGS_FILE_NAME: &str = "settings.json";
 const SETTINGS_DIR_NAME: &str = "mindcode";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// Provider id of the built-in VEXZY profile.  Any profile with this id is
-/// resolved catalog-driven by [`eligible_worker_models`]; it is a plain
-/// profile in every other respect (editable, removable, never special-cased
-/// in storage).
-pub const BUILTIN_VEXZY_PROVIDER_ID: &str = "vexzy";
 /// Default per-worker approval cache lifetime in seconds (§5.4.4).
 pub const DEFAULT_APPROVAL_CACHE_TTL_SECONDS: u64 = 300;
 
@@ -217,23 +213,10 @@ pub fn load_settings(path: &Path) -> Result<NativeSettings, SettingsError> {
     }
 }
 
-/// First-run state: the built-in VEXZY profile is present and active.  This
-/// is returned only when no settings file exists yet.  Once a file is written
-/// — even an empty profile table after VEXZY is removed — the file is respected
-/// and VEXZY is never resurrected.
+/// First-run state: no provider profiles exist.  Every profile is a
+/// user-supplied custom profile; there is no built-in provider to seed.
 pub fn first_run_settings() -> NativeSettings {
-    let mut settings = NativeSettings::default();
-    let vexzy = builtin_vexzy_provider();
-    settings
-        .add_provider(vexzy)
-        .expect("first-run settings start empty, so the built-in id cannot collide");
-    settings
-        .set_active_provider(
-            &ProviderId::new(BUILTIN_VEXZY_PROVIDER_ID.to_owned())
-                .expect("the built-in vexzy provider id is valid"),
-        )
-        .expect("the built-in vexzy provider was just added");
-    settings
+    NativeSettings::default()
 }
 
 pub fn parse_settings(input: &str) -> Result<NativeSettings, SettingsError> {
@@ -543,56 +526,20 @@ impl NativeSettings {
 
     /// Worker-model eligibility under the currently active profile.  When no
     /// profile is active, no model is eligible.
-    pub fn eligible_worker_models(&self, vexzy_catalog_json: &str) -> Vec<ModelId> {
+    pub fn eligible_worker_models(&self) -> Vec<ModelId> {
         match self.active_provider_config() {
-            Some(provider) => eligible_worker_models(provider, vexzy_catalog_json),
+            Some(provider) => eligible_worker_models(provider),
             None => Vec::new(),
         }
     }
 }
 
-/// The built-in VEXZY profile per the 0.1.3 contract.  It is a plain profile
-/// like any other: editable, removable, and never special-cased in storage.
-/// Only the eligibility resolver treats the `vexzy` id specially (catalog
-/// driven).
-pub fn builtin_vexzy_provider() -> ProviderConfig {
-    ProviderConfig {
-        id: ProviderId::new(BUILTIN_VEXZY_PROVIDER_ID.to_owned())
-            .expect("the built-in vexzy provider id is valid"),
-        name: "VEXZY".to_owned(),
-        protocol: Protocol::OpenAiCompatible,
-        base_url: mindcode_vexzy::VEXZY_OPENAI_BASE_URL.to_owned(),
-        credential: CredentialRef::Env(mindcode_vexzy::VEXZY_API_KEY_ENV.to_owned()),
-        allowlist: Vec::new(),
-        active: false,
-    }
-}
-
 /// Resolve the Worker-eligible model ids under the supplied provider.
 ///
-/// - A profile with id [`BUILTIN_VEXZY_PROVIDER_ID`] is catalog-driven:
-///   `vexzy_catalog_json` is parsed through
-///   `mindcode_vexzy::parse_vexzy_model_catalog` and filtered by the VEXZY
-///   eligibility rule (available, tools-capable, at least one supported Worker
-///   effort).  A malformed catalog fails closed to an empty selection.
-/// - Every custom profile is allowlist-driven: exactly the profile's
-///   allowlist is returned, and an empty allowlist selects no model (fail
-///   closed).
-pub fn eligible_worker_models(
-    active_provider: &ProviderConfig,
-    vexzy_catalog_json: &str,
-) -> Vec<ModelId> {
-    if active_provider.id.as_str() != BUILTIN_VEXZY_PROVIDER_ID {
-        return active_provider.allowlist.clone();
-    }
-    let catalog = match mindcode_vexzy::parse_vexzy_model_catalog(vexzy_catalog_json) {
-        Ok(catalog) => catalog,
-        Err(_) => return Vec::new(),
-    };
-    mindcode_vexzy::eligible_worker_models(&catalog)
-        .into_iter()
-        .filter_map(|model| ModelId::new(model.id.clone()).ok())
-        .collect()
+/// Every profile is allowlist-driven: exactly the profile's allowlist is
+/// returned, and an empty allowlist selects no model (fail closed).
+pub fn eligible_worker_models(active_provider: &ProviderConfig) -> Vec<ModelId> {
+    active_provider.allowlist.clone()
 }
 
 /// Enforce the provider invariants on load: at most one profile is active,
@@ -684,7 +631,7 @@ fn reject_credential_keys(object: &Map<String, Value>) -> Result<(), SettingsErr
 fn is_credential_key(key: &str) -> bool {
     matches!(
         key.to_ascii_lowercase().as_str(),
-        "vexzy_api_key" | "apikey" | "api_key" | "token" | "secret" | "password"
+        "apikey" | "api_key" | "token" | "secret" | "password"
     )
 }
 
@@ -870,14 +817,7 @@ mod tests {
 
     #[test]
     fn rejects_credential_like_top_level_keys() {
-        for key in [
-            "VEXZY_API_KEY",
-            "apiKey",
-            "api_key",
-            "token",
-            "secret",
-            "password",
-        ] {
+        for key in ["apiKey", "api_key", "token", "secret", "password"] {
             let input = format!(r#"{{"{key}":"forge-secret"}}"#);
             assert!(matches!(
                 parse_settings(&input),
@@ -939,69 +879,45 @@ mod provider_tests {
     }
 
     #[test]
-    fn builtin_vexzy_profile_matches_contract_and_is_not_special_cased() {
-        let vexzy = builtin_vexzy_provider();
-        assert_eq!(vexzy.id.as_str(), BUILTIN_VEXZY_PROVIDER_ID);
-        assert_eq!(vexzy.name, "VEXZY");
-        assert_eq!(vexzy.protocol, Protocol::OpenAiCompatible);
-        assert_eq!(vexzy.base_url, mindcode_vexzy::VEXZY_OPENAI_BASE_URL);
-        assert_eq!(vexzy.base_url, "https://api.echogate.one/v1");
-        assert_eq!(
-            vexzy.credential,
-            CredentialRef::Env(mindcode_vexzy::VEXZY_API_KEY_ENV.to_owned())
-        );
-        assert!(vexzy.allowlist.is_empty());
-        assert!(!vexzy.active);
-
+    fn custom_profile_round_trips_and_removal_clears_active() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("config/mindcode/settings.json");
-        let vexzy_id = ProviderId::new("vexzy".to_owned()).unwrap();
+        let id = ProviderId::new("custom-a".to_owned()).unwrap();
         let mut settings = NativeSettings::default();
-        settings.add_provider(vexzy.clone()).unwrap();
-        settings.set_active_provider(&vexzy_id).unwrap();
+        let mut custom = profile("custom-a");
+        custom.credential = CredentialRef::Store("custom-a".to_owned());
+        settings.add_provider(custom).unwrap();
+        settings.set_active_provider(&id).unwrap();
         settings
-            .set_allowlist(
-                &vexzy_id,
-                vec![ModelId::new("gpt-5.6-luna".to_owned()).unwrap()],
-            )
+            .set_allowlist(&id, vec![ModelId::new("model-a".to_owned()).unwrap()])
             .unwrap();
         save_settings(&path, &settings).unwrap();
         let loaded = load_settings(&path).unwrap();
         assert_eq!(loaded, settings);
         let mut removable = loaded;
-        removable.remove_provider(&vexzy_id).unwrap();
+        removable.remove_provider(&id).unwrap();
         assert!(removable.providers().is_empty());
         assert_eq!(removable.active_provider, None);
     }
 
     #[test]
-    fn load_missing_file_seeds_builtin_vexzy_active() {
+    fn load_missing_file_yields_empty_first_run_state() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("config/mindcode/settings.json");
         let settings = load_settings(&path).unwrap();
-        assert_eq!(settings.providers().len(), 1);
-        let vexzy = settings
-            .provider(&ProviderId::new(BUILTIN_VEXZY_PROVIDER_ID.to_owned()).unwrap())
-            .unwrap();
-        assert_eq!(vexzy.name, "VEXZY");
-        assert!(vexzy.active);
-        assert_eq!(
-            settings.active_provider.as_ref().map(ProviderId::as_str),
-            Some(BUILTIN_VEXZY_PROVIDER_ID)
-        );
-        // Reading never writes: first-run seeding is in-memory until the user
-        // actually saves a change.
+        assert!(settings.providers().is_empty());
+        assert_eq!(settings.active_provider, None);
+        // Reading never writes: the first-run state is in-memory until the
+        // user actually saves a change.
         assert!(!path.exists());
     }
 
     #[test]
-    fn removed_vexzy_is_not_resurrected_on_reload() {
+    fn empty_first_run_state_reloads_empty_after_save() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("config/mindcode/settings.json");
-        let vexzy_id = ProviderId::new(BUILTIN_VEXZY_PROVIDER_ID.to_owned()).unwrap();
 
-        let mut settings = first_run_settings();
-        settings.remove_provider(&vexzy_id).unwrap();
+        let settings = first_run_settings();
         save_settings(&path, &settings).unwrap();
 
         let loaded = load_settings(&path).unwrap();
@@ -1013,11 +929,13 @@ mod provider_tests {
     fn provider_crud_round_trips_through_save_and_load() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("config/mindcode/settings.json");
-        let vexzy_id = ProviderId::new("vexzy".to_owned()).unwrap();
+        let second_id = ProviderId::new("custom-b".to_owned()).unwrap();
         let custom_id = ProviderId::new("custom-a".to_owned()).unwrap();
 
         let mut settings = NativeSettings::default();
-        settings.add_provider(builtin_vexzy_provider()).unwrap();
+        let mut second = profile("custom-b");
+        second.credential = CredentialRef::Store("custom-b".to_owned());
+        settings.add_provider(second).unwrap();
         let mut custom = profile("custom-a");
         custom.credential = CredentialRef::Store("custom-a".to_owned());
         custom.allowlist = vec![
@@ -1026,13 +944,13 @@ mod provider_tests {
         ];
         settings.add_provider(custom).unwrap();
         assert!(matches!(
-            settings.add_provider(builtin_vexzy_provider()),
+            settings.add_provider(profile("custom-b")),
             Err(SettingsError::DuplicateProviderId(_))
         ));
         settings
             .set_allowlist(
-                &vexzy_id,
-                vec![ModelId::new("gpt-5.6-luna".to_owned()).unwrap()],
+                &second_id,
+                vec![ModelId::new("model-c".to_owned()).unwrap()],
             )
             .unwrap();
         settings.set_active_provider(&custom_id).unwrap();
@@ -1119,13 +1037,11 @@ mod provider_tests {
         settings
             .set_active_provider(&ProviderId::new("custom-a".to_owned()).unwrap())
             .unwrap();
-        settings.add_provider(builtin_vexzy_provider()).unwrap();
         save_settings(&settings_path, &settings).unwrap();
 
         let raw = fs::read_to_string(&settings_path).unwrap();
         assert!(!raw.contains("provider-secret-value"));
         assert!(raw.contains("custom-a"));
-        assert!(raw.contains("VEXZY_API_KEY"));
         assert!(fs::read_to_string(&store_path)
             .unwrap()
             .contains("provider-secret-value"));
@@ -1133,57 +1049,19 @@ mod provider_tests {
     }
 
     #[test]
-    fn eligibility_builtin_vexzy_is_catalog_driven() {
-        let catalog = r#"{
-            "object": "list",
-            "data": [
-                {"id": "gpt-5.6-luna", "available": true, "capabilities": {"tools": true, "reasoning": true, "vision": false}, "supported_reasoning_efforts": ["none", "max"]},
-                {"id": "stale-model", "available": false, "capabilities": {"tools": true, "reasoning": true}, "supported_reasoning_efforts": ["none"]},
-                {"id": "no-tools-model", "available": true, "capabilities": {"tools": false, "reasoning": true}, "supported_reasoning_efforts": ["none"]},
-                {"id": "no-effort-model", "available": true, "capabilities": {"tools": true, "reasoning": true}, "supported_reasoning_efforts": []},
-                {"id": "odd id", "available": true, "capabilities": {"tools": true, "reasoning": true}, "supported_reasoning_efforts": ["none"]}
-            ]
-        }"#;
-        let vexzy = builtin_vexzy_provider();
-        let eligible = eligible_worker_models(&vexzy, catalog);
-        let ids: Vec<_> = eligible.iter().map(ModelId::as_str).collect();
-        assert_eq!(ids, ["gpt-5.6-luna"]);
-        assert_eq!(
-            eligible_worker_models(&vexzy, "{\"object\":\"list\",\"data\":[]}"),
-            Vec::<ModelId>::new()
-        );
-    }
-
-    #[test]
-    fn eligibility_custom_provider_is_allowlist_driven_and_fails_closed() {
+    fn eligibility_is_allowlist_driven_and_fails_closed() {
         let mut custom = profile("custom-a");
         custom.allowlist = vec![
             ModelId::new("model-a".to_owned()).unwrap(),
             ModelId::new("model-b".to_owned()).unwrap(),
         ];
-        let eligible = eligible_worker_models(&custom, "{");
+        let eligible = eligible_worker_models(&custom);
         let ids: Vec<_> = eligible.iter().map(ModelId::as_str).collect();
         assert_eq!(ids, ["model-a", "model-b"]);
 
         let empty = profile("custom-empty");
-        assert_eq!(
-            eligible_worker_models(&empty, "{\"object\":\"list\",\"data\":[]}"),
-            Vec::<ModelId>::new()
-        );
-        let empty_ids: Vec<_> = empty.allowlist.iter().map(ModelId::as_str).collect();
-        assert!(empty_ids.is_empty());
-    }
-
-    #[test]
-    fn eligibility_malformed_catalog_fails_closed_for_vexzy() {
-        let vexzy = builtin_vexzy_provider();
-        for malformed in ["{", r#"{"object":"model","data":[]}"#] {
-            assert_eq!(
-                eligible_worker_models(&vexzy, malformed),
-                Vec::<ModelId>::new(),
-                "{malformed}"
-            );
-        }
+        assert_eq!(eligible_worker_models(&empty), Vec::<ModelId>::new());
+        assert!(empty.allowlist.is_empty());
     }
 
     #[test]
@@ -1234,7 +1112,7 @@ mod provider_tests {
         assert!(!settings.provider(&a).unwrap().active);
 
         let mut settings = NativeSettings::default();
-        settings.add_provider(builtin_vexzy_provider()).unwrap();
+        settings.add_provider(profile("a")).unwrap();
         let reparsed = settings_from_value(settings_to_value(&settings).unwrap()).unwrap();
         assert_eq!(reparsed, settings);
     }

@@ -11,7 +11,7 @@ use futures_util::StreamExt;
 use mindcode_protocol::ui::{UiActionInput, UiInputEventKind, UiMessage};
 use mindcode_provider::{
     default_store_path, load_store, save_store, CredentialRef, ModelId, Protocol, ProviderConfig,
-    ProviderId, SecretKey,
+    ProviderId, SecretKey, WorkerEffort,
 };
 use mindcode_settings::{
     default_settings_path, load_settings, save_settings, CredState, NativeSettings,
@@ -33,9 +33,6 @@ use mindcode_tui::TuiConfig;
 use mindcode_tui_server::{
     ConnectionInput, ControlServer, ControlServerConfig, InputHandler, PermissionInput,
     ProjectionInput, ProviderInput, StatusInput, TelemetryInput, TranscriptInput, WriterInput,
-};
-use mindcode_vexzy::{
-    eligible_worker_models, parse_vexzy_model_catalog, VexzyModel, VexzyModelCatalog, WorkerEffort,
 };
 use mindcode_worker::{
     bwrap_available, classify, ApprovalDecision, ApprovalGate, ApprovalRequest, DecisionFuture,
@@ -70,7 +67,6 @@ use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 use tokio_util::sync::CancellationToken;
 
 const VERSION: &str = "0.1.3";
-const API_KEY_ENV: &str = "VEXZY_API_KEY";
 /// The only stdout write of `settings key`; asserting the constant guarantees
 /// the credential value and the store path can never be echoed.
 const SETTINGS_KEY_CONFIRMATION: &str = "configured";
@@ -107,7 +103,7 @@ fn process_boot_ms() -> u64 {
     name = "mindcode",
     version = VERSION,
     about = "MindCode native Rust foundation (multi-provider)",
-    after_help = "Commands:\n  auth status       Show active provider authentication status\n  model eligible    Inspect eligible Worker models of the active provider\n  effort worker     Validate a Worker model and optional effort lock\n  provider          Manage provider profiles (list, use, add, remove, edit)\n  settings          Manage settings (show, key, allowlist, model, effort lock)\n  setup-token       Show credential setup instructions\n  doctor            Check native foundation health\n  update            Show local checkout update instructions\n  daemon            Run the native mindcoded daemon in-process\n  tui               Run the native terminal interface\n  chat              Complete a chat request through the active provider"
+    after_help = "Commands:\n  auth status       Show active provider authentication status\n  provider          Manage provider profiles (list, use, add, remove, edit)\n  settings          Manage settings (show, key, allowlist, model, effort lock)\n  setup-token       Show credential setup instructions\n  doctor            Check native foundation health\n  update            Show local checkout update instructions\n  daemon            Run the native mindcoded daemon in-process\n  tui               Run the native terminal interface\n  chat              Complete a chat request through the active provider"
 )]
 struct RootArgs {
     #[arg(
@@ -158,78 +154,6 @@ struct AuthStatusArgs {
     json: bool,
     #[arg(long, help = "Output human-readable status")]
     text: bool,
-}
-
-#[derive(Debug, Parser)]
-#[command(
-    name = "mindcode model",
-    version = VERSION,
-    about = "Inspect VEXZY Worker eligibility from a supplied catalog"
-)]
-struct ModelArgs {
-    #[command(subcommand)]
-    command: ModelCommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum ModelCommand {
-    #[command(
-        name = "eligible",
-        about = "List eligible Worker models from a supplied catalog"
-    )]
-    Eligible(CatalogArgs),
-}
-
-#[derive(Debug, Parser)]
-struct CatalogArgs {
-    #[arg(
-        long,
-        value_name = "JSON|@PATH",
-        help = "Inline VEXZY catalog JSON or @PATH to a local catalog JSON file"
-    )]
-    catalog: String,
-}
-
-#[derive(Debug, Parser)]
-#[command(
-    name = "mindcode effort",
-    version = VERSION,
-    about = "Validate Worker effort policy from a supplied VEXZY catalog"
-)]
-struct EffortArgs {
-    #[command(subcommand)]
-    command: EffortCommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum EffortCommand {
-    #[command(
-        name = "worker",
-        about = "Validate an eligible Worker model and optional global effort lock"
-    )]
-    Worker(WorkerEffortArgs),
-}
-
-#[derive(Debug, Parser)]
-struct WorkerEffortArgs {
-    #[arg(
-        long,
-        value_name = "JSON|@PATH",
-        help = "Inline VEXZY catalog JSON or @PATH to a local catalog JSON file"
-    )]
-    catalog: String,
-    #[arg(
-        long,
-        value_name = "MODEL_ID",
-        help = "Exact eligible VEXZY Worker model ID"
-    )]
-    model: String,
-    #[arg(
-        long,
-        value_name = "EFFORT|off",
-        help = "Optional global Worker effort lock: none, low, medium, high, xhigh, max, or off"
-    )]
-    lock: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -409,7 +333,7 @@ struct SettingsEffortLockArgs {
 #[command(
     name = "mindcode setup-token",
     version = VERSION,
-    about = "Show VEXZY API key setup instructions"
+    about = "Show credential setup instructions"
 )]
 struct SetupTokenArgs {}
 
@@ -417,7 +341,7 @@ struct SetupTokenArgs {}
 #[command(
     name = "mindcode doctor",
     version = VERSION,
-    about = "Check native/VEXZY foundation health"
+    about = "Check native foundation health"
 )]
 struct DoctorArgs {}
 
@@ -518,8 +442,6 @@ async fn dispatch(arguments: Vec<OsString>) -> Result<i32> {
 
     match first {
         "auth" => run_auth(arguments, run_active.as_ref()),
-        "model" => run_model(arguments),
-        "effort" => run_effort(arguments),
         "provider" => run_provider(arguments, run_active.as_ref()),
         "settings" => run_settings(arguments, run_active.as_ref()),
         "setup-token" => run_setup_token(arguments),
@@ -692,50 +614,6 @@ fn run_auth_status(options: AuthStatusArgs, run_active: Option<&ProviderId>) -> 
         println!("{}", auth_status_value(provider, configured));
     }
     Ok(i32::from(!configured))
-}
-
-fn run_model(arguments: Vec<OsString>) -> Result<i32> {
-    let parsed =
-        match ModelArgs::try_parse_from(with_command_program_name(arguments, "mindcode model")) {
-            Ok(args) => args,
-            Err(error) => return Ok(print_clap_error(error)),
-        };
-
-    match parsed.command {
-        ModelCommand::Eligible(args) => match eligible_models_output(&args.catalog) {
-            Ok(output) => {
-                println!("{output}");
-                Ok(0)
-            }
-            Err(message) => {
-                eprintln!("mindcode: {message}");
-                Ok(1)
-            }
-        },
-    }
-}
-
-fn run_effort(arguments: Vec<OsString>) -> Result<i32> {
-    let parsed =
-        match EffortArgs::try_parse_from(with_command_program_name(arguments, "mindcode effort")) {
-            Ok(args) => args,
-            Err(error) => return Ok(print_clap_error(error)),
-        };
-
-    match parsed.command {
-        EffortCommand::Worker(args) => {
-            match worker_effort_output(&args.catalog, &args.model, args.lock.as_deref()) {
-                Ok(output) => {
-                    println!("{output}");
-                    Ok(0)
-                }
-                Err(message) => {
-                    eprintln!("mindcode: {message}");
-                    Ok(1)
-                }
-            }
-        }
-    }
 }
 
 fn run_provider(arguments: Vec<OsString>, run_active: Option<&ProviderId>) -> Result<i32> {
@@ -957,52 +835,6 @@ fn run_settings_effort_lock(args: SettingsEffortLockArgs) -> Result<i32> {
     Ok(0)
 }
 
-/// Read a catalog supplied explicitly by the caller.  This is deliberately
-/// offline: no VEXZY request, cache update, or persisted setting is touched.
-fn read_catalog_input(value: &str) -> Result<String, &'static str> {
-    match value.strip_prefix('@') {
-        Some("") => Err("catalog file path is empty"),
-        Some(path) => fs::read_to_string(path).map_err(|_| "could not read supplied catalog"),
-        None => Ok(value.to_owned()),
-    }
-}
-
-fn parse_supplied_catalog(value: &str) -> Result<VexzyModelCatalog, &'static str> {
-    let input = read_catalog_input(value)?;
-    parse_vexzy_model_catalog(&input).map_err(|_| "supplied VEXZY catalog is invalid")
-}
-
-fn allowed_effort_names(model: &VexzyModel) -> Vec<&'static str> {
-    model
-        .supported_worker_efforts()
-        .into_iter()
-        .map(WorkerEffort::as_str)
-        .collect()
-}
-
-/// Pure JSON projection used by the command and by parity tests.  It contains
-/// provider metadata only, never the supplied catalog body or credentials.
-fn eligible_models_value(catalog: &VexzyModelCatalog) -> serde_json::Value {
-    let models = eligible_worker_models(catalog)
-        .into_iter()
-        .map(|model| {
-            json!({
-                "id": model.id,
-                "allowedEfforts": allowed_effort_names(model),
-            })
-        })
-        .collect::<Vec<_>>();
-    json!({
-        "provider": "vexzy",
-        "models": models,
-    })
-}
-
-fn eligible_models_output(catalog_input: &str) -> Result<serde_json::Value, &'static str> {
-    let catalog = parse_supplied_catalog(catalog_input)?;
-    Ok(eligible_models_value(&catalog))
-}
-
 fn parse_worker_lock(value: Option<&str>) -> Result<Option<WorkerEffort>, &'static str> {
     match value {
         None | Some("off") => Ok(None),
@@ -1013,44 +845,8 @@ fn parse_worker_lock(value: Option<&str>) -> Result<Option<WorkerEffort>, &'stat
     }
 }
 
-/// Validate a selected Worker model exactly as it appears in the supplied
-/// catalog.  The value does not alter global state; persistence is a later
-/// migration package.
-fn worker_effort_value(
-    catalog: &VexzyModelCatalog,
-    model_id: &str,
-    lock: Option<&str>,
-) -> Result<serde_json::Value, &'static str> {
-    let model = eligible_worker_models(catalog)
-        .into_iter()
-        .find(|candidate| candidate.id == model_id)
-        .ok_or("selected Worker model is absent or ineligible")?;
-    let lock = parse_worker_lock(lock)?;
-    if let Some(lock) = lock {
-        if !model.supports_worker_effort(lock) {
-            return Err("selected Worker model does not support the requested effort lock");
-        }
-    }
-
-    Ok(json!({
-        "provider": "vexzy",
-        "model": model.id,
-        "allowedEfforts": allowed_effort_names(model),
-        "workerEffortLock": lock.map(WorkerEffort::as_str),
-    }))
-}
-
-fn worker_effort_output(
-    catalog_input: &str,
-    model_id: &str,
-    lock: Option<&str>,
-) -> Result<serde_json::Value, &'static str> {
-    let catalog = parse_supplied_catalog(catalog_input)?;
-    worker_effort_value(&catalog, model_id, lock)
-}
-
 fn setup_token_text() -> String {
-    "MindCode resolves each provider credential environment-first, then from\nthe on-disk secret store (~/.config/mindcode/credentials.json).\n\nThe built-in VEXZY profile uses the VEXZY_API_KEY environment variable:\n  export VEXZY_API_KEY=\"forge-…\"\n\nCustom providers store their key in the secret store instead; manage\nproviders and keys with `mindcode provider` and `mindcode settings key`.\n\nThe legacy OAuth setup flow is not used by MindCode."
+    "MindCode resolves each provider credential environment-first, then from\nthe on-disk secret store (~/.config/mindcode/credentials.json).\n\nEvery provider is a custom profile you add yourself with `mindcode provider`;\nthere is no built-in provider.  Each profile needs a name, base_url, protocol\n(openai-compatible or anthropic-compatible), and a credential key you store\nwith `mindcode settings key`.\n\nThe legacy OAuth setup flow is not used by MindCode."
         .to_owned()
 }
 
@@ -1065,15 +861,8 @@ fn run_setup_token(arguments: Vec<OsString>) -> Result<i32> {
 }
 
 fn doctor_text() -> String {
-    let configured = current_api_key().is_some();
-    format!(
-        "MindCode native doctor\n{API_KEY_ENV}: {}\nAuthentication: multi-provider (env -> secret store, fail-closed)\nDaemon: available (in-process mindcoded::Daemon)\nChat runtime: live (mindcode-transport, both protocols)",
-        if configured {
-            "configured"
-        } else {
-            "not configured"
-        }
-    )
+    "MindCode native doctor\nAuthentication: multi-provider (env -> secret store, fail-closed)\nDaemon: available (in-process mindcoded::Daemon)\nChat runtime: live (mindcode-transport, both protocols)"
+        .to_owned()
 }
 
 fn run_doctor(arguments: Vec<OsString>) -> Result<i32> {
@@ -1478,9 +1267,8 @@ fn providers_input(settings: &NativeSettings) -> Vec<ProviderInput> {
         .collect()
 }
 
-/// The model ids the profile offers for interactive selection. Custom
-/// profiles expose their allowlist verbatim; VEXZY is catalog-driven and is
-/// intentionally empty until a live catalog has been resolved.
+/// The model ids the profile offers for interactive selection. Every profile
+/// exposes its allowlist verbatim; an empty allowlist selects no model.
 fn provider_allowlist_input(provider: &ProviderConfig) -> Vec<String> {
     provider.allowlist.iter().map(ModelId::to_string).collect()
 }
@@ -3821,16 +3609,6 @@ fn eligible_text() -> Result<String> {
     let Some(provider) = settings.active_provider_config() else {
         return Ok("no active provider is configured".to_owned());
     };
-    if provider.id.as_str() == mindcode_settings::BUILTIN_VEXZY_PROVIDER_ID {
-        return Ok(format!(
-            "{}: catalog-driven; selected worker model {}",
-            provider.id,
-            settings
-                .global_worker_model
-                .as_deref()
-                .unwrap_or("not selected (live catalog required)")
-        ));
-    }
     let models = provider
         .allowlist
         .iter()
@@ -3993,9 +3771,9 @@ fn apply_tui_action(action: &UiActionInput) -> Result<bool> {
     Ok(changed)
 }
 
-/// Resolve a model from explicit settings or a custom profile allowlist.
-/// Built-in VEXZY is intentionally not given an alias fallback: callers must
-/// use [`resolve_provider_model`] so the live catalog proves eligibility.
+/// Resolve a model from explicit settings or the profile allowlist.  Every
+/// profile is allowlist-driven and fails closed: a selected model must be a
+/// member of the allowlist, and an empty allowlist selects no model.
 fn select_chat_model(
     settings: &NativeSettings,
     provider: &ProviderConfig,
@@ -4006,62 +3784,18 @@ fn select_chat_model(
         .or_else(|| settings.global_worker_model.clone())
         .or_else(|| provider.allowlist.first().map(ModelId::to_string))
         .ok_or_else(|| {
-            anyhow!(
-                "active provider has no selected model (VEXZY requires a live catalog; custom profiles require a non-empty allowlist)"
-            )
+            anyhow!("active provider has no selected model (allowlist is empty, fails closed)")
         })?;
-    if provider.id.as_str() != mindcode_settings::BUILTIN_VEXZY_PROVIDER_ID
-        && !provider
-            .allowlist
-            .iter()
-            .any(|model| model.as_str() == selected)
+    if !provider
+        .allowlist
+        .iter()
+        .any(|model| model.as_str() == selected)
     {
         return Err(anyhow!(
             "selected model is not in the active provider allowlist (fail closed)"
         ));
     }
     Ok(selected)
-}
-
-/// Resolve and validate the model against the active provider's eligibility
-/// contract. VEXZY is catalog-driven on every new request; custom profiles are
-/// allowlist-driven and never receive a vendor alias fallback.
-async fn resolve_provider_model(
-    settings: &NativeSettings,
-    provider: &ProviderConfig,
-    key: &SecretKey,
-    transport: &Transport,
-    override_model: Option<&str>,
-    effort: Option<WorkerEffort>,
-) -> Result<String> {
-    if provider.id.as_str() != mindcode_settings::BUILTIN_VEXZY_PROVIDER_ID {
-        return select_chat_model(settings, provider, override_model);
-    }
-
-    let value = transport
-        .fetch_catalog_value(key)
-        .await
-        .map_err(|_| anyhow!("active VEXZY model catalog is unavailable"))?;
-    let catalog = parse_vexzy_model_catalog(&value.to_string())
-        .map_err(|_| anyhow!("active VEXZY model catalog is invalid"))?;
-    let mut eligible = eligible_worker_models(&catalog);
-    if let Some(effort) = effort {
-        eligible.retain(|model| model.supports_worker_effort(effort));
-    }
-    let selected = override_model.or(settings.global_worker_model.as_deref());
-    if let Some(selected) = selected {
-        let model = eligible
-            .into_iter()
-            .find(|model| model.id == selected)
-            .ok_or_else(|| {
-                anyhow!("selected VEXZY model is absent, ineligible, or lacks the effort lock")
-            })?;
-        return Ok(model.id.clone());
-    }
-    eligible
-        .first()
-        .map(|model| model.id.clone())
-        .ok_or_else(|| anyhow!("VEXZY catalog has no eligible Worker model"))
 }
 
 async fn run_chat(
@@ -4303,8 +4037,7 @@ async fn chat_completion_with_chunks(
         }
     };
     let transport = Transport::new(&provider.base_url).map_err(anyhow::Error::msg)?;
-    let model =
-        resolve_provider_model(&settings, provider, &key, &transport, model_override, None).await?;
+    let model = select_chat_model(&settings, provider, model_override)?;
     let mut output = String::new();
     let mut usage = ChatUsage::default();
     let mut usage_reported = false;
@@ -4412,8 +4145,8 @@ struct TransportModelClient {
 
 impl TransportModelClient {
     /// Resolve the active provider, its credential (env -> store ->
-    /// fail-closed), and catalog-eligible model, applying the global lock or
-    /// the local Ares effort when no lock is set.
+    /// fail-closed), and allowlist-eligible model, applying the global lock
+    /// or the local Ares effort when no lock is set.
     async fn resolve_with_effort(
         settings: &NativeSettings,
         automatic_effort: Option<WorkerEffort>,
@@ -4430,11 +4163,9 @@ impl TransportModelClient {
                     credential_ref_kind(provider)
                 )
             })?;
-        let transport = Transport::new(&provider.base_url).map_err(anyhow::Error::msg)?;
         // An explicit global lock always wins over the local Ares heuristic.
         let effort = settings.worker_effort_lock.or(automatic_effort);
-        let model =
-            resolve_provider_model(settings, provider, &key, &transport, None, effort).await?;
+        let model = select_chat_model(settings, provider, None)?;
         Ok(Self {
             provider: provider.clone(),
             key,
@@ -5052,18 +4783,6 @@ async fn run_regular_prompt(prompt: &[String], run_active: Option<&ProviderId>) 
     stream_chat_response(&prompt.join(" "), None, run_active).await
 }
 
-fn current_api_key() -> Option<String> {
-    let value = env::var(API_KEY_ENV).ok()?;
-    is_valid_vexzy_api_key(&value).then_some(value)
-}
-
-fn is_valid_vexzy_api_key(value: &str) -> bool {
-    let Some(suffix) = value.strip_prefix("forge-") else {
-        return false;
-    };
-    !suffix.is_empty() && !value.chars().any(char::is_whitespace)
-}
-
 fn parse_provider_id(value: &str) -> Result<ProviderId, anyhow::Error> {
     ProviderId::new(value.to_owned()).map_err(anyhow::Error::msg)
 }
@@ -5263,7 +4982,6 @@ mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
     use mindcode_provider::SecretStore;
-    use mindcode_settings::{builtin_vexzy_provider, BUILTIN_VEXZY_PROVIDER_ID};
     use std::io::Cursor;
     use std::path::Path;
     use std::sync::Mutex;
@@ -5347,11 +5065,22 @@ mod tests {
         load_settings(&sandbox_settings_path(dir)).unwrap()
     }
 
-    fn seed_builtin_active(dir: &Path) {
+    fn builtin_test_profile() -> ProviderConfig {
+        profile(
+            "provider-0",
+            "Provider 0",
+            Protocol::OpenAiCompatible,
+            "https://provider-0.example/v1",
+            CredentialRef::Env("PROVIDER_0_KEY".to_owned()),
+            &[],
+        )
+    }
+
+    fn seed_custom_active(dir: &Path) {
         let mut settings = NativeSettings::default();
-        settings.add_provider(builtin_vexzy_provider()).unwrap();
+        settings.add_provider(builtin_test_profile()).unwrap();
         settings
-            .set_active_provider(&ProviderId::new(BUILTIN_VEXZY_PROVIDER_ID.to_owned()).unwrap())
+            .set_active_provider(&ProviderId::new("provider-0".to_owned()).unwrap())
             .unwrap();
         seed_settings(dir, &settings);
     }
@@ -5376,16 +5105,6 @@ mod tests {
                 .collect(),
             active: false,
         }
-    }
-
-    #[test]
-    fn validates_vexzy_key_shape_without_accepting_whitespace() {
-        assert!(is_valid_vexzy_api_key("forge-test-key"));
-        assert!(is_valid_vexzy_api_key("forge-…"));
-        assert!(!is_valid_vexzy_api_key("forge-"));
-        assert!(!is_valid_vexzy_api_key("not-forge-key"));
-        assert!(!is_valid_vexzy_api_key("forge-with space"));
-        assert!(!is_valid_vexzy_api_key("forge-with\nnewline"));
     }
 
     #[test]
@@ -5416,10 +5135,10 @@ mod tests {
 
     #[test]
     fn auth_status_json_never_contains_the_secret() {
-        let provider = builtin_vexzy_provider();
+        let provider = builtin_test_profile();
         let output = auth_status_value(&provider, true).to_string();
         assert!(!output.contains("forge-"));
-        assert!(output.contains("VEXZY_API_KEY"));
+        assert!(output.contains("PROVIDER_0_KEY"));
         assert_eq!(
             auth_status_value(&provider, true)["credential"],
             "configured"
@@ -5479,7 +5198,7 @@ mod tests {
     fn scan_run_options_extracts_all_flags_both_spellings_and_keeps_the_rest() {
         let (options, remaining) = scan_run_options(&[
             OsString::from("--provider"),
-            OsString::from("vexzy"),
+            OsString::from("provider-0"),
             OsString::from("--worker-model"),
             OsString::from("worker-model-x"),
             OsString::from("--worker-effort-lock"),
@@ -5488,7 +5207,7 @@ mod tests {
             OsString::from("status"),
         ])
         .unwrap();
-        assert_eq!(options.provider.as_deref(), Some("vexzy"));
+        assert_eq!(options.provider.as_deref(), Some("provider-0"));
         assert_eq!(options.worker_model.as_deref(), Some("worker-model-x"));
         assert_eq!(options.worker_effort_lock.as_deref(), Some("max"));
         assert_eq!(
@@ -5497,13 +5216,13 @@ mod tests {
         );
 
         let (options, remaining) = scan_run_options(&[
-            OsString::from("--provider=vexzy"),
+            OsString::from("--provider=provider-0"),
             OsString::from("--worker-model=worker-model-x"),
             OsString::from("--worker-effort-lock=off"),
             OsString::from("list"),
         ])
         .unwrap();
-        assert_eq!(options.provider.as_deref(), Some("vexzy"));
+        assert_eq!(options.provider.as_deref(), Some("provider-0"));
         assert_eq!(options.worker_model.as_deref(), Some("worker-model-x"));
         assert_eq!(options.worker_effort_lock.as_deref(), Some("off"));
         assert_eq!(remaining, vec![OsString::from("list")]);
@@ -5537,7 +5256,7 @@ mod tests {
     fn provider_list_shows_all_profiles_secret_free_with_active_marker() {
         with_sandbox_env(|dir| {
             let mut settings = NativeSettings::default();
-            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            settings.add_provider(builtin_test_profile()).unwrap();
             settings
                 .add_provider(profile(
                     "custom-a",
@@ -5549,7 +5268,7 @@ mod tests {
                 ))
                 .unwrap();
             settings
-                .set_active_provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+                .set_active_provider(&ProviderId::new("provider-0".to_owned()).unwrap())
                 .unwrap();
             seed_settings(dir, &settings);
 
@@ -5559,8 +5278,8 @@ mod tests {
             let loaded = load_sandbox_settings(dir);
             let value = providers_list_value(&loaded, effective_active(&loaded, None));
             let text = serde_json::to_string(&value).unwrap();
-            assert!(text.contains("\"id\":\"vexzy\""));
-            assert!(text.contains("\"credential\":\"env:VEXZY_API_KEY\""));
+            assert!(text.contains("\"id\":\"provider-0\""));
+            assert!(text.contains("\"credential\":\"env:PROVIDER_0_KEY\""));
             assert!(text.contains("\"credential\":\"store:custom-a\""));
             assert!(text.contains("\"allowlist\":[\"model-a\",\"model-b\"]"));
             assert!(text.contains("\"active\":true"));
@@ -5575,7 +5294,7 @@ mod tests {
     fn provider_list_marks_the_run_selected_provider_as_active_without_persisting() {
         with_sandbox_env(|dir| {
             let mut settings = NativeSettings::default();
-            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            settings.add_provider(builtin_test_profile()).unwrap();
             settings
                 .add_provider(profile(
                     "custom-a",
@@ -5587,7 +5306,7 @@ mod tests {
                 ))
                 .unwrap();
             settings
-                .set_active_provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+                .set_active_provider(&ProviderId::new("provider-0".to_owned()).unwrap())
                 .unwrap();
             seed_settings(dir, &settings);
 
@@ -5605,7 +5324,7 @@ mod tests {
             assert_eq!(value[1]["active"], json!(true));
             assert_eq!(
                 loaded.active_provider.as_ref().map(ProviderId::as_str),
-                Some("vexzy")
+                Some("provider-0")
             );
         });
     }
@@ -5614,7 +5333,7 @@ mod tests {
     fn provider_use_persists_the_active_provider() {
         with_sandbox_env(|dir| {
             let mut settings = NativeSettings::default();
-            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            settings.add_provider(builtin_test_profile()).unwrap();
             settings
                 .add_provider(profile(
                     "custom-a",
@@ -5644,7 +5363,7 @@ mod tests {
             assert!(custom.active);
             assert!(
                 !loaded
-                    .provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+                    .provider(&ProviderId::new("provider-0".to_owned()).unwrap())
                     .unwrap()
                     .active
             );
@@ -5655,9 +5374,9 @@ mod tests {
     fn provider_use_unknown_id_fails_closed_without_changing_state() {
         with_sandbox_env(|dir| {
             let mut settings = NativeSettings::default();
-            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            settings.add_provider(builtin_test_profile()).unwrap();
             settings
-                .set_active_provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+                .set_active_provider(&ProviderId::new("provider-0".to_owned()).unwrap())
                 .unwrap();
             seed_settings(dir, &settings);
 
@@ -5670,7 +5389,7 @@ mod tests {
             let loaded = load_sandbox_settings(dir);
             assert_eq!(
                 loaded.active_provider.as_ref().map(ProviderId::as_str),
-                Some("vexzy")
+                Some("provider-0")
             );
         });
     }
@@ -5679,7 +5398,7 @@ mod tests {
     fn provider_add_persists_and_duplicate_fails_closed_without_state_change() {
         with_sandbox_env(|dir| {
             let mut settings = NativeSettings::default();
-            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            settings.add_provider(builtin_test_profile()).unwrap();
             seed_settings(dir, &settings);
 
             let code = run_dispatch_exit(vec![
@@ -5739,7 +5458,7 @@ mod tests {
     fn provider_add_rejects_invalid_protocol_and_base_url_without_state_change() {
         with_sandbox_env(|dir| {
             let mut settings = NativeSettings::default();
-            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            settings.add_provider(builtin_test_profile()).unwrap();
             seed_settings(dir, &settings);
             let before = fs::read_to_string(sandbox_settings_path(dir)).unwrap();
 
@@ -5775,7 +5494,7 @@ mod tests {
     fn provider_remove_persists_and_removing_the_active_profile_clears_it() {
         with_sandbox_env(|dir| {
             let mut settings = NativeSettings::default();
-            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            settings.add_provider(builtin_test_profile()).unwrap();
             settings
                 .add_provider(profile(
                     "custom-a",
@@ -5787,14 +5506,14 @@ mod tests {
                 ))
                 .unwrap();
             settings
-                .set_active_provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+                .set_active_provider(&ProviderId::new("provider-0".to_owned()).unwrap())
                 .unwrap();
             seed_settings(dir, &settings);
 
             let code = run_dispatch_exit(vec![
                 OsString::from("provider"),
                 OsString::from("remove"),
-                OsString::from("vexzy"),
+                OsString::from("provider-0"),
             ]);
             assert_eq!(code, 0);
             let loaded = load_sandbox_settings(dir);
@@ -5814,7 +5533,7 @@ mod tests {
     #[test]
     fn apply_tui_action_add_switch_and_remove_providers() {
         with_sandbox_env(|dir| {
-            seed_builtin_active(dir);
+            seed_custom_active(dir);
             let add = UiActionInput {
                 action: "provider_add".into(),
                 target: None,
@@ -5847,7 +5566,7 @@ mod tests {
 
             let switch = UiActionInput {
                 action: "provider_switch".into(),
-                target: Some("vexzy".into()),
+                target: Some("provider-0".into()),
                 value: None,
             };
             assert!(apply_tui_action(&switch).unwrap());
@@ -5856,7 +5575,7 @@ mod tests {
                     .active_provider
                     .as_ref()
                     .map(ProviderId::to_string),
-                Some("vexzy".to_owned())
+                Some("provider-0".to_owned())
             );
 
             let remove = UiActionInput {
@@ -5904,11 +5623,11 @@ mod tests {
     #[test]
     fn providers_input_projects_only_credential_references() {
         with_sandbox_env(|dir| {
-            seed_builtin_active(dir);
+            seed_custom_active(dir);
             let inputs = providers_input(&load_sandbox_settings(dir));
             assert_eq!(inputs.len(), 1);
-            assert_eq!(inputs[0].id, "vexzy");
-            assert_eq!(inputs[0].credential.as_deref(), Some("env:VEXZY_API_KEY"));
+            assert_eq!(inputs[0].id, "provider-0");
+            assert_eq!(inputs[0].credential.as_deref(), Some("env:PROVIDER_0_KEY"));
             assert!(inputs.iter().all(|input| {
                 !input.base_url.contains("forge-")
                     && input
@@ -5922,12 +5641,12 @@ mod tests {
     #[test]
     fn providers_input_reports_whether_the_credential_resolves() {
         with_sandbox_env(|dir| {
-            seed_builtin_active(dir);
-            without_env_var("VEXZY_API_KEY", || {
+            seed_custom_active(dir);
+            without_env_var("PROVIDER_0_KEY", || {
                 let inputs = providers_input(&load_sandbox_settings(dir));
                 assert_eq!(inputs[0].configured, Some(false));
             });
-            with_env_var("VEXZY_API_KEY", "forge-test-key", || {
+            with_env_var("PROVIDER_0_KEY", "forge-test-key", || {
                 let inputs = providers_input(&load_sandbox_settings(dir));
                 assert_eq!(inputs[0].configured, Some(true));
             });
@@ -5935,12 +5654,11 @@ mod tests {
     }
 
     #[test]
-    fn providers_input_exposes_custom_allowlist_and_empty_vexzy_catalog_projection() {
+    fn providers_input_exposes_allowlist_verbatim_and_fails_closed_when_empty() {
         with_sandbox_env(|dir| {
-            seed_builtin_active(dir);
-            // The built-in VEXZY profile is catalog-driven; without a live
-            // catalog its projected model list remains empty rather than
-            // inventing a vendor alias.
+            seed_custom_active(dir);
+            // A profile with an empty allowlist projects no selectable models
+            // rather than inventing a vendor alias (fail closed).
             let inputs = providers_input(&load_sandbox_settings(dir));
             assert!(inputs[0].allowlist.is_empty());
 
@@ -5973,7 +5691,7 @@ mod tests {
     #[test]
     fn model_select_action_sets_the_global_worker_model() {
         with_sandbox_env(|dir| {
-            seed_builtin_active(dir);
+            seed_custom_active(dir);
             let select = UiActionInput {
                 action: "model_select".into(),
                 target: Some("kimi-k3".into()),
@@ -5997,7 +5715,7 @@ mod tests {
     #[test]
     fn effort_select_action_sets_the_global_effort_lock() {
         with_sandbox_env(|dir| {
-            seed_builtin_active(dir);
+            seed_custom_active(dir);
             let select = UiActionInput {
                 action: "effort_select".into(),
                 target: Some("max".into()),
@@ -6551,18 +6269,18 @@ mod tests {
     fn provider_edit_updates_points_only_and_keeps_the_id() {
         with_sandbox_env(|dir| {
             let mut settings = NativeSettings::default();
-            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            settings.add_provider(builtin_test_profile()).unwrap();
             settings
-                .set_active_provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+                .set_active_provider(&ProviderId::new("provider-0".to_owned()).unwrap())
                 .unwrap();
             seed_settings(dir, &settings);
 
             let code = run_dispatch_exit(vec![
                 OsString::from("provider"),
                 OsString::from("edit"),
-                OsString::from("vexzy"),
+                OsString::from("provider-0"),
                 OsString::from("--name"),
-                OsString::from("VEXZY Edited"),
+                OsString::from("Provider 0 Edited"),
                 OsString::from("--protocol"),
                 OsString::from("anthropic-compatible"),
                 OsString::from("--base-url"),
@@ -6572,52 +6290,48 @@ mod tests {
             ]);
             assert_eq!(code, 0);
             let loaded = load_sandbox_settings(dir);
-            let vexzy = loaded
-                .provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+            let p0 = loaded
+                .provider(&ProviderId::new("provider-0".to_owned()).unwrap())
                 .unwrap();
-            assert_eq!(vexzy.name, "VEXZY Edited");
-            assert_eq!(vexzy.protocol, Protocol::AnthropicCompatible);
-            assert_eq!(vexzy.base_url, "https://edited.example/v1");
+            assert_eq!(p0.name, "Provider 0 Edited");
+            assert_eq!(p0.protocol, Protocol::AnthropicCompatible);
+            assert_eq!(p0.base_url, "https://edited.example/v1");
             assert_eq!(
-                vexzy
-                    .allowlist
-                    .iter()
-                    .map(ModelId::as_str)
-                    .collect::<Vec<_>>(),
+                p0.allowlist.iter().map(ModelId::as_str).collect::<Vec<_>>(),
                 ["model-c"]
             );
-            assert!(vexzy.active);
+            assert!(p0.active);
             assert_eq!(
                 loaded.active_provider.as_ref().map(ProviderId::as_str),
-                Some("vexzy")
+                Some("provider-0")
             );
 
             let invalid = run_dispatch_exit(vec![
                 OsString::from("provider"),
                 OsString::from("edit"),
-                OsString::from("vexzy"),
+                OsString::from("provider-0"),
                 OsString::from("--base-url"),
                 OsString::from("nonsense"),
             ]);
             assert_eq!(invalid, 1);
             let after = load_sandbox_settings(dir);
-            let vexzy = after
-                .provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+            let p0 = after
+                .provider(&ProviderId::new("provider-0".to_owned()).unwrap())
                 .unwrap();
-            assert_eq!(vexzy.base_url, "https://edited.example/v1");
+            assert_eq!(p0.base_url, "https://edited.example/v1");
         });
     }
 
     #[test]
     fn settings_key_from_env_writes_only_the_store_and_prints_only_configured() {
         with_sandbox_env(|dir| {
-            seed_builtin_active(dir);
+            seed_custom_active(dir);
             let secret = "forge-native-test-secret";
             with_env_var("MINDCODE_TEST_KEY", secret, || {
                 let code = run_dispatch_exit(vec![
                     OsString::from("settings"),
                     OsString::from("key"),
-                    OsString::from("vexzy"),
+                    OsString::from("provider-0"),
                     OsString::from("--from-env"),
                     OsString::from("MINDCODE_TEST_KEY"),
                 ]);
@@ -6636,11 +6350,11 @@ mod tests {
     #[test]
     fn settings_key_rejects_missing_and_empty_env_values() {
         with_sandbox_env(|dir| {
-            seed_builtin_active(dir);
+            seed_custom_active(dir);
             let missing = run_dispatch_exit(vec![
                 OsString::from("settings"),
                 OsString::from("key"),
-                OsString::from("vexzy"),
+                OsString::from("provider-0"),
                 OsString::from("--from-env"),
                 OsString::from("MINDCODE_ABSENT_KEY"),
             ]);
@@ -6652,7 +6366,7 @@ mod tests {
                 let empty = run_dispatch_exit(vec![
                     OsString::from("settings"),
                     OsString::from("key"),
-                    OsString::from("vexzy"),
+                    OsString::from("provider-0"),
                     OsString::from("--from-env"),
                     OsString::from("MINDCODE_EMPTY_KEY"),
                 ]);
@@ -6687,26 +6401,22 @@ mod tests {
     fn settings_allowlist_persists_and_unknown_provider_fails_closed() {
         with_sandbox_env(|dir| {
             let mut settings = NativeSettings::default();
-            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            settings.add_provider(builtin_test_profile()).unwrap();
             seed_settings(dir, &settings);
 
             let code = run_dispatch_exit(vec![
                 OsString::from("settings"),
                 OsString::from("allowlist"),
-                OsString::from("vexzy"),
+                OsString::from("provider-0"),
                 OsString::from("model-c,model-b"),
             ]);
             assert_eq!(code, 0);
             let loaded = load_sandbox_settings(dir);
-            let vexzy = loaded
-                .provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+            let p0 = loaded
+                .provider(&ProviderId::new("provider-0".to_owned()).unwrap())
                 .unwrap();
             assert_eq!(
-                vexzy
-                    .allowlist
-                    .iter()
-                    .map(ModelId::as_str)
-                    .collect::<Vec<_>>(),
+                p0.allowlist.iter().map(ModelId::as_str).collect::<Vec<_>>(),
                 ["model-c", "model-b"]
             );
 
@@ -6718,15 +6428,11 @@ mod tests {
             ]);
             assert_eq!(missing, 1);
             let after = load_sandbox_settings(dir);
-            let vexzy = after
-                .provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+            let p0 = after
+                .provider(&ProviderId::new("provider-0".to_owned()).unwrap())
                 .unwrap();
             assert_eq!(
-                vexzy
-                    .allowlist
-                    .iter()
-                    .map(ModelId::as_str)
-                    .collect::<Vec<_>>(),
+                p0.allowlist.iter().map(ModelId::as_str).collect::<Vec<_>>(),
                 ["model-c", "model-b"]
             );
         });
@@ -6735,7 +6441,7 @@ mod tests {
     #[test]
     fn settings_model_persists_and_rejects_invalid_ids() {
         with_sandbox_env(|dir| {
-            seed_builtin_active(dir);
+            seed_custom_active(dir);
             let code = run_dispatch_exit(vec![
                 OsString::from("settings"),
                 OsString::from("model"),
@@ -6763,7 +6469,7 @@ mod tests {
     #[test]
     fn settings_effort_lock_sets_unsets_and_rejects_invalid_values() {
         with_sandbox_env(|dir| {
-            seed_builtin_active(dir);
+            seed_custom_active(dir);
             let set = run_dispatch_exit(vec![
                 OsString::from("settings"),
                 OsString::from("effort"),
@@ -6804,7 +6510,7 @@ mod tests {
                 worker_effort_lock: Some(WorkerEffort::Max),
                 ..Default::default()
             };
-            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            settings.add_provider(builtin_test_profile()).unwrap();
             settings
                 .add_provider(profile(
                     "custom-a",
@@ -6844,7 +6550,7 @@ mod tests {
     fn provider_flag_selects_the_run_provider_without_persisting() {
         with_sandbox_env(|dir| {
             let mut settings = NativeSettings::default();
-            settings.add_provider(builtin_vexzy_provider()).unwrap();
+            settings.add_provider(builtin_test_profile()).unwrap();
             settings
                 .add_provider(profile(
                     "custom-a",
@@ -6856,7 +6562,7 @@ mod tests {
                 ))
                 .unwrap();
             settings
-                .set_active_provider(&ProviderId::new("vexzy".to_owned()).unwrap())
+                .set_active_provider(&ProviderId::new("provider-0".to_owned()).unwrap())
                 .unwrap();
             seed_settings(dir, &settings);
 
@@ -6872,7 +6578,7 @@ mod tests {
             let loaded = load_sandbox_settings(dir);
             assert_eq!(
                 loaded.active_provider.as_ref().map(ProviderId::as_str),
-                Some("vexzy")
+                Some("provider-0")
             );
         });
     }
@@ -6880,7 +6586,7 @@ mod tests {
     #[test]
     fn provider_flag_unknown_id_fails_closed() {
         with_sandbox_env(|dir| {
-            seed_builtin_active(dir);
+            seed_custom_active(dir);
             let code = run_dispatch_exit(vec![
                 OsString::from("--provider"),
                 OsString::from("ghost"),
@@ -6900,7 +6606,7 @@ mod tests {
     #[test]
     fn provider_flag_missing_value_fails_closed() {
         with_sandbox_env(|dir| {
-            seed_builtin_active(dir);
+            seed_custom_active(dir);
             let code = run_dispatch_exit(vec![OsString::from("--provider")]);
             assert_eq!(code, 1);
             let code =
@@ -6912,10 +6618,10 @@ mod tests {
     #[test]
     fn auth_status_with_env_credential_is_configured_and_secret_free() {
         with_sandbox_env(|dir| {
-            seed_builtin_active(dir);
+            seed_custom_active(dir);
             let secret = "forge-auth-env-secret";
-            without_env_var(API_KEY_ENV, || {
-                with_env_var(API_KEY_ENV, secret, || {
+            without_env_var("PROVIDER_0_KEY", || {
+                with_env_var("PROVIDER_0_KEY", secret, || {
                     let code =
                         run_dispatch_exit(vec![OsString::from("auth"), OsString::from("status")]);
                     assert_eq!(code, 0);
@@ -6927,10 +6633,10 @@ mod tests {
             let text = serde_json::to_string(&value).unwrap();
             assert!(text.contains("\"credential\":\"configured\""));
             assert!(text.contains("\"authMethod\":\"provider_credential\""));
-            assert!(text.contains("\"apiProvider\":\"vexzy\""));
-            assert!(text.contains("\"id\":\"vexzy\""));
+            assert!(text.contains("\"apiProvider\":\"provider-0\""));
+            assert!(text.contains("\"id\":\"provider-0\""));
             assert!(text.contains("\"protocol\":\"openai-compatible\""));
-            assert!(text.contains("\"credential\":\"env:VEXZY_API_KEY\""));
+            assert!(text.contains("\"credential\":\"env:PROVIDER_0_KEY\""));
             assert!(!text.contains(secret));
             assert!(!text.contains("forge-"));
         });
@@ -6976,8 +6682,8 @@ mod tests {
     #[test]
     fn auth_status_missing_credential_fails_closed() {
         with_sandbox_env(|dir| {
-            seed_builtin_active(dir);
-            without_env_var(API_KEY_ENV, || {
+            seed_custom_active(dir);
+            without_env_var("PROVIDER_0_KEY", || {
                 let code =
                     run_dispatch_exit(vec![OsString::from("auth"), OsString::from("status")]);
                 assert_eq!(code, 1);
@@ -6993,13 +6699,10 @@ mod tests {
     #[test]
     fn auth_status_without_any_active_provider_fails_closed() {
         with_sandbox_env(|dir| {
-            // First-run seeds VEXZY active; remove it so no profile is
-            // active, then the command fails closed regardless of any env
-            // credential in the ambient environment.
-            let mut settings = load_sandbox_settings(dir);
-            settings
-                .remove_provider(&ProviderId::new(BUILTIN_VEXZY_PROVIDER_ID.to_owned()).unwrap())
-                .unwrap();
+            // First-run state has no provider profiles; the command fails
+            // closed regardless of any ambient environment credential.
+            let settings = load_sandbox_settings(dir);
+            assert!(settings.providers().is_empty());
             seed_settings(dir, &settings);
 
             let code = run_dispatch_exit(vec![OsString::from("auth"), OsString::from("status")]);
@@ -7007,47 +6710,6 @@ mod tests {
             let code = run_dispatch_exit(vec![OsString::from("hello")]);
             assert_eq!(code, 1);
         });
-    }
-
-    fn catalog_fixture() -> String {
-        json!({
-            "object": "list",
-            "data": [
-                {
-                    "id": "worker-tools",
-                    "available": true,
-                    "capabilities": {"tools": true},
-                    "supported_reasoning_efforts": ["none", "medium", "max"]
-                },
-                {
-                    "id": "worker-stale",
-                    "available": false,
-                    "capabilities": {"tools": true},
-                    "supported_reasoning_efforts": ["max"]
-                },
-                {
-                    "id": "worker-no-tools",
-                    "available": true,
-                    "capabilities": {"tools": false},
-                    "supported_reasoning_efforts": ["max"]
-                }
-            ]
-        })
-        .to_string()
-    }
-
-    #[test]
-    fn catalog_projection_lists_only_eligible_models_without_echoing_input() {
-        let source = catalog_fixture();
-        let output = eligible_models_output(&source).unwrap();
-        assert_eq!(output["provider"], "vexzy");
-        assert_eq!(output["models"][0]["id"], "worker-tools");
-        assert_eq!(
-            output["models"][0]["allowedEfforts"],
-            json!(["none", "medium", "max"])
-        );
-        assert_eq!(output["models"].as_array().unwrap().len(), 1);
-        assert!(!output.to_string().contains("supported_reasoning_efforts"));
     }
 
     #[test]
@@ -7139,50 +6801,6 @@ mod tests {
     }
 
     #[test]
-    fn worker_effort_validation_is_exact_and_supports_off() {
-        let source = catalog_fixture();
-        let off = worker_effort_output(&source, "worker-tools", Some("off")).unwrap();
-        assert_eq!(off["workerEffortLock"], serde_json::Value::Null);
-        let locked = worker_effort_output(&source, "worker-tools", Some("max")).unwrap();
-        assert_eq!(locked["workerEffortLock"], "max");
-        assert!(worker_effort_output(&source, "worker-tools", Some("low")).is_err());
-        assert!(worker_effort_output(&source, "worker-stale", None).is_err());
-        assert!(worker_effort_output(&source, "worker-tools", Some("auto")).is_err());
-    }
-
-    #[test]
-    fn supplied_catalog_errors_and_outputs_never_echo_api_keys() {
-        let secret = "forge-private-test-secret";
-        let error = eligible_models_output(secret).unwrap_err();
-        assert!(!error.contains(secret));
-        assert_eq!(error, "supplied VEXZY catalog is invalid");
-    }
-
-    #[test]
-    fn model_and_effort_parsers_accept_the_documented_subcommands() {
-        let model = ModelArgs::try_parse_from([
-            "mindcode model",
-            "eligible",
-            "--catalog",
-            "{\"object\":\"list\",\"data\":[]}",
-        ])
-        .unwrap();
-        assert!(matches!(model.command, ModelCommand::Eligible(_)));
-        let effort = EffortArgs::try_parse_from([
-            "mindcode effort",
-            "worker",
-            "--catalog",
-            "{\"object\":\"list\",\"data\":[]}",
-            "--model",
-            "worker-tools",
-            "--lock",
-            "off",
-        ])
-        .unwrap();
-        assert!(matches!(effort.command, EffortCommand::Worker(_)));
-    }
-
-    #[test]
     fn root_help_no_longer_claims_chat_is_unmigrated() {
         let help = RootArgs::command().render_long_help().to_string();
         assert!(!help.contains("not migrated"));
@@ -7257,7 +6875,7 @@ mod tests {
     #[test]
     fn tui_snapshot_keeps_hint_until_first_turn() {
         with_sandbox_env(|dir| {
-            seed_builtin_active(dir);
+            seed_custom_active(dir);
             let empty = tui_snapshot(&[], SessionStats::default(), &[]);
             assert_eq!(empty.transcript.len(), 1);
             let TranscriptInput::Entry { role, text, .. } = &empty.transcript[0] else {
@@ -7277,7 +6895,7 @@ mod tests {
     #[test]
     fn tui_snapshot_marks_the_client_as_writer_not_observer() {
         with_sandbox_env(|dir| {
-            seed_builtin_active(dir);
+            seed_custom_active(dir);
             // The projection defaults to `observer` when the mode is omitted;
             // the native TUI is always the writer, otherwise the composer is
             // rendered read-only and input is rejected.
@@ -7295,7 +6913,7 @@ mod tests {
     fn tui_slash_provider_remove_allowlist_and_status_commands() {
         with_sandbox_env(|dir| {
             tokio::runtime::Runtime::new().unwrap().block_on(async {
-                seed_builtin_active(dir);
+                seed_custom_active(dir);
                 let mut settings = load_sandbox_settings(dir);
                 settings
                     .add_provider(profile(
@@ -7347,22 +6965,22 @@ mod tests {
                 let provider = loaded.provider(&id).unwrap();
                 assert!(provider.allowlist.is_empty());
 
-                // /eligible on the catalog-driven VEXZY active profile.
+                // /eligible on the active profile.
                 assert!(dispatch_tui_input("/eligible", &mut transcript)
                     .await
                     .unwrap());
                 let TranscriptInput::Entry { text, .. } = transcript.entries.last().unwrap() else {
                     panic!("expected entry");
                 };
-                assert!(text.contains("vexzy"));
+                assert!(text.contains("provider-0"));
 
                 // /auth resolves fail-closed without a key and stays secret-free.
-                let had_vexzy_key = env::var_os("VEXZY_API_KEY");
-                env::remove_var("VEXZY_API_KEY");
+                let had_provider_key = env::var_os("PROVIDER_0_KEY");
+                env::remove_var("PROVIDER_0_KEY");
                 assert!(dispatch_tui_input("/auth", &mut transcript).await.unwrap());
-                match had_vexzy_key {
-                    Some(value) => env::set_var("VEXZY_API_KEY", value),
-                    None => env::remove_var("VEXZY_API_KEY"),
+                match had_provider_key {
+                    Some(value) => env::set_var("PROVIDER_0_KEY", value),
+                    None => env::remove_var("PROVIDER_0_KEY"),
                 }
                 let TranscriptInput::Entry { text, .. } = transcript.entries.last().unwrap() else {
                     panic!("expected entry");
@@ -7377,7 +6995,7 @@ mod tests {
                 let TranscriptInput::Entry { text, .. } = transcript.entries.last().unwrap() else {
                     panic!("expected entry");
                 };
-                assert!(text.contains("active provider: vexzy"));
+                assert!(text.contains("active provider: provider-0"));
 
                 // /doctor, /setup-token and /update are transcript lines.
                 assert!(dispatch_tui_input("/doctor", &mut transcript)
@@ -7425,7 +7043,7 @@ mod tests {
     fn tui_slash_model_and_effort_persist_and_report() {
         with_sandbox_env(|dir| {
             tokio::runtime::Runtime::new().unwrap().block_on(async {
-                seed_builtin_active(dir);
+                seed_custom_active(dir);
                 let mut transcript = TuiTranscript::default();
 
                 assert!(dispatch_tui_input("/model model-c", &mut transcript)
@@ -7465,7 +7083,7 @@ mod tests {
     fn tui_slash_provider_use_switches_active_profile() {
         with_sandbox_env(|dir| {
             tokio::runtime::Runtime::new().unwrap().block_on(async {
-                seed_builtin_active(dir);
+                seed_custom_active(dir);
                 let mut settings = load_sandbox_settings(dir);
                 settings
                     .add_provider(profile(
@@ -7502,7 +7120,7 @@ mod tests {
     fn tui_slash_help_and_unknown_are_transcript_lines() {
         with_sandbox_env(|dir| {
             tokio::runtime::Runtime::new().unwrap().block_on(async {
-                seed_builtin_active(dir);
+                seed_custom_active(dir);
                 let mut transcript = TuiTranscript::default();
                 assert!(dispatch_tui_input("/help", &mut transcript).await.unwrap());
                 assert!(dispatch_tui_input("/nope", &mut transcript).await.unwrap());
@@ -7579,7 +7197,7 @@ mod tests {
     fn tui_slash_permissions_sets_and_reports_the_session_tier() {
         with_sandbox_env(|dir| {
             tokio::runtime::Runtime::new().unwrap().block_on(async {
-                seed_builtin_active(dir);
+                seed_custom_active(dir);
                 let mut transcript = TuiTranscript::default();
                 let mut tier = PermissionTier::default();
 
@@ -7779,7 +7397,7 @@ mod tests {
         };
 
         with_sandbox_env(|dir| {
-            seed_builtin_active(dir);
+            seed_custom_active(dir);
             tokio::runtime::Runtime::new().unwrap().block_on(async {
                 let temp = tempdir().unwrap();
                 let socket = temp.path().join("native-tui-composer.sock");
@@ -7950,8 +7568,8 @@ mod tests {
             select_chat_model(&settings, &custom, None).unwrap(),
             "model-b"
         );
-        let vexzy = builtin_vexzy_provider();
-        assert!(select_chat_model(&NativeSettings::default(), &vexzy, None).is_err());
+        let p0 = builtin_test_profile();
+        assert!(select_chat_model(&NativeSettings::default(), &p0, None).is_err());
         assert!(select_chat_model(&NativeSettings::default(), &custom, Some("override")).is_err());
         let empty = profile(
             "empty",

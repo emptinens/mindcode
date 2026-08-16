@@ -17,8 +17,7 @@
 
 use futures_util::stream::{unfold, Stream};
 use futures_util::StreamExt;
-use mindcode_provider::{ModelId, Protocol, SecretKey};
-use mindcode_vexzy::WorkerEffort;
+use mindcode_provider::{ModelId, Protocol, SecretKey, WorkerEffort};
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mindcode-settings", "crates/mindcode-vexzy", "crates/mindcode-provider", "crates/mindcode-transport", "crates/mindcode-protocol", "crates/mindcode-state", "crates/mindcoded", "crates/mindcode-core-tools", "crates/mindcode-worker", "crates/mindcode-native", "crates/mindcode-tui", "crates/mindcode-tui-server"]
+members = ["crates/mindcode-settings", "crates/mindcode-provider", "crates/mindcode-transport", "crates/mindcode-protocol", "crates/mindcode-state", "crates/mindcoded", "crates/mindcode-core-tools", "crates/mindcode-worker", "crates/mindcode-native", "crates/mindcode-tui", "crates/mindcode-tui-server"]
 resolver = "2"
 
 [workspace.package]

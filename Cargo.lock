@@ -986,7 +986,6 @@ dependencies = [
  "mindcode-transport",
  "mindcode-tui",
  "mindcode-tui-server",
- "mindcode-vexzy",
  "mindcode-worker",
  "mindcoded",
  "serde_json",
@@ -1018,7 +1017,6 @@ name = "mindcode-settings"
 version = "0.1.3"
 dependencies = [
  "mindcode-provider",
- "mindcode-vexzy",
  "serde",
  "serde_json",
  "tempfile",
@@ -1044,7 +1042,6 @@ dependencies = [
  "bytes",
  "futures-util",
  "mindcode-provider",
- "mindcode-vexzy",
  "reqwest",
  "serde",
  "serde_json",
@@ -1069,14 +1066,6 @@ dependencies = [
  "mindcode-protocol",
  "tempfile",
  "tokio",
-]
-
-[[package]]
-name = "mindcode-vexzy"
-version = "0.1.3"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]

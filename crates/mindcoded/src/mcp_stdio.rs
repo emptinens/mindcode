@@ -1386,26 +1386,7 @@ fn is_allowed_inherited_env_key(key: &OsStr) -> bool {
 
 fn is_forbidden_env_key(key: &OsStr) -> bool {
     let key = key.to_string_lossy().to_ascii_uppercase();
-    if key == "AUTHORIZATION" || key.ends_with("_AUTHORIZATION") || key == "VEXZY_API_KEY" {
-        return true;
-    }
-
-    key.contains("VEXZY")
-        && [
-            "KEY",
-            "TOKEN",
-            "SECRET",
-            "PASSWORD",
-            "PASSWD",
-            "AUTH",
-            "CREDENTIAL",
-            "BEARER",
-            "COOKIE",
-            "PRIVATE",
-            "CERT",
-        ]
-        .iter()
-        .any(|marker| key.contains(marker))
+    key == "AUTHORIZATION" || key.ends_with("_AUTHORIZATION")
 }
 
 fn os_len(value: &OsStr) -> usize {
@@ -2014,7 +1995,7 @@ mod tests {
                 "/bin/cat",
                 Vec::<String>::new(),
                 cwd(),
-                vec![("VEXZY_API_KEY".to_owned(), "secret-value".to_owned())],
+                vec![("AUTHORIZATION".to_owned(), "secret-value".to_owned())],
             )
             .await
             .unwrap_err();
@@ -2047,7 +2028,9 @@ mod tests {
         assert!(is_allowed_inherited_env_key(OsStr::new("PATH")));
         assert!(is_allowed_inherited_env_key(OsStr::new("LC_ALL")));
         assert!(!is_allowed_inherited_env_key(OsStr::new("OPENAI_API_KEY")));
-        assert!(!is_allowed_inherited_env_key(OsStr::new("VEXZY_API_KEY")));
+        assert!(!is_allowed_inherited_env_key(OsStr::new(
+            "ANTHROPIC_API_KEY"
+        )));
         assert_eq!(MAX_MESSAGE_BYTES, 4 * 1024 * 1024);
         assert_eq!(MAX_ARGUMENT_BYTES, 8 * 1024);
         assert_eq!(MAX_ENV_VALUE_BYTES, 32 * 1024);

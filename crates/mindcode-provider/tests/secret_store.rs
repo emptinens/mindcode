@@ -21,7 +21,7 @@ fn store_write_read_remove_round_trip() {
     let path = temp.path().join("config/mindcode/credentials.json");
 
     let mut store = SecretStore::new();
-    let id = ProviderId::new("vexzy".to_owned()).unwrap();
+    let id = ProviderId::new("custom-a".to_owned()).unwrap();
     store.write(id.clone(), SecretKey::new("forge-value".to_owned()));
     save_store(&path, &store).unwrap();
 
