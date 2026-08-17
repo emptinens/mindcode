@@ -36,7 +36,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{atomic::AtomicBool, Arc, Mutex, OnceLock},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     net::{unix::OwnedWriteHalf, UnixListener, UnixStream},
@@ -117,6 +117,10 @@ const SERVER_CAPABILITIES: &[&str] = &[
     "mcp.stdio.close",
     "mcp.stdio.status",
     "auth.token",
+    "worker.spawn",
+    "worker.approval.list",
+    "worker.approval.decide",
+    "worker.status",
 ];
 
 type SharedWriter = Arc<AsyncMutex<OwnedWriteHalf>>;
@@ -1309,6 +1313,39 @@ struct McpStdioStatusParams {
     connection_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkerSpawnParams {
+    session_id: String,
+    task: String,
+    #[serde(default)]
+    worker_id: Option<String>,
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+    #[serde(default)]
+    tier: Option<mindcode_worker::PermissionTier>,
+    #[serde(default)]
+    allow_unsafe_shell: bool,
+    #[serde(default)]
+    allow_network: bool,
+    #[serde(default)]
+    effort: Option<mindcode_settings::WorkerEffort>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkerApprovalListParams {
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkerApprovalDecideParams {
+    approval_id: String,
+    decision: String,
+}
+
 #[derive(Debug, Serialize)]
 struct McpStdioRpcStatus {
     connection_id: String,
@@ -2177,6 +2214,104 @@ async fn execute_request(
                 Some(Err(error)) => Ok(RequestResult::state_error(error)),
             }
         }
+        "worker.spawn" => {
+            let request = match parse_params::<WorkerSpawnParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let cwd = match request.cwd {
+                Some(path) => path,
+                None => {
+                    let index = Arc::clone(&state.session_index);
+                    match index.get(&request.session_id) {
+                        Ok(Some(s)) => PathBuf::from(s.project_path),
+                        _ => env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                    }
+                }
+            };
+            let worker_id = request.worker_id.unwrap_or_else(|| {
+                let id_num = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                format!("worker-{id_num}")
+            });
+            let worker_request = worker_runtime::WorkerRequest {
+                worker_id: worker_id.clone(),
+                session_id: request.session_id.clone(),
+                task: request.task.clone(),
+                cwd,
+                tier: request
+                    .tier
+                    .unwrap_or(mindcode_worker::PermissionTier::AskEverything),
+                allow_unsafe_shell: request.allow_unsafe_shell,
+                allow_network: request.allow_network,
+                effort: request.effort,
+            };
+            let settings = match mindcode_runtime::load_native_settings() {
+                Ok(s) => s,
+                Err(err) => return Ok(RequestResult::error("settings_error", err.to_string())),
+            };
+            let gate = state.worker_runtime.gate_for(request.session_id.clone());
+            let prepared = match state
+                .worker_runtime
+                .prepare(worker_request, gate, &settings)
+                .await
+            {
+                Ok(p) => p,
+                Err(err) => {
+                    return Ok(RequestResult::error(
+                        "worker_prepare_error",
+                        err.to_string(),
+                    ))
+                }
+            };
+            let runtime = Arc::clone(&state.worker_runtime);
+            let task_text = request.task.clone();
+            let effort_str = request.effort.map(|e| e.as_str().to_string());
+            tokio::spawn(async move {
+                let _report = runtime.run(prepared).await;
+            });
+            RequestResult::serialized(json!({
+                "worker_id": worker_id,
+                "status": "spawned",
+                "task": task_text,
+                "effort": effort_str,
+            }))
+        }
+        "worker.approval.list" => {
+            let request = match parse_params::<WorkerApprovalListParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let approvals = state
+                .worker_runtime
+                .pending_approvals(request.session_id.as_deref());
+            RequestResult::serialized(json!({ "approvals": approvals }))
+        }
+        "worker.approval.decide" => {
+            let request = match parse_params::<WorkerApprovalDecideParams>(params) {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let decision = match request.decision.as_str() {
+                "allow-once" | "allow_once" | "allow" => {
+                    mindcode_worker::ApprovalDecision::AllowOnce
+                }
+                "allow-worker" | "allow_worker" => mindcode_worker::ApprovalDecision::AllowWorker,
+                _ => mindcode_worker::ApprovalDecision::Deny,
+            };
+            let resolved = state
+                .worker_runtime
+                .decide_approval(&request.approval_id, decision);
+            RequestResult::serialized(json!({ "success": resolved }))
+        }
+        "worker.status" => {
+            let max_concurrent = state.worker_runtime.max_concurrent();
+            RequestResult::serialized(json!({
+                "max_concurrent": max_concurrent,
+            }))
+        }
         _ => Ok(RequestResult::error(
             "unsupported_method",
             format!("unsupported daemon method: {method}"),
@@ -2213,6 +2348,8 @@ fn is_mutation_method(method: &str) -> bool {
             | "mcp.stdio.open"
             | "mcp.stdio.send"
             | "mcp.stdio.close"
+            | "worker.spawn"
+            | "worker.approval.decide"
     )
 }
 
@@ -3294,6 +3431,56 @@ mod tests {
             after_close,
             ServerMessage::Response { ok: true, result: Some(result), .. }
                 if result["message"].is_null() && result["closed"] == true
+        ));
+
+        shutdown(&mut stream).await;
+        drop(stream);
+        task.await.unwrap().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worker_rpc_endpoints_manage_status_and_approvals() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("run/mindcoded.sock");
+        let task = tokio::spawn(Daemon::new(test_config(path.clone())).run());
+        wait_for_socket(&path).await;
+        let mut stream = connect_and_handshake(&path).await;
+
+        let status = request(&mut stream, "worker-status-1", "worker.status", None).await;
+        assert!(matches!(
+            status,
+            ServerMessage::Response { ok: true, result: Some(result), .. }
+                if result["max_concurrent"].as_u64().is_some_and(|max| max > 0)
+        ));
+
+        let approvals = request(
+            &mut stream,
+            "worker-approvals-1",
+            "worker.approval.list",
+            Some(json!({ "session_id": "session-1" })),
+        )
+        .await;
+        assert!(matches!(
+            approvals,
+            ServerMessage::Response { ok: true, result: Some(result), .. }
+                if result["approvals"].as_array().is_some_and(|items| items.is_empty())
+        ));
+
+        let decide = request(
+            &mut stream,
+            "worker-decide-1",
+            "worker.approval.decide",
+            Some(json!({
+                "approval_id": "non-existent-perm",
+                "decision": "deny"
+            })),
+        )
+        .await;
+        assert!(matches!(
+            decide,
+            ServerMessage::Response { ok: true, result: Some(result), .. }
+                if result["success"] == false
         ));
 
         shutdown(&mut stream).await;

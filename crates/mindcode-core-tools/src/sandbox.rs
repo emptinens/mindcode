@@ -117,9 +117,24 @@ impl SandboxConfig {
     }
 }
 
-/// Whether a `bwrap` binary is reachable on `$PATH`.
+static BWRAP_FUNCTIONAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Whether a functional `bwrap` binary is reachable and able to create user namespaces.
 pub fn bwrap_available() -> bool {
-    find_bwrap().is_some()
+    *BWRAP_FUNCTIONAL.get_or_init(|| {
+        let Some(bwrap) = find_bwrap() else {
+            return false;
+        };
+        // Verify bwrap can actually create user namespaces in the current environment
+        // (inside restricted containers/sandboxes, bwrap exists but unshare returns ENOSYS).
+        std::process::Command::new(bwrap)
+            .args(["--ro-bind", "/", "/", "--", "true"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
 }
 
 fn find_bwrap() -> Option<PathBuf> {
@@ -223,6 +238,12 @@ pub async fn run_sandboxed(
         return Err(CoreToolError::new(
             CoreToolErrorCode::InvalidArgv,
             "sandboxed command must not be empty",
+        ));
+    }
+    if !bwrap_available() {
+        return Err(CoreToolError::new(
+            CoreToolErrorCode::ProcessSpawn,
+            "bwrap is not available; the sandbox cannot run",
         ));
     }
     let bwrap = find_bwrap().ok_or_else(|| {

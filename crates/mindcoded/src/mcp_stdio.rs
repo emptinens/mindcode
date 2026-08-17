@@ -625,9 +625,32 @@ impl McpStdioSupervisor {
         inherited_env: &[(OsString, OsString)],
         explicit_env: &[(OsString, OsString)],
     ) -> Result<(Arc<Connection>, ChildStdout, ChildStderr), McpStdioError> {
+        let (command, args) = if mindcode_core_tools::bwrap_available() {
+            let config_home = match mindcode_runtime::native_settings_path() {
+                Ok(path) => path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| PathBuf::from(".")),
+                Err(_) => PathBuf::from("."),
+            };
+            let sandbox_config =
+                mindcode_core_tools::SandboxConfig::new(cwd.to_path_buf(), config_home)
+                    .with_network(mindcode_core_tools::NetworkPolicy::Deny);
+            let mut cmd_vec = vec![command.to_string_lossy().into_owned()];
+            for arg in args {
+                cmd_vec.push(arg.to_string_lossy().into_owned());
+            }
+            let bwrap_argv = mindcode_core_tools::build_bwrap_argv(&sandbox_config, &cmd_vec);
+            let bwrap_bin = OsString::from(&bwrap_argv[0]);
+            let bwrap_args: Vec<OsString> = bwrap_argv[1..].iter().map(OsString::from).collect();
+            (bwrap_bin, bwrap_args)
+        } else {
+            (command, args.to_vec())
+        };
+
         let mut process = Command::new(command);
         process
-            .args(args)
+            .args(&args)
             .current_dir(cwd)
             .env_clear()
             .kill_on_drop(true)

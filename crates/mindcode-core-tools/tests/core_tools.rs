@@ -107,10 +107,11 @@ async fn successful_parent_does_not_wait_for_setsid_descendant_holding_pipes() {
     let dir = TempDir::new().unwrap();
     let pid_file = dir.path().join("successful-descendant.pid");
     let command = format!(
-        r#"set -m; sleep 30 & echo $! > '{}'; exit 0"#,
+        r#"setsid sleep 30 & echo $! > '{}'; exit 0"#,
         pid_file.display()
     );
-    let req = request(vec!["sh".into(), "-c".into(), command], dir.path());
+    let mut req = request(vec!["sh".into(), "-c".into(), command], dir.path());
+    req.timeout_ms = 5_000;
 
     let started = std::time::Instant::now();
     let result = process_run(req, CancellationToken::new()).await.unwrap();

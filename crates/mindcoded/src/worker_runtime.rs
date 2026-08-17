@@ -11,15 +11,21 @@ use anyhow::{anyhow, Result};
 use mindcode_runtime::{native_settings_path, TransportModelClient};
 use mindcode_settings::{NativeSettings, WorkerEffort};
 use mindcode_worker::{
-    ActiveScopes, ApprovalGate, HookSet, ModelClient, OwnershipGuard, PermissionTier, PoolOutcome,
-    ScopeLease, WorkerAgent, WorkerPool, WorkerReport, DEFAULT_WORKER_CONTEXT_TOKEN_BUDGET,
+    ActiveScopes, ApprovalDecision, ApprovalGate, ApprovalRequest, DecisionFuture, HookSet,
+    ModelClient, OwnershipGuard, PermissionTier, PoolOutcome, ScopeLease, WorkerAgent, WorkerPool,
+    WorkerReport, DEFAULT_WORKER_CONTEXT_TOKEN_BUDGET,
 };
+use serde::Serialize;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::Duration,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 /// Inputs for one daemon-side worker launch. Everything is secret-free: the
@@ -40,10 +46,68 @@ pub struct WorkerRequest {
 /// [`ScopeLease`] held here releases the disjoint reservation when the worker
 /// is dropped or finishes, so an aborted worker can never pin ownership.
 pub struct PreparedWorker {
-    worker_id: String,
-    task: String,
+    pub worker_id: String,
+    pub task: String,
     agent: WorkerAgent,
     _scope_lease: ScopeLease,
+}
+
+/// Pending tool execution approval waiting for client/TUI decision.
+pub struct PendingApproval {
+    pub id: String,
+    pub session_id: String,
+    pub worker_id: String,
+    pub tool: String,
+    pub target: String,
+    pub requested_at_ms: u64,
+    pub sender: oneshot::Sender<ApprovalDecision>,
+}
+
+/// Secret-free serializable view of a pending approval.
+#[derive(Clone, Debug, Serialize)]
+pub struct PendingApprovalInfo {
+    pub id: String,
+    pub session_id: String,
+    pub worker_id: String,
+    pub tool: String,
+    pub target: String,
+    pub requested_at_ms: u64,
+}
+
+/// Interactive approval gate bridging daemon-side worker execution with
+/// the RPC control layer.
+pub struct DaemonApprovalGate {
+    session_id: String,
+    approvals: Arc<Mutex<BTreeMap<String, PendingApproval>>>,
+    next_id: Arc<AtomicU64>,
+}
+
+impl ApprovalGate for DaemonApprovalGate {
+    fn decide(&self, request: ApprovalRequest) -> DecisionFuture {
+        let (sender, receiver) = oneshot::channel();
+        let id_num = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let id = format!("perm-{id_num}");
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let pending = PendingApproval {
+            id: id.clone(),
+            session_id: self.session_id.clone(),
+            worker_id: request.worker_id,
+            tool: request.tool,
+            target: request.target,
+            requested_at_ms: now_ms,
+            sender,
+        };
+
+        if let Ok(mut map) = self.approvals.lock() {
+            map.insert(id, pending);
+        }
+
+        Box::pin(async move { receiver.await.unwrap_or(ApprovalDecision::Deny) })
+    }
 }
 
 /// Bounded daemon-side worker executor keyed by session.
@@ -51,6 +115,8 @@ pub struct WorkerRuntime {
     pool: WorkerPool,
     config_home: PathBuf,
     scopes: Arc<Mutex<BTreeMap<String, ActiveScopes>>>,
+    approvals: Arc<Mutex<BTreeMap<String, PendingApproval>>>,
+    next_approval_id: Arc<AtomicU64>,
 }
 
 impl WorkerRuntime {
@@ -70,6 +136,8 @@ impl WorkerRuntime {
             pool,
             config_home,
             scopes: Arc::new(Mutex::new(BTreeMap::new())),
+            approvals: Arc::new(Mutex::new(BTreeMap::new())),
+            next_approval_id: Arc::new(AtomicU64::new(1)),
         })
     }
 
@@ -80,6 +148,47 @@ impl WorkerRuntime {
     /// The config home used for the ownership guard and global shell hooks.
     pub fn config_home(&self) -> &Path {
         &self.config_home
+    }
+
+    /// Obtain an interactive approval gate for the specified session.
+    pub fn gate_for(&self, session_id: String) -> Arc<dyn ApprovalGate> {
+        Arc::new(DaemonApprovalGate {
+            session_id,
+            approvals: Arc::clone(&self.approvals),
+            next_id: Arc::clone(&self.next_approval_id),
+        })
+    }
+
+    /// List all currently pending tool approvals, optionally filtered by session.
+    pub fn pending_approvals(&self, session_id: Option<&str>) -> Vec<PendingApprovalInfo> {
+        let Ok(map) = self.approvals.lock() else {
+            return Vec::new();
+        };
+        map.values()
+            .filter(|p| session_id.is_none_or(|s| p.session_id == s))
+            .map(|p| PendingApprovalInfo {
+                id: p.id.clone(),
+                session_id: p.session_id.clone(),
+                worker_id: p.worker_id.clone(),
+                tool: p.tool.clone(),
+                target: p.target.clone(),
+                requested_at_ms: p.requested_at_ms,
+            })
+            .collect()
+    }
+
+    /// Resolve a pending tool approval with the user's decision. Returns false if
+    /// the approval ID was not found or already resolved.
+    pub fn decide_approval(&self, approval_id: &str, decision: ApprovalDecision) -> bool {
+        let Ok(mut map) = self.approvals.lock() else {
+            return false;
+        };
+        if let Some(pending) = map.remove(approval_id) {
+            let _ = pending.sender.send(decision);
+            true
+        } else {
+            false
+        }
     }
 
     /// Resolve the active provider credential (env → store → fail-closed) and
