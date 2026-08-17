@@ -379,6 +379,7 @@ impl WorkerAgent {
             },
         ];
         let mut approval_cache = ApprovalCache::with_ttl(self.approval_cache_ttl);
+        let mut monitor = crate::monitor::StepMonitor::new();
         let mut saw_turn = false;
         let mut cost_known = true;
         let mut todo_gate_retried = false;
@@ -466,11 +467,27 @@ impl WorkerAgent {
                     report.status = WorkerStatus::Cancelled;
                     break;
                 }
+                let writes_before = report.files_changed.len();
+                let tests_before = report.test_runs.len();
                 let (result, command) = self
                     .execute_tool(call, &mut approval_cache, &mut report, cancel.clone())
                     .await;
                 if let Some(command) = command {
                     report.commands_run.push(command);
+                }
+                let wrote_file = report.files_changed.len() > writes_before;
+                let ran_test = report.test_runs.len() > tests_before;
+                if let Some(alert) = monitor.record_step(
+                    &call.name,
+                    &call.arguments.to_string(),
+                    wrote_file,
+                    ran_test,
+                ) {
+                    report.risks.push(format!("fail-fast alert: {alert:?}"));
+                    if alert == crate::monitor::MonitorAlert::LoopDetected {
+                        report.status = WorkerStatus::Failed;
+                        break;
+                    }
                 }
                 messages.push(ChatMessage {
                     role: "tool".to_owned(),
@@ -653,16 +670,14 @@ impl WorkerAgent {
                 // §11.1 risk filter runs before the ownership guard and before
                 // execution: `Deny` is fail-closed, `Confirm` needs one
                 // reflection turn, `Safe` goes through the normal tier gate.
-                // §13.1: `Confirm`-after-reflection and every full-access shell
-                // command run under the bwrap sandbox unless the caller opted
-                // into `--allow-unsafe-shell`.
-                let mut sandboxed = self.guard.tier() == PermissionTier::FullAccess;
+                // §6.4 / §13.1: All shell commands run under the bwrap sandbox
+                // by default unless the caller opted into `--allow-unsafe-shell`.
+                let sandboxed = true;
                 match classify(&command) {
                     ShellRisk::Deny => {
                         return Err(WorkerError::RiskDenied { command });
                     }
                     ShellRisk::Confirm => {
-                        sandboxed = true;
                         // Tier 3 (full-access) is not reflection-gated by
                         // definition (§11.1); only `Deny`/ProtectedPaths stay
                         // fail-closed there. Tiers 1–2 require exactly one

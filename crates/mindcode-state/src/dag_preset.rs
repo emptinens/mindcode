@@ -82,6 +82,15 @@ pub enum NodeStatus {
 }
 
 /// A typed handoff artifact carried on dependency edges (§12.1).  The honest
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct TestRunEvidence {
+    pub command: String,
+    pub exit_code: Option<i32>,
+    pub passed: usize,
+    pub failed: usize,
+}
+
+/// A typed handoff artifact carried on dependency edges (§12.1).  The honest
 /// `what_i_did_not_check` field is structural: an artifact that claims to have
 /// verified everything is rejected, not rewarded.
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
@@ -95,6 +104,9 @@ pub struct VerifyArtifact {
     pub confidence: f64,
     /// Every completed node this artifact covers; empty is rejected in `deep`.
     pub verified_nodes: Vec<String>,
+    /// Executable test run evidence (§7.1).
+    #[serde(default)]
+    pub test_runs: Vec<TestRunEvidence>,
 }
 
 impl VerifyArtifact {
@@ -103,6 +115,28 @@ impl VerifyArtifact {
     pub fn is_structurally_honest(&self) -> bool {
         !self.verified_nodes.is_empty() && !self.what_i_did_not_check.is_empty()
     }
+}
+
+/// Generate a Mermaid flowchart diagram representing the current DAG state (§7.3).
+pub fn generate_mermaid_dag(nodes: &[DagNode]) -> String {
+    let mut out = String::from("flowchart TD\n");
+    for node in nodes {
+        let status_str = match node.status {
+            NodeStatus::Pending => "⏳ pending",
+            NodeStatus::Runnable => "🟢 ready",
+            NodeStatus::Running => "⚡ running",
+            NodeStatus::Completed => "✅ done",
+            NodeStatus::Failed => "❌ failed",
+        };
+        let label = format!("{}: {} [{}]", node.id, node.kind.label(), status_str);
+        out.push_str(&format!("    {}[\"{}\"]\n", node.id, label));
+    }
+    for node in nodes {
+        for dep in &node.dependencies {
+            out.push_str(&format!("    {} --> {}\n", dep, node.id));
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -343,6 +377,7 @@ mod tests {
             open_questions: vec!["perf under load".to_owned()],
             confidence: 0.8,
             verified_nodes: verified.iter().map(|id| id.to_string()).collect(),
+            test_runs: vec![],
         }
     }
 
@@ -439,5 +474,16 @@ mod tests {
         assert_eq!(fix_node_for(&failed, DagPreset::Light), None);
         let running = node("impl", &[]);
         assert_eq!(fix_node_for(&running, DagPreset::Deep), None);
+    }
+
+    #[test]
+    fn generate_mermaid_dag_produces_valid_diagram() {
+        let mut a = node("node_a", &[]);
+        a.status = NodeStatus::Completed;
+        let b = node("node_b", &["node_a"]);
+        let diagram = generate_mermaid_dag(&[a, b]);
+        assert!(diagram.starts_with("flowchart TD\n"));
+        assert!(diagram.contains("node_a[\"node_a: implement [✅ done]\"]"));
+        assert!(diagram.contains("node_a --> node_b"));
     }
 }

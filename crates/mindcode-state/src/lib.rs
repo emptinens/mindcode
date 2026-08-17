@@ -3080,6 +3080,7 @@ mod tests {
                 .iter()
                 .map(|value| (*value).to_owned())
                 .collect(),
+            test_runs: vec![],
         }
     }
 

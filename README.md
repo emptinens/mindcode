@@ -2,7 +2,7 @@
 
 MindCode `0.1.4` — Rust-first Linux x64 single executable с multi-provider
 contract (amendment `2026-08-13`, `2026-08-16`): все провайдеры — обычные
-custom-профили, каждый через один из двух протоколов. Версия `0.1.2`
+custom-профили, каждый через один из двух протоколов. Версия `0.1.3`
 checkpointed в локальной истории, но ещё не tagged.
 
 ### Текущее состояние

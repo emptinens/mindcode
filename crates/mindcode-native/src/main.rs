@@ -88,7 +88,7 @@ const CONTEXT_TOKEN_BUDGET: usize = 200_000;
 /// messages become deterministic placeholders, so the provider cache prefix
 /// remains byte-stable across later turns.
 const TOFU_HOT_MESSAGES: usize = 12;
-const TOFU_PLACEHOLDER_VERSION: &str = "tofu-v2";
+const TOFU_PLACEHOLDER_VERSION: &str = "tofu-v3";
 static PROCESS_STARTED_AT: OnceLock<Instant> = OnceLock::new();
 
 fn process_boot_ms() -> u64 {
@@ -1159,6 +1159,56 @@ impl DaemonSessionControl {
         self.request("reload", json!({})).await.map(|_| ())
     }
 
+    async fn worker_spawn(
+        &self,
+        task: &str,
+        tier: PermissionTier,
+        allow_unsafe_shell: bool,
+        allow_network: bool,
+        effort: Option<WorkerEffort>,
+    ) -> Result<Value> {
+        let cwd = env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| ".".to_owned());
+        self.request(
+            "worker.spawn",
+            json!({
+                "session_id": self.session_id,
+                "task": task,
+                "cwd": cwd,
+                "tier": tier,
+                "allow_unsafe_shell": allow_unsafe_shell,
+                "allow_network": allow_network,
+                "effort": effort,
+            }),
+        )
+        .await
+    }
+
+    #[allow(dead_code)]
+    async fn worker_approval_list(&self) -> Result<Value> {
+        self.request(
+            "worker.approval.list",
+            json!({
+                "session_id": self.session_id,
+            }),
+        )
+        .await
+    }
+
+    async fn worker_approval_decide(&self, approval_id: &str, decision: &str) -> Result<bool> {
+        let result = self
+            .request(
+                "worker.approval.decide",
+                json!({
+                    "approval_id": approval_id,
+                    "decision": decision,
+                }),
+            )
+            .await?;
+        Ok(result["success"].as_bool().unwrap_or(false))
+    }
+
     async fn close(&self) {
         let lease_id = self.lease_id.lock().await.clone();
         let _ = self
@@ -1996,6 +2046,14 @@ async fn run_tui_host_session(
                             if let Some(request) = pending.lock().unwrap().requests.remove(id) {
                                 let _ = request.sender.send(decision);
                             }
+                            let decision_str = match decision {
+                                ApprovalDecision::AllowOnce => "allow-once",
+                                ApprovalDecision::AllowWorker => "allow-worker",
+                                ApprovalDecision::Deny => "deny",
+                            };
+                            let _ = processor_daemon_control
+                                .worker_approval_decide(id, decision_str)
+                                .await;
                         }
                         let current = *processor_stats.lock().unwrap();
                         let permissions = pending_permission_inputs(&pending);
@@ -2049,21 +2107,48 @@ async fn run_tui_host_session(
                             if task.is_empty() {
                                 transcript.push("system", "usage: /work <task>");
                             } else {
-                                match spawn_worker(WorkerLaunch {
-                                    session_id: &processor_session_id,
-                                    task,
-                                    tier,
-                                    allow_unsafe_shell,
-                                    allow_network,
-                                    pending: pending.clone(),
-                                    worker_event_tx: worker_event_tx.clone(),
-                                    pool: worker_pool.clone(),
-                                    active_scopes: active_scopes.clone(),
-                                })
-                                .await {
-                                    Ok(message) => transcript.push("system", message),
-                                    Err(error) => {
-                                        transcript.push("system", format!("error: {error:#}"))
+                                let ares = ares_decide_for_task(task);
+                                let daemon_result = processor_daemon_control
+                                    .worker_spawn(
+                                        task,
+                                        tier,
+                                        allow_unsafe_shell,
+                                        allow_network,
+                                        Some(ares.effort),
+                                    )
+                                    .await;
+                                match daemon_result {
+                                    Ok(res) => {
+                                        let worker_id =
+                                            res["worker_id"].as_str().unwrap_or("worker");
+                                        transcript.push(
+                                            "system",
+                                            format!(
+                                                "spawned {worker_id} via daemon: {task} (Ares effort={} score={})",
+                                                ares.effort.as_str(),
+                                                ares.score
+                                            ),
+                                        );
+                                    }
+                                    Err(_) => {
+                                        match spawn_worker(WorkerLaunch {
+                                            session_id: &processor_session_id,
+                                            task,
+                                            tier,
+                                            allow_unsafe_shell,
+                                            allow_network,
+                                            pending: pending.clone(),
+                                            worker_event_tx: worker_event_tx.clone(),
+                                            pool: worker_pool.clone(),
+                                            active_scopes: active_scopes.clone(),
+                                        })
+                                        .await
+                                        {
+                                            Ok(message) => transcript.push("system", message),
+                                            Err(error) => {
+                                                transcript.push("system", format!("error: {error:#}"))
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -3487,6 +3572,42 @@ fn conversation_messages_with_truncation(
 /// detector, and the original transcript remains durable on disk. Because the
 /// same old message always maps to the same bytes, adding later turns does not
 /// invalidate the provider's cached prefix after the one-time compaction.
+fn extract_salient_summary(content: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('#')
+            || trimmed.starts_with("spawned")
+            || trimmed.starts_with("test run:")
+            || trimmed.starts_with("Worker report")
+            || parts.is_empty()
+        {
+            parts.push(trimmed);
+        }
+        if parts.len() >= 3 {
+            break;
+        }
+    }
+    if parts.is_empty() {
+        "empty".to_owned()
+    } else {
+        let joined = parts.join("; ");
+        if joined.chars().count() > 160 {
+            let mut truncated: String = joined.chars().take(157).collect();
+            truncated.push_str("...");
+            truncated
+        } else {
+            joined
+        }
+    }
+}
+
+/// Replace cold history with stable placeholders while retaining the hot tail (§6.2 ToFu L3).
+/// The placeholder combines an extractive summary with a change digest, so the
+/// model retains salient intent while the provider's cached prefix remains byte-stable.
 fn cache_aware_compact_cold_history(
     mut messages: Vec<ChatMessage>,
     hot_messages: usize,
@@ -3498,14 +3619,15 @@ fn cache_aware_compact_cold_history(
     for message in messages.iter_mut().take(cold_count) {
         if message
             .content
-            .starts_with("[tofu-v2 cold-history placeholder ")
+            .starts_with(&format!("[{TOFU_PLACEHOLDER_VERSION} cold-history"))
         {
             continue;
         }
         let digest = stable_history_digest(&message.role, &message.content);
+        let summary = extract_salient_summary(&message.content);
         let original_chars = message.content.chars().count();
         message.content = format!(
-            "[{TOFU_PLACEHOLDER_VERSION} cold-history placeholder role={} chars={} digest={digest:016x}; original content is retained in the session transcript]",
+            "[{TOFU_PLACEHOLDER_VERSION} cold-history placeholder role={} chars={} digest={digest:016x} summary=\"{summary}\"; full transcript retained on disk]",
             message.role, original_chars
         );
     }
@@ -5452,8 +5574,8 @@ mod tests {
         }
         assert!(first[0]
             .content
-            .starts_with("[tofu-v2 cold-history placeholder"));
-        assert!(!first[0].content.contains("transcript message 0"));
+            .starts_with("[tofu-v3 cold-history placeholder"));
+        assert!(first[0].content.contains("summary="));
         assert_eq!(first[11].content, "cold or hot transcript message 11");
         assert_eq!(first[14].content, "cold or hot transcript message 14");
     }
